@@ -255,7 +255,7 @@ We evaluate TFv6 on the [Bench2Drive](https://github.com/autonomousvision/Bench2
 | HiP-AD          | ICCV25   |   86.77   |   69.09   |   50.00   |   84.44   |   83.33   |   40.00   |   72.10   |
 | BridgeDrive     | -        |   86.87   |   72.27   |   63.50   |   57.77   |   83.33   |   40.00   |   82.11   |
 | DiffRefiner     | AAAI26   |   87.10   |   71.40   |   63.80   |   60.00   |   85.00   |   50.00   |   86.30   |
-| **TFv6 (Ours)** | **Ours** | **95.28** | **86.80** | **72.50** | **97.77** | **91.66** |   40.00   | **89.47** |
+| **TFv6 (Ours)** | -        | **95.28** | **86.80** | **72.50** | **97.77** | **91.66** |   40.00   | **89.47** |
 
 <em>DS = Driving Score, SR = Success Rate; Metrics follow the CARLA Leaderboard 2.0 protocol. Higher is better.</em>
 
