@@ -25,9 +25,9 @@
 
 ## Main Features
 
-LEAD is a model-agnostic entry point to end-to-end driving research in the CARLA simulator. It enables parallel experimentation across configurations, seeds, benchmarks and datasets.
+LEAD provides a comprehensive framework for end-to-end driving research in the CARLA simulator, featuring TransFuser v6 - a simple yet state-of-the-art model.
 
-Concretely, LEAD provides:
+Key highlights:
 - **Data-centric infrastructure**:
   - Always know what type and shape your tensors have, enforced with BearType and JaxTyping.
   - Extensive visualizations for debugging data pipelines and closed-loop evaluation.
