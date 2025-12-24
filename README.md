@@ -25,14 +25,14 @@
 
 ## Main Features
 
-LEAD is a model-agnostic entry point to end-to-end driving research with CARLA simulator. Built with a simple, modular structure that
-supports fast and parallel experiments.
+LEAD is a model-agnostic entry point to end-to-end driving research in the CARLA simulator. It is built to make working with many
+parallel long-running experiments manageable, whether you are iterating on model or data.
 
-- **Lean pipeline**: Pure PyTorch with minimal dependencies and an iteration-focused implementation.
-- **Cross-dataset training**: Training and evaluation support for NAVSIM and Waymo datasets.
+- **Lean pipeline**: Pure PyTorch with minimal dependencies and lightweight implementation.
+- **Cross-dataset training**: Training and evaluation support for NAVSIM and Waymo datasets, with optional co-training on synthetic CARLA data.
 - **Data-centric infrastructure**:
-  - Interactive notebooks for data exploration, visualization and debugging.
-  - Type and tensor shape safety with BearType & JaxTyping.
+  - Always know what type and shape your tensors have, enforced with BearType and JaxTyping.
+  - Extensive visualizations make it easier to spot bugs in the data pipeline and during closed-loop evaluation.
   - Compact datasets with lower storage overhead (72h of driving fits in ~200GB).
 
 ## Table of Contents

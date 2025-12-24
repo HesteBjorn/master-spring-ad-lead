@@ -1,5 +1,6 @@
 # Tutorial Jupyter Notebooks
 
+The notebooks were tested on VSCode. This [setting](https://github.com/autonomousvision/lead/blob/main/.vscode/settings.json) makes sure the notebooks are started in project root.
 
 ## Pipline Verification Notebooks
 

@@ -12,6 +12,10 @@ This issue degrades policy's performance so the numbers on Town13 does not mirro
 
 In some settings, training on 4 GPUs yields marginally lower closed-loop performance compared to single-GPU training. While the effect is small and does not change qualitative conclusions, it is consistently observable in certain runs.
 
+## Static Graph Can Also Worsen Performance
+
+We try to avoid `static_graph` in our pipeline.
+
 ## CARLA Waypoint PID Controller Is Not Well-Tuned
 
 A well-tuned controller (MPC) can improve the performance quite significantly. In preliminary experiments, we observed improvements of approximately 5–7 DS on Bench2Drive; however, these numbers should be interpreted cautiously as controller tuning was not the focus of this work.
