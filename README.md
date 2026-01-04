@@ -17,7 +17,7 @@
 
 <div align="center">
 
-https://github.com/user-attachments/assets/311f9f81-17f1-4741-a37d-93da81d25d08
+https://github.com/user-attachments/assets/1c67d296-41bb-460f-8c63-a756a5f40b6f
 
 **End-to-end stress test:** Closed-loop execution of TransFuser v6, a state-of-the-art driving policy in CARLA, demonstrating stable control in a complex urban scenario under degraded perception condition and dense adversarial traffic.
 
