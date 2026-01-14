@@ -16,7 +16,7 @@
 
 <div align="center">
 
-https://github.com/user-attachments/assets/0c2dfb28-93b6-4324-be49-16c6744677da
+https://github.com/user-attachments/assets/e2ef014c-ad1a-4411-9275-fe275723490a
 
 **Driving stress test:** Closed-loop execution of TransFuser v6, the latest iteration of the TransFuser family, demonstrating stable control in a complex urban scenario under degraded perception and adversarial traffic.
 
