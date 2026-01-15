@@ -275,14 +275,18 @@ class TrainingConfig(BaseConfig):
     @property
     def torch_float_type(self):
         """PyTorch float precision type for training."""
-        if self.use_mixed_precision_training and self.gpu_name in ["a100", "l40s"]:
+        if self.use_mixed_precision_training and self.gpu_name in [
+            "a100",
+            "l40s",
+            "rtx4090",
+        ]:
             return torch.bfloat16
         return torch.float32
 
     @property
     def use_mixed_precision_training(self):
         """If true use mixed precision training."""
-        return self.gpu_name in ["a100", "l40s"]
+        return self.gpu_name in ["a100", "l40s", "rtx4090"]
 
     @property
     def need_grad_scaler(self):
@@ -1049,6 +1053,8 @@ class TrainingConfig(BaseConfig):
                 return "a4000"
             elif "rtx 3080" in name:
                 return "rtx3080"
+            elif "rtx 4090" in name or "geforce rtx 4090" in name:
+                return "rtx4090"
             else:
                 raise Exception(
                     f"Unknown GPU name: {name}. Please register it in the config."
