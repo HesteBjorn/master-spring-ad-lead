@@ -172,12 +172,12 @@ python lead/infraction_webapp/app.py
 Navigate to [http://localhost:5000](http://localhost:5000) to access the dashboard
 
 <br>
-<div align="center">
-  <picture>
-    <img src="docs/assets/webapp.png" width="100%" />
-  </picture>
 
-  **Figure 1:** Interactive infraction analysis tool for model evaluation.
+<div align="center">
+
+https://github.com/user-attachments/assets/81954b7c-4153-45d1-90a8-80cb426ccb70
+
+  **Video 2:** Interactive infraction analysis tool for model evaluation.
 
 </div>
 <br>
