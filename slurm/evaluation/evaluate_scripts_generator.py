@@ -54,6 +54,7 @@ source activate lead
 {env_exports}
 
 # Set environment variables
+export PATH="$PWD/scripts:$PATH"
 export BASE_CHECKPOINT_ENDPOINT={args.base_checkpoint_endpoint}/eval
 export CHECKPOINT_ENDPOINT=$BASE_CHECKPOINT_ENDPOINT/{route_id}.json
 export BASE_DEBUG_CHECKPOINT_ENDPOINT={args.base_checkpoint_endpoint}/debug_checkpoint
