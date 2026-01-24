@@ -36,13 +36,17 @@ def make_bash(bash_file, route_file, route_id, args):
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=32gb
 #SBATCH --time={args.slurm_timeout}
-#SBATCH --gres=gpu{
-        ":1080ti" if is_on_tcml() else ""
-    }:1 # TCML has issue with 2080ti driver. Only 1080ti works.
+#SBATCH --account=ie-idi
+#SBATCH --gres=gpu{":1080ti" if is_on_tcml() else ""}:1 # TCML has issue with 2080ti driver. Only 1080ti works.
 
 set -e
 set +x
 
+# Module/conda setup (IDUN-specific)
+module purge
+module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+source activate lead
 # Export all current environment variables
 {env_exports}
 

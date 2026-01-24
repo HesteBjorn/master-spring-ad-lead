@@ -2,6 +2,8 @@ shopt -s globstar
 set -e
 
 # Set up interpreter
+module purge
+module load Anaconda3/2024.02-1
 eval "$(conda shell.bash hook)"
 if [ -z "$CONDA_INTERPRETER" ]; then
     export CONDA_INTERPRETER="lead"
