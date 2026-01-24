@@ -11,8 +11,11 @@ def is_on_tcml():
 
 
 def make_bash(bash_file, route_file, route_id, args):
+    # Filter out function exports that break "export" in non-interactive shells (e.g., BASH_FUNC_ml%%).
     env_exports = "\n".join(
-        [f"export {key}='{value}'" for key, value in os.environ.items()]
+        
+        [f"export {key}='{value}'" for key, value in os.environ.items() if not key.startswith("BASH_FUNC_")]
+    
     )
 
     # Select evaluator scripts based on expert mode
