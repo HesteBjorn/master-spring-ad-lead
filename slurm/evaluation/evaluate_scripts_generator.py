@@ -113,7 +113,7 @@ clean_carla.sh
 set -x
 export PORT=$(random_free_port.sh)
 export TM_PORT=$(random_free_port.sh)
-bash $CARLA_ROOT/CarlaUE4.sh --world-port=$PORT -nosound -graphicsadapter=0 -RenderOffScreen &
+$CARLA_ROOT/CarlaUE4/Binaries/Linux/CarlaUE4-Linux-Shipping -carla-port=$PORT -nosound -graphicsadapter=0 -RenderOffScreen &
 sleep 180
 nvidia-smi
 
