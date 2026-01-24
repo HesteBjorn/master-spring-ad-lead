@@ -6,6 +6,7 @@ export PYTHONPATH="$PWD:$PYTHONPATH"
 # SLURM generator parameters for per-route jobs
 export EVALUATION_PARAMETERS="--id_list 10857"  # COMMENT OUT THIS FOR FULL RUN
 export SCRIPT_GENERATOR_PARAMETERS="--partition=GPUQ --slurm_timeout 0-01:00:00 --repetitions 1"
+export WANDB_MODE=disabled
 
 source slurm/init.sh
 
