@@ -36,7 +36,7 @@ def make_bash(bash_file, route_file, route_id, args):
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=32gb
 #SBATCH --time={args.slurm_timeout}
-#SBATCH --account=ie-idi
+#SBATCH --account=share-ie-idi
 #SBATCH --gres=gpu{":1080ti" if is_on_tcml() else ""}:1 # TCML has issue with 2080ti driver. Only 1080ti works.
 
 set -e
