@@ -97,7 +97,7 @@ class ClosedLoopInference(OpenLoopInference):
         """
         pred_checkpoints = pred_checkpoints[0].data.cpu().numpy()
         speed = float(speed[0].data.cpu().numpy())
-        pred_target_speed = float(pred_target_speed[0].data.cpu().numpy())
+        pred_target_speed = float(pred_target_speed[0].to(dtype=torch.float32).data.cpu().numpy())
 
         brake = bool(
             pred_target_speed < 0.01
