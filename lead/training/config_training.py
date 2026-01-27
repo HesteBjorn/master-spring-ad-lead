@@ -281,6 +281,7 @@ class TrainingConfig(BaseConfig):
             "h200",
             "l40s",
             "rtx4090",
+            "rtx5090",
         ]:
             return torch.bfloat16
         return torch.float32
@@ -288,7 +289,7 @@ class TrainingConfig(BaseConfig):
     @property
     def use_mixed_precision_training(self):
         """If true use mixed precision training."""
-        return self.gpu_name in ["a100", "h100", "h200", "l40s", "rtx4090"]
+        return self.gpu_name in ["a100", "h100", "h200", "l40s", "rtx4090", "rtx5090"]
 
     @property
     def need_grad_scaler(self):
@@ -1057,6 +1058,8 @@ class TrainingConfig(BaseConfig):
                 return "rtx3080"
             elif "rtx 4090" in name or "geforce rtx 4090" in name:
                 return "rtx4090"
+            elif "rtx 5090" in name or "geforce rtx 5090" in name:
+                return "rtx5090"
             elif "h200" in name or "tesla h200" in name:
                 return "h200"
             elif "h100" in name or "tesla h100" in name:
