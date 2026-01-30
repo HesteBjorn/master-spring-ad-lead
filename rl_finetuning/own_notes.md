@@ -32,3 +32,10 @@ bash scripts/start_carla.sh
 # Start policy on one route
 bash scripts/eval_bench2drive.sh
 ```
+
+## SSH with vscode to 5090 computer
+Connect to eduroam network (or VPN)
+```bash
+ssh erikhbj@10.22.93.127
+```
+Or go to vscode: `Ctrl+Shift+P> Remote-SSH: Connect to Host...`
