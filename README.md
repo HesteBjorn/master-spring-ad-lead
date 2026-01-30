@@ -103,6 +103,16 @@ conda install -c conda-forge ffmpeg parallel tree gcc zip unzip
 # Optional: Activate git hooks
 pre-commit install
 ```
+```bash
+# Erik: If uv pip install fails with
+# × No solution found when resolving dependencies:
+#    ╰─▶ Because there is no version of certifi==2025.7.14 and you require
+#  certifi==2025.7.14,
+#        we can conclude that your requirements are unsatisfiable.
+pip install uv
+uv pip install -r requirements.txt --index-strategy unsafe-best-match
+uv pip install -e .
+```
 
 While waiting for dependencies installation, we recommend setting up CARLA and downloading checkpoints on parallel:
 
@@ -162,7 +172,7 @@ bash scripts/start_carla.sh
 # Start policy on one route
 python lead/leaderboard_wrapper.py \
   --checkpoint outputs/checkpoints/tfv6_resnet34 \
-  --routes data/benchmark_routes/bench2drive/23687.xml \
+  --routes data/benchmark_routes/bench2drive220routes/23687.xml \
   --bench2drive
 ```
 
