@@ -5,12 +5,18 @@ import argparse
 import numpy as np
 import torch
 
+from lead.common.constants import RadarDataIndex
 from rl_finetuning.tfv6_rl.action_codec import ActionCodec
 from rl_finetuning.tfv6_rl.obs_codec import ObsCodec
 from rl_finetuning.tfv6_rl.policy_tfv6_ppo import TFv6PPOPolicy, load_training_config
 
 
-def build_dummy_obs(obs_codec: ObsCodec, batch_size: int, device: torch.device):
+def build_dummy_obs(
+    obs_codec: ObsCodec,
+    training_config,
+    batch_size: int,
+    device: torch.device,
+):
     obs = {}
     for spec in obs_codec.specs:
         shape = (batch_size,) + spec.shape
@@ -18,6 +24,29 @@ def build_dummy_obs(obs_codec: ObsCodec, batch_size: int, device: torch.device):
             arr = np.random.randint(0, 255, size=shape, dtype=np.uint8)
         elif spec.key == "rasterized_lidar":
             arr = np.random.rand(*shape).astype(np.float32)
+        elif spec.key == "radar":
+            # Radar schema: [x, y, z, v, sensor_id]
+            arr = np.zeros(shape, dtype=np.float32)
+            arr[..., RadarDataIndex.X] = np.random.uniform(
+                training_config.min_x_meter,
+                training_config.max_x_meter,
+                size=shape[:-1],
+            )
+            arr[..., RadarDataIndex.Y] = np.random.uniform(
+                training_config.min_y_meter,
+                training_config.max_y_meter,
+                size=shape[:-1],
+            )
+            arr[..., RadarDataIndex.V] = np.random.uniform(
+                0.0, training_config.max_speed, size=shape[:-1]
+            )
+            sensor_ids = np.random.randint(
+                0,
+                training_config.num_radar_sensors,
+                size=shape[:-1],
+                dtype=np.int64,
+            )
+            arr[..., RadarDataIndex.SENSOR_ID] = sensor_ids.astype(np.float32)
         elif spec.key in ("command", "next_command"):
             arr = np.zeros(shape, dtype=np.float32)
             # set a random one-hot command per batch
@@ -58,7 +87,7 @@ def main():
         device=device,
     ).to(device)
 
-    obs = build_dummy_obs(obs_codec, args.batch_size, device)
+    obs = build_dummy_obs(obs_codec, training_config, args.batch_size, device)
 
     with torch.no_grad():
         actions, logprob, entropy, values, _, mu, sigma, _, _, _, _ = policy.forward(
