@@ -1,4 +1,5 @@
 {
+  "python.defaultInterpreterPath": "/home/erikhbj/miniconda3/envs/lead/bin/python",
   "python.analysis.extraPaths": [
     "3rd_party/leaderboard_autopilot/leaderboard",
     "3rd_party/scenario_runner_autopilot/srunner",

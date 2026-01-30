@@ -142,6 +142,80 @@
                 "NCCL_P2P_LEVEL": "NVL",
                 "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
             }
-        }
+        },
+        {
+            "name": "rl_validate_shapes",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "rl_finetuning.tfv6_rl.dry_run",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--checkpoint", "outputs/checkpoints/tfv6_resnet34",
+                "--batch-size", "2",
+                "--sample-type", "mean"
+            ],
+            "env": {
+                "PYTHONDONTWRITEBYTECODE": "1"
+            }
+        },
+        {
+            "name": "rl_ppo_smoke_1env",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "torch.distributed.run",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--nnodes=1",
+                "--nproc_per_node=1",
+                "--max_restarts=0",
+                "--rdzv-backend=c10d",
+                "--rdzv-endpoint=localhost:0",
+                "rl_finetuning/train_tfv6_ppo.py",
+                "--tcp_store_port", "7000",
+                "--logdir", "outputs/rl_logs",
+                "--exp_name", "TFV6_PPO_SMOKE",
+                "--ports", "5555",
+                "--total_batch_size", "512",
+                "--total_minibatch_size", "128",
+                "--update_epochs", "3",
+                "--total_timesteps", "20000",
+                "--reward_type", "simple_reward",
+                "--tfv6_checkpoint", "outputs/checkpoints/tfv6_resnet34",
+                "--debug_shapes", "1"
+            ],
+            "env": {
+                "PYTHONDONTWRITEBYTECODE": "1"
+            }
+        },
+        {
+        "name": "Bench2Drive Evaluator (Route 23687)",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${workspaceFolder}/3rd_party/Bench2Drive/leaderboard/leaderboard/leaderboard_evaluator.py",
+        "cwd": "${workspaceFolder}",
+        "justMyCode": false,
+        "env": {
+          "LEAD_PROJECT_ROOT": "${workspaceFolder}",
+          "PYTHONPATH": "${workspaceFolder}/3rd_party/Bench2Drive/leaderboard:${workspaceFolder}/3rd_party/Bench2Drive/scenario_runner:${workspaceFolder}/3rd_party/CARLA_0915/PythonAPI/carla"
+        },
+        "args": [
+          "--routes", "${workspaceFolder}/data/benchmark_routes/bench2drive220routes/23687.xml",
+          "--track", "SENSORS",
+          "--checkpoint", "${workspaceFolder}/outputs/local_evaluation/23687/checkpoint_endpoint.json",
+          "--agent", "${workspaceFolder}/lead/inference/sensor_agent.py",
+          "--agent-config", "${workspaceFolder}/outputs/checkpoints/tfv6_resnet34",
+          "--debug", "1",
+          "--resume", "0",
+          "--port", "2000",
+          "--traffic-manager-port", "8000",
+          "--traffic-manager-seed", "0",
+          "--repetitions", "1",
+          "--timeout", "60.0",
+          "--debug-checkpoint", "${workspaceFolder}/outputs/local_evaluation/23687/debug_checkpoint/debug_checkpoint_endpoint.txt",
+          "--record", "None"
+        ]
+      }
     ]
 }
