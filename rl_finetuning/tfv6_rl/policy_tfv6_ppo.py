@@ -61,6 +61,13 @@ class TFv6PPOPolicy(nn.Module):
         self.tfv6.load_state_dict(state_dict, strict=True)
         self.tfv6.to(self.device)
 
+        # Match TFv6 inference behavior (autocast when mixed precision is enabled).
+        self.autocast_dtype = self.training_config.torch_float_type
+        self.autocast_enabled = (
+            self.training_config.use_mixed_precision_training
+            and self.device.type == "cuda"
+        )
+
         self.action_codec = ActionCodec(self.training_config)
         self.action_dim = self.action_codec.action_dim
 
@@ -81,8 +88,13 @@ class TFv6PPOPolicy(nn.Module):
         return kv.mean(dim=1)
 
     def get_value(self, obs_dict, *_args, **_kwargs) -> torch.Tensor:
-        _ = self.tfv6(obs_dict)
-        value_features = self._build_value_features()
+        with torch.amp.autocast(
+            device_type=self.device.type,
+            dtype=self.autocast_dtype,
+            enabled=self.autocast_enabled,
+        ):
+            _ = self.tfv6(obs_dict)
+        value_features = self._build_value_features().float()
         return self.value_head(value_features)
 
     def forward(
@@ -94,7 +106,12 @@ class TFv6PPOPolicy(nn.Module):
         lstm_state=None,
         done=None,
     ) -> tuple:
-        predictions = self.tfv6(obs_dict)
+        with torch.amp.autocast(
+            device_type=self.device.type,
+            dtype=self.autocast_dtype,
+            enabled=self.autocast_enabled,
+        ):
+            predictions = self.tfv6(obs_dict)
 
         route = (
             predictions.pred_route
@@ -112,7 +129,7 @@ class TFv6PPOPolicy(nn.Module):
             else None
         )
 
-        action_mean = self.action_codec.encode(route, waypoints, target_speed)
+        action_mean = self.action_codec.encode(route, waypoints, target_speed).float()
         log_std = self.log_std.unsqueeze(0).expand_as(action_mean)
         dist = self.action_dist.proba_distribution(action_mean, log_std)
 
@@ -122,7 +139,7 @@ class TFv6PPOPolicy(nn.Module):
         log_prob = dist.log_prob(actions)
         entropy = dist.entropy().sum(1)
 
-        value_features = self._build_value_features()
+        value_features = self._build_value_features().float()
         values = self.value_head(value_features)
 
         exp_loss = None
