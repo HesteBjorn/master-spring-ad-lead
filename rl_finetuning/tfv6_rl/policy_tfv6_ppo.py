@@ -9,7 +9,10 @@ from torch import nn
 from lead.tfv6.tfv6 import TFv6
 from lead.training.config_training import TrainingConfig
 from rl_finetuning.tfv6_rl.action_codec import ActionCodec
-from rl_finetuning.tfv6_rl.gaussian_dist import DiagGaussianDistribution
+from rl_finetuning.tfv6_rl.gaussian_dist import (
+    CorrelatedGaussianDistribution,
+    DiagGaussianDistribution,
+)
 
 
 def load_training_config(checkpoint_dir: str) -> TrainingConfig:
@@ -43,6 +46,10 @@ class TFv6PPOPolicy(nn.Module):
         tfv6_checkpoint: str,
         tfv6_prefix: str = "model",
         device: torch.device | None = None,
+        rl_config=None,
+        use_correlated_noise: bool = True,
+        correlated_noise_rho: float = 0.8,
+        noise_ramp: bool = True,
     ) -> None:
         super().__init__()
         self.observation_space = observation_space
@@ -71,7 +78,24 @@ class TFv6PPOPolicy(nn.Module):
         self.action_codec = ActionCodec(self.training_config)
         self.action_dim = self.action_codec.action_dim
 
-        self.action_dist = DiagGaussianDistribution(self.action_dim)
+        self.use_correlated_noise = use_correlated_noise
+        self.correlated_noise_rho = correlated_noise_rho
+        self.noise_ramp = noise_ramp
+        if rl_config is not None:
+            self.use_correlated_noise = bool(
+                getattr(rl_config, "use_correlated_noise", self.use_correlated_noise)
+            )
+            self.correlated_noise_rho = float(
+                getattr(rl_config, "correlated_noise_rho", self.correlated_noise_rho)
+            )
+            self.noise_ramp = bool(getattr(rl_config, "noise_ramp", self.noise_ramp))
+
+        if self.use_correlated_noise:
+            self.action_dist = CorrelatedGaussianDistribution(
+                self.action_codec, rho=self.correlated_noise_rho
+            )
+        else:
+            self.action_dist = DiagGaussianDistribution(self.action_dim)
         self.log_std = nn.Parameter(-1.0 * torch.ones(self.action_dim))
 
         value_in_dim = self.training_config.transfuser_token_dim
@@ -86,6 +110,19 @@ class TFv6PPOPolicy(nn.Module):
         if kv is None:
             raise RuntimeError("Planning decoder context tokens not available.")
         return kv.mean(dim=1)
+
+    def _apply_noise_ramp(self, log_std: torch.Tensor) -> torch.Tensor:
+        if not self.noise_ramp:
+            return log_std
+        mask = torch.ones(self.action_dim, device=log_std.device, dtype=log_std.dtype)
+        if self.action_codec.predict_route and self.action_codec.num_route_points > 0:
+            start = self.action_codec.slices.route.start
+            mask[start : start + 2] = 0.0
+        if self.action_codec.predict_waypoints and self.action_codec.num_waypoints > 0:
+            start = self.action_codec.slices.waypoints.start
+            mask[start : start + 2] = 0.0
+        std = torch.exp(log_std) * mask
+        return torch.log(std + 1e-6)
 
     def get_value(self, obs_dict, *_args, **_kwargs) -> torch.Tensor:
         with torch.amp.autocast(
@@ -131,13 +168,16 @@ class TFv6PPOPolicy(nn.Module):
 
         action_mean = self.action_codec.encode(route, waypoints, target_speed).float()
         log_std = self.log_std.unsqueeze(0).expand_as(action_mean)
+        log_std = self._apply_noise_ramp(log_std)
         dist = self.action_dist.proba_distribution(action_mean, log_std)
 
         if actions is None:
             actions = dist.get_actions(sample_type)
 
         log_prob = dist.log_prob(actions)
-        entropy = dist.entropy().sum(1)
+        entropy = dist.entropy()
+        if entropy.ndim > 1:
+            entropy = entropy.sum(1)
 
         value_features = self._build_value_features().float()
         values = self.value_head(value_features)

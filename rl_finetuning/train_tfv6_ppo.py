@@ -241,6 +241,22 @@ def parse_args(config):
                       nargs='?',
                       const=True,
                       help='Whether to use the exploration loss from roach.')
+    parser.add_argument('--use_correlated_noise',
+                      type=lambda x: bool(strtobool(x)),
+                      default=config.use_correlated_noise,
+                      nargs='?',
+                      const=True,
+                      help='Use correlated Gaussian noise for plan sampling.')
+    parser.add_argument('--correlated_noise_rho',
+                      type=float,
+                      default=config.correlated_noise_rho,
+                      help='Correlation strength for plan noise (0-1).')
+    parser.add_argument('--noise_ramp',
+                      type=lambda x: bool(strtobool(x)),
+                      default=config.noise_ramp,
+                      nargs='?',
+                      const=True,
+                      help='If true, reduce noise on the first point to anchor the route.')
     parser.add_argument('--use_speed_limit_as_max_speed',
                       type=lambda x: bool(strtobool(x)),
                       default=config.use_speed_limit_as_max_speed,
@@ -796,6 +812,7 @@ def main():
         tfv6_checkpoint=args.tfv6_checkpoint,
         tfv6_prefix=args.tfv6_prefix,
         device=device,
+        rl_config=config,
     ).to(device)
 
     if config.compile_model:

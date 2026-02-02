@@ -155,7 +155,7 @@
                 "--batch-size", "2",
                 "--sample-type", "mean",
                 "--data-root", "data/carla_leaderboard2/data",
-                "--frame", "2",
+                "--frame", "66",
                 "--num-samples", "6",
                 "--log-std-init", "-4.0",
                 "--output", "outputs/rl_logs/dryrun/tfv6_vis.png"

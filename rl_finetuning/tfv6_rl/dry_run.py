@@ -543,6 +543,7 @@ def main():
             predictions.pred_target_speed_scalar,
         ).float()
         log_std = policy.log_std.unsqueeze(0).expand_as(action_mean)
+        log_std = policy._apply_noise_ramp(log_std)
         dist = policy.action_dist.proba_distribution(action_mean, log_std)
 
         sampled_routes = []
