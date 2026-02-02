@@ -144,7 +144,7 @@
             }
         },
         {
-            "name": "rl_validate_shapes",
+            "name": "rl_dryrun_forward_nosim",
             "type": "debugpy",
             "request": "launch",
             "module": "rl_finetuning.tfv6_rl.dry_run",
@@ -153,7 +153,12 @@
             "args": [
                 "--checkpoint", "outputs/checkpoints/tfv6_resnet34",
                 "--batch-size", "2",
-                "--sample-type", "mean"
+                "--sample-type", "mean",
+                "--data-root", "data/carla_leaderboard2/data",
+                "--frame", "2",
+                "--num-samples", "6",
+                "--log-std-init", "-4.0",
+                "--output", "outputs/rl_logs/dryrun/tfv6_vis.png"
             ],
             "env": {
                 "PYTHONDONTWRITEBYTECODE": "1"
