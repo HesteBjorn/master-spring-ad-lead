@@ -482,6 +482,18 @@ def main():
         default=None,
         help="Override PPO log_std initialization for visualization (e.g. -4.0).",
     )
+    parser.add_argument(
+        "--use_correlated_noise",
+        type=bool,
+        default=True,
+        help="If true, use correlated noise for action sampling (default: True).",
+    )
+    parser.add_argument(
+        "--correlated_noise_rho",
+        type=float,
+        default=0.8,
+        help="Correlation coefficient for correlated noise (default: 0.8).",
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device)
