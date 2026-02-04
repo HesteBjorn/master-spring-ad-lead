@@ -28,6 +28,9 @@ UPDATE_EPOCHS="${UPDATE_EPOCHS:-3}"
 HEARTBEAT_STEPS="${HEARTBEAT_STEPS:-128}"
 REPETITIONS="${REPETITIONS:-50}"
 LEADERBOARD_DEBUG="${LEADERBOARD_DEBUG:-0}"
+DEBUG_MEMORY="${DEBUG_MEMORY:-1}"
+GPU_TELEMETRY_ENABLE="${GPU_TELEMETRY_ENABLE:-1}"
+GPU_TELEMETRY_INTERVAL_MS="${GPU_TELEMETRY_INTERVAL_MS:-200}"
 
 CHECKPOINT="$(realpath -m "${CHECKPOINT}")"
 LOGDIR="$(realpath -m "${LOGDIR}")"
@@ -117,6 +120,10 @@ RUN_DIR="${LOGDIR}/${EXP_NAME}/run_${RUN_STAMP}"
 mkdir -p "${RUN_DIR}"
 LEADERBOARD_LOG="${RUN_DIR}/leaderboard.log"
 TRAINER_LOG="${RUN_DIR}/trainer.log"
+GPU_TELEMETRY_LOG="${RUN_DIR}/gpu_telemetry.csv"
+GPU_APPS_LOG="${RUN_DIR}/gpu_processes.csv"
+GPU_TELEMETRY_PID=""
+GPU_APPS_PID=""
 
 echo "[smoke-long] checkpoint=${CHECKPOINT}"
 echo "[smoke-long] route_profile=${ROUTE_PROFILE}"
@@ -127,7 +134,33 @@ echo "[smoke-long] total_batch_size=${TOTAL_BATCH_SIZE}"
 echo "[smoke-long] total_minibatch_size=${TOTAL_MINIBATCH_SIZE}"
 echo "[smoke-long] update_epochs=${UPDATE_EPOCHS}"
 echo "[smoke-long] track=${TRACK}"
+echo "[smoke-long] debug_memory=${DEBUG_MEMORY}"
 echo "[smoke-long] logs_dir=${RUN_DIR}"
+
+if [[ "${GPU_TELEMETRY_ENABLE}" == "1" ]] && command -v nvidia-smi >/dev/null 2>&1; then
+  INTERVAL_SECONDS="$(awk "BEGIN { printf \"%.3f\", ${GPU_TELEMETRY_INTERVAL_MS} / 1000 }")"
+  nvidia-smi \
+    --query-gpu=timestamp,index,name,memory.total,memory.used,memory.free,utilization.gpu,utilization.memory,power.draw \
+    --format=csv \
+    -lms "${GPU_TELEMETRY_INTERVAL_MS}" \
+    >"${GPU_TELEMETRY_LOG}" 2>&1 &
+  GPU_TELEMETRY_PID=$!
+  (
+    echo "timestamp,pid,process_name,used_gpu_memory_mib"
+    while true; do
+      ts="$(date '+%Y-%m-%d %H:%M:%S.%3N')"
+      nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory \
+        --format=csv,noheader,nounits 2>/dev/null \
+        | awk -v t="${ts}" 'NF { print t "," $0 }'
+      sleep "${INTERVAL_SECONDS}"
+    done
+  ) >"${GPU_APPS_LOG}" 2>&1 &
+  GPU_APPS_PID=$!
+  echo "[smoke-long] gpu_telemetry=${GPU_TELEMETRY_LOG}"
+  echo "[smoke-long] gpu_processes=${GPU_APPS_LOG}"
+else
+  echo "[smoke-long] GPU telemetry disabled (set GPU_TELEMETRY_ENABLE=1 and ensure nvidia-smi is available)."
+fi
 
 echo "[smoke-long] Starting leaderboard client (expects CARLA server on port ${CARLA_PORT})"
 python -u "${CARL_ROOT}/custom_leaderboard/leaderboard/leaderboard/leaderboard_evaluator.py" \
@@ -147,12 +180,18 @@ python -u "${CARL_ROOT}/custom_leaderboard/leaderboard/leaderboard/leaderboard_e
   --timeout 900 \
   --runtime_timeout 900 \
   --no_rendering_mode True \
-  >"${LEADERBOARD_LOG}" 2>&1 &
+  2>&1 | awk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' >"${LEADERBOARD_LOG}" &
 LEADERBOARD_PID=$!
 
 cleanup() {
   if kill -0 "${LEADERBOARD_PID}" >/dev/null 2>&1; then
     kill "${LEADERBOARD_PID}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${GPU_TELEMETRY_PID}" ]] && kill -0 "${GPU_TELEMETRY_PID}" >/dev/null 2>&1; then
+    kill "${GPU_TELEMETRY_PID}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${GPU_APPS_PID}" ]] && kill -0 "${GPU_APPS_PID}" >/dev/null 2>&1; then
+    kill "${GPU_APPS_PID}" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -175,7 +214,8 @@ torchrun --nnodes=1 --nproc_per_node=1 --max_restarts=0 \
   --tfv6_checkpoint "${CHECKPOINT}" \
   --debug_shapes 1 \
   --heartbeat_steps "${HEARTBEAT_STEPS}" \
-  2>&1 | tee "${TRAINER_LOG}"
+  --debug_memory "${DEBUG_MEMORY}" \
+  2>&1 | awk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' | tee "${TRAINER_LOG}"
 
 echo "[smoke-long] Done. Check TensorBoard logs at ${LOGDIR}/${EXP_NAME}"
 echo "[smoke-long] Leaderboard log: ${LEADERBOARD_LOG}"

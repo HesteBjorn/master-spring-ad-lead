@@ -18,6 +18,7 @@ TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-32}"
 TOTAL_MINIBATCH_SIZE="${TOTAL_MINIBATCH_SIZE:-32}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-32}"
 UPDATE_EPOCHS="${UPDATE_EPOCHS:-1}"
+DEBUG_MEMORY="${DEBUG_MEMORY:-0}"
 
 ROUTE_FILE="${ROUTE_FILE:-${CARL_ROOT}/custom_leaderboard/leaderboard/data/debug_routes_with_scenarios/route_Town03_00.xml.gz}"
 
@@ -90,6 +91,7 @@ torchrun --nnodes=1 --nproc_per_node=1 --max_restarts=0 \
   --reward_type simple_reward \
   --tfv6_checkpoint "${CHECKPOINT}" \
   --debug_shapes 1 \
-  --heartbeat_steps 8
+  --heartbeat_steps 8 \
+  --debug_memory "${DEBUG_MEMORY}"
 
 echo "[smoke] Done. Check TensorBoard logs at ${LOGDIR}/${EXP_NAME}"

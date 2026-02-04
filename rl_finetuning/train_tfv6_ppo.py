@@ -58,6 +58,34 @@ def none_or_str(value):
     return value
 
 
+def _is_cuda_device(device: torch.device | str) -> bool:
+    if isinstance(device, torch.device):
+        return device.type == "cuda"
+    return str(device).startswith("cuda")
+
+
+def _log_cuda_memory_snapshot(
+    rank: int, device: torch.device | str, tag: str, enabled: bool
+) -> None:
+    if not enabled or rank != 0:
+        return
+    if not torch.cuda.is_available() or not _is_cuda_device(device):
+        return
+
+    device_obj = device if isinstance(device, torch.device) else torch.device(device)
+    torch.cuda.synchronize(device_obj)
+    allocated = torch.cuda.memory_allocated(device_obj) / (1024**2)
+    reserved = torch.cuda.memory_reserved(device_obj) / (1024**2)
+    max_allocated = torch.cuda.max_memory_allocated(device_obj) / (1024**2)
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(
+        f"[{ts}][debug_memory] rank={rank} tag={tag} "
+        f"allocated_mib={allocated:.1f} reserved_mib={reserved:.1f} "
+        f"max_allocated_mib={max_allocated:.1f}",
+        flush=True,
+    )
+
+
 def save(model, optimizer, config, folder, model_file, optimizer_file):
     model_file = os.path.join(folder, model_file)
     torch.save(model.module.state_dict(), model_file)
@@ -127,6 +155,12 @@ def parse_args(config):
                       type=int,
                       default=0,
                       help='If >0, print a heartbeat every N rollout steps on rank 0.')
+    parser.add_argument('--debug_memory',
+                      type=lambda x: bool(strtobool(x)),
+                      default=False,
+                      nargs='?',
+                      const=True,
+                      help='If true, print CUDA memory snapshots around minibatch forward/backward.')
 
     parser.add_argument('--cuda',
                       type=lambda x: bool(strtobool(x)),
@@ -824,6 +858,15 @@ def main():
         device=device,
         rl_config=config,
     ).to(device)
+    if rank == 0:
+        print(
+            "[debug_amp] "
+            f"autocast_enabled={agent.autocast_enabled} "
+            f"autocast_dtype={agent.autocast_dtype} "
+            f"training_cfg_mixed_precision={agent.training_config.use_mixed_precision_training}",
+            flush=True,
+        )
+    _log_cuda_memory_snapshot(rank, device, "after_policy_init", args.debug_memory)
 
     if config.compile_model:
         agent = torch.compile(agent)
@@ -1324,9 +1367,17 @@ def main():
         gc.collect()
         with torch.no_grad():
             torch.cuda.empty_cache()
+            if torch.cuda.is_available() and _is_cuda_device(device):
+                device_obj = (
+                    device if isinstance(device, torch.device) else torch.device(device)
+                )
+                torch.cuda.reset_peak_memory_stats(device_obj)
 
         t3.toc(msg=f"Rank:{rank}, Data pre-processing.")
         t4.tic()
+        _log_cuda_memory_snapshot(
+            rank, device, f"update={update}_train_start", args.debug_memory
+        )
         latest_epoch = 0
         for epoch in range(args.update_epochs):
             latest_epoch = epoch
@@ -1364,6 +1415,14 @@ def main():
                 else:
                     b_exploration_suggests_sampled = None
                 b_obs_sampled = {key: b_obs[key][mb_inds] for key in b_obs.keys()}
+                should_log_memory = args.debug_memory and start == 0
+                if should_log_memory:
+                    _log_cuda_memory_snapshot(
+                        rank,
+                        device,
+                        f"update={update}_epoch={epoch}_pre_forward",
+                        True,
+                    )
                 # Don't need action, so we don't unscale
                 (
                     _,
@@ -1384,6 +1443,13 @@ def main():
                     lstm_state=lstm_state,
                     done=b_dones[mb_inds],
                 )
+                if should_log_memory:
+                    _log_cuda_memory_snapshot(
+                        rank,
+                        device,
+                        f"update={update}_epoch={epoch}_post_forward",
+                        True,
+                    )
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -1457,8 +1523,22 @@ def main():
 
                 optimizer.zero_grad()
                 loss.backward()
+                if should_log_memory:
+                    _log_cuda_memory_snapshot(
+                        rank,
+                        device,
+                        f"update={update}_epoch={epoch}_post_backward",
+                        True,
+                    )
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
+                if should_log_memory:
+                    _log_cuda_memory_snapshot(
+                        rank,
+                        device,
+                        f"update={update}_epoch={epoch}_post_step",
+                        True,
+                    )
 
                 old_mu_sampled = b_old_mus[mb_inds]
                 old_sigmas_sampled = b_old_sigmas[mb_inds]
