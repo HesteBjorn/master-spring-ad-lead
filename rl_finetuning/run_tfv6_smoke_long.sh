@@ -180,7 +180,7 @@ python -u "${CARL_ROOT}/custom_leaderboard/leaderboard/leaderboard/leaderboard_e
   --timeout 900 \
   --runtime_timeout 900 \
   --no_rendering_mode True \
-  2>&1 | awk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' >"${LEADERBOARD_LOG}" &
+  >"${LEADERBOARD_LOG}" 2>&1 &
 LEADERBOARD_PID=$!
 
 cleanup() {
@@ -215,7 +215,7 @@ torchrun --nnodes=1 --nproc_per_node=1 --max_restarts=0 \
   --debug_shapes 1 \
   --heartbeat_steps "${HEARTBEAT_STEPS}" \
   --debug_memory "${DEBUG_MEMORY}" \
-  2>&1 | awk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' | tee "${TRAINER_LOG}"
+  2>&1 | tee "${TRAINER_LOG}"
 
 echo "[smoke-long] Done. Check TensorBoard logs at ${LOGDIR}/${EXP_NAME}"
 echo "[smoke-long] Leaderboard log: ${LEADERBOARD_LOG}"
