@@ -52,6 +52,27 @@ the rollout intentionally tiny so you can quickly verify gradients/logging.
 Defaults are `total_batch_size=32`, `total_timesteps=32`, `update_epochs=1`.
 If this succeeds, TensorBoard should show at least one PPO update (not just step 0 hyperparameters).
 
+## Longer smoke/debug run (~1 hour)
+
+Use this when you want more realistic rollouts and enough PPO updates to inspect
+reward/loss trends in TensorBoard.
+
+```bash
+TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke_long.sh \
+  outputs/checkpoints/tfv6_resnet34 \
+  outputs/rl_logs \
+  TFV6_PPO_SMOKE_LONG
+```
+
+Default profile is `town03_debug` (scenario route with repetitions). You can switch:
+
+- `ROUTE_PROFILE=debug_suite`: merges selected files from `debug_routes_with_scenarios`.
+  - Town filter via `DEBUG_SUITE_TOWNS` (default: `Town01..Town06`).
+- `ROUTE_PROFILE=training`: uses `routes_training.xml` directly.
+
+All key runtime knobs (`TOTAL_TIMESTEPS`, `TOTAL_BATCH_SIZE`, `REPETITIONS`, `TRACK`, etc.)
+are exposed as environment variables in the script.
+
 3. Optional debug:
    - Set `TFV6_RL_DEBUG=1` in the environment to enable extra logging in the agent.
 

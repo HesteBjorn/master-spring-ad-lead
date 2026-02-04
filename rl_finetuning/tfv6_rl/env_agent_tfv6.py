@@ -21,6 +21,7 @@ ensure_carl_paths()
 from birds_eye_view.traffic_light import TrafficLightHandler
 from leaderboard.autoagents import autonomous_agent
 from leaderboard.autoagents.agent_wrapper import NextRoute
+from leaderboard.envs.sensor_interface import SensorInterface
 from leaderboard.utils import route_manipulation
 from nav_planner import RoutePlanner as CarlaRoutePlanner
 from reward.roach_reward import RoachReward
@@ -194,6 +195,9 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         )
 
     def setup(self, exp_folder, port, route_config):
+        # Recreate sensor interface per route to mirror wrapper lifecycle and
+        # avoid stale sensor tags when routes restart.
+        self.sensor_interface = SensorInterface()
         self.port = port
         self.exp_folder = exp_folder
         self.route_config = route_config
@@ -203,6 +207,10 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         self.data = None
         self.last_timestamp = 0.0
         self.last_control = None
+        # Route-local state must be reset each route. The leaderboard reuses the
+        # same agent instance across route repetitions.
+        self.initialized_route = False
+        self.send_first_observation = False
 
         # Resolve TFv6 checkpoint. During debug runs this can be the agent-config folder
         # directly; for train_parallel-style launches it can be provided by TFV6_CHECKPOINT.
@@ -592,9 +600,14 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
     def destroy(self, results=None):
         if not self.send_first_observation:
             if hasattr(self, "reward_handler"):
-                self.reward_handler.destroy()
+                try:
+                    self.reward_handler.destroy()
+                except Exception:
+                    pass
                 del self.reward_handler
             return
+
+        self.send_first_observation = False
 
         if self.termination or self.truncation:
             data = self.data
@@ -639,7 +652,13 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
             ),
             copy=False,
         )
-        self.reward_handler.destroy()
+        if hasattr(self, "reward_handler"):
+            try:
+                self.reward_handler.destroy()
+            except Exception:
+                pass
+            del self.reward_handler
 
         self.termination = False
         self.truncation = False
+        self.initialized_route = False

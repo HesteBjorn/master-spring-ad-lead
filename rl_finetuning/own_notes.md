@@ -53,3 +53,9 @@ Terminal 2:
 # Assumes carla server running
 TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke.sh outputs/checkpoints/tfv6_resnet34 outputs/rl_logs TFV6_PPO_SMOKE
 ```
+
+## Smoke test long
+```bash
+# Assumes carla server running
+TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke_long.sh outputs/checkpoints/tfv6_resnet34 outputs/rl_logs TFV6_PPO_SMOKE_LONG
+```
