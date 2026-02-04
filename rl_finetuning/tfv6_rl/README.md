@@ -32,6 +32,26 @@ This folder contains the TFv6 PPO integration used for plan-level RL finetuning.
      --debug_shapes 1
    ```
 
+## One-command smoke test (short rollout)
+
+This mirrors CaRL's training-debug flow (leaderboard process + PPO process), but keeps
+the rollout intentionally tiny so you can quickly verify gradients/logging.
+
+1. Start a CARLA server in a separate terminal (required):
+   ```bash
+   bash scripts/start_carla.sh
+   ```
+2. Run:
+   ```bash
+   bash rl_finetuning/run_tfv6_smoke.sh \
+     outputs/checkpoints/tfv6_resnet34 \
+     outputs/rl_logs \
+     TFV6_PPO_SMOKE
+   ```
+
+Defaults are `total_batch_size=32`, `total_timesteps=32`, `update_epochs=1`.
+If this succeeds, TensorBoard should show at least one PPO update (not just step 0 hyperparameters).
+
 3. Optional debug:
    - Set `TFV6_RL_DEBUG=1` in the environment to enable extra logging in the agent.
 

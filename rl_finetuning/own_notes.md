@@ -36,6 +36,20 @@ bash scripts/eval_bench2drive.sh
 ## SSH with vscode to 5090 computer
 Connect to eduroam network (or VPN)
 ```bash
-ssh erikhbj@10.22.93.127
+# Tailscale IP: erikhbj@100.92.150.98
+# Trenger ikke være på VPN. Anbefalt ikke.
+ssh erikhbj@100.92.150.98
 ```
 Or go to vscode: `Ctrl+Shift+P> Remote-SSH: Connect to Host...`
+
+## Smoke test PPO single update
+Terminal 1:
+```bash
+bash ./scripts/clean_carla.sh
+bash ./scripts/start_carla.sh
+```
+Terminal 2:
+```bash
+# Assumes carla server running
+TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke.sh outputs/checkpoints/tfv6_resnet34 outputs/rl_logs TFV6_PPO_SMOKE
+```

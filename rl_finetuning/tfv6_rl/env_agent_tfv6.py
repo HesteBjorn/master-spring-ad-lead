@@ -18,6 +18,7 @@ from rl_finetuning.tfv6_rl.path_utils import ensure_carl_paths
 
 ensure_carl_paths()
 
+from birds_eye_view.traffic_light import TrafficLightHandler
 from leaderboard.autoagents import autonomous_agent
 from leaderboard.autoagents.agent_wrapper import NextRoute
 from leaderboard.utils import route_manipulation
@@ -82,9 +83,15 @@ class ClosedLoopController:
     def execute_route_and_target_speed(
         self, pred_checkpoints, pred_target_speed, speed
     ):
-        pred_checkpoints = pred_checkpoints[0].detach().cpu().numpy()
+        if isinstance(pred_checkpoints, np.ndarray):
+            pred_checkpoints = pred_checkpoints[0]
+        else:
+            pred_checkpoints = pred_checkpoints[0].detach().cpu().numpy()
         speed = float(speed)
-        pred_target_speed = float(pred_target_speed)
+        if isinstance(pred_target_speed, np.ndarray):
+            pred_target_speed = float(pred_target_speed.reshape(-1)[0])
+        else:
+            pred_target_speed = float(pred_target_speed)
 
         brake = bool(
             pred_target_speed < 0.01
@@ -103,7 +110,10 @@ class ClosedLoopController:
         return steer, throttle, float(brake)
 
     def execute_waypoints(self, waypoints, speed):
-        waypoints = waypoints[0].detach().cpu().numpy()
+        if isinstance(waypoints, np.ndarray):
+            waypoints = waypoints[0]
+        else:
+            waypoints = waypoints[0].detach().cpu().numpy()
         speed = float(speed)
 
         one_second = int(
@@ -153,7 +163,10 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
 
     def __init__(self, carla_host, carla_port, debug=False):
         super().__init__(carla_host, carla_port, debug)
-        self.track = autonomous_agent.Track.MAP
+        track_name = os.environ.get("TFV6_RL_TRACK", "MAP_QUALIFIER")
+        self.track = getattr(
+            autonomous_agent.Track, track_name, autonomous_agent.Track.MAP_QUALIFIER
+        )
         self.rl_config = GlobalConfig()
         self.training_config = None
         self.config_closed_loop = ClosedLoopConfig(raise_error_on_missing_key=False)
@@ -191,8 +204,10 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         self.last_timestamp = 0.0
         self.last_control = None
 
-        # Load TFv6 training config from checkpoint folder
-        self.training_config = load_training_config(exp_folder)
+        # Resolve TFv6 checkpoint. During debug runs this can be the agent-config folder
+        # directly; for train_parallel-style launches it can be provided by TFV6_CHECKPOINT.
+        checkpoint_dir = self._resolve_tfv6_checkpoint_dir(exp_folder)
+        self.training_config = load_training_config(checkpoint_dir)
         self.action_codec = ActionCodec(self.training_config)
         self.obs_codec = ObsCodec(self.training_config)
         self.controller = ClosedLoopController(
@@ -201,8 +216,42 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
 
         super().setup(sensor_agent=True)
 
+    def _resolve_tfv6_checkpoint_dir(self, exp_folder: str) -> str:
+        candidates = [os.environ.get("TFV6_CHECKPOINT", None), exp_folder]
+        checked = []
+
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            candidate_path = pathlib.Path(candidate).expanduser()
+            if not candidate_path.is_absolute():
+                candidate_path = pathlib.Path.cwd() / candidate_path
+            candidate_path = candidate_path.resolve()
+            config_file = candidate_path / "config.json"
+            if not config_file.exists():
+                checked.append((str(candidate_path), "missing config.json"))
+                continue
+
+            has_model_file = any(candidate_path.glob("model*.pth"))
+            if not has_model_file:
+                checked.append((str(candidate_path), "missing model*.pth"))
+                continue
+            try:
+                _ = load_training_config(str(candidate_path))
+                return str(candidate_path)
+            except Exception as exc:
+                checked.append((str(candidate_path), f"invalid training config: {exc}"))
+                continue
+
+        checked_msg = ", ".join([f"{p} ({reason})" for p, reason in checked])
+        raise FileNotFoundError(
+            "Could not resolve TFv6 checkpoint folder. "
+            "Set --agent-config to a TFv6 checkpoint folder or set TFV6_CHECKPOINT. "
+            f"Checked: {checked_msg}"
+        )
+
     def sensors(self):
-        return av_sensor_setup(
+        sensors = av_sensor_setup(
             config=self.training_config,
             perturbation_rotation=0.0,
             perturbation_translation=0.0,
@@ -211,6 +260,16 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
             perturbate=False,
             sensor_agent=True,
         )
+        if self.debug:
+            type_counts = {}
+            for sensor in sensors:
+                sensor_type = sensor["type"]
+                type_counts[sensor_type] = type_counts.get(sensor_type, 0) + 1
+            print(
+                f"[TFv6RL] track={self.track} sensor_counts={type_counts}",
+                flush=True,
+            )
+        return sensors
 
     def agent_global_init(self):
         # Socket to talk to server
@@ -243,6 +302,13 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
             settings.fixed_delta_seconds, 1.0 / self.rl_config.frame_rate
         )
         self.world_map = CarlaDataProvider.get_map()
+        # SimpleReward's red-light criterion depends on TrafficLightHandler being initialized.
+        TrafficLightHandler.reset(self.world, self.world_map)
+        if self.debug:
+            print(
+                f"[TFv6RL] traffic_lights_initialized={TrafficLightHandler.num_tl}",
+                flush=True,
+            )
 
         if self.rl_config.reward_type == "roach":
             self.reward_handler = RoachReward(
@@ -322,6 +388,8 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
             )
 
     def preprocess_observation(self, input_data: dict) -> dict:
+        # BaseAgent.tick mutates the dict in place; keep the caller-owned raw sensor dict untouched.
+        input_data = dict(input_data)
         input_data = super().tick(
             input_data, use_kalman_filter=self.training_config.use_kalman_filter_for_gps
         )

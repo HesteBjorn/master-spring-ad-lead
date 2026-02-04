@@ -33,6 +33,26 @@ def build_dummy_obs(
             arr = np.random.randint(0, 255, size=shape, dtype=np.uint8)
         elif spec.key == "rasterized_lidar":
             arr = np.random.rand(*shape).astype(np.float32)
+        elif spec.key in (
+            "target_point_previous",
+            "target_point",
+            "target_point_next",
+        ):
+            arr = np.zeros(shape, dtype=np.float32)
+            arr[..., 0] = np.random.uniform(
+                training_config.min_x_meter,
+                training_config.max_x_meter,
+                size=shape[:-1],
+            )
+            arr[..., 1] = np.random.uniform(
+                training_config.min_y_meter,
+                training_config.max_y_meter,
+                size=shape[:-1],
+            )
+        elif spec.key == "speed":
+            arr = np.random.uniform(0.0, training_config.max_speed, size=shape).astype(
+                np.float32
+            )
         elif spec.key == "radar":
             # Radar schema: [x, y, z, v, sensor_id]
             arr = np.zeros(shape, dtype=np.float32)
@@ -484,7 +504,7 @@ def main():
     )
     parser.add_argument(
         "--use_correlated_noise",
-        type=bool,
+        type=lambda x: str(x).lower() in ("1", "true", "yes", "y"),
         default=True,
         help="If true, use correlated noise for action sampling (default: True).",
     )
@@ -508,6 +528,8 @@ def main():
         tfv6_checkpoint=args.checkpoint,
         tfv6_prefix="model",
         device=device,
+        use_correlated_noise=args.use_correlated_noise,
+        correlated_noise_rho=args.correlated_noise_rho,
     ).to(device)
     if args.log_std_init is not None:
         with torch.no_grad():

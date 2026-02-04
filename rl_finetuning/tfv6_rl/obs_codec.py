@@ -71,13 +71,13 @@ class ObsCodec:
         for spec in self.specs:
             if spec.key not in obs:
                 raise KeyError(f"Missing observation key: {spec.key}")
-            arr = obs[spec.key]
+            arr = np.asarray(obs[spec.key])
             if arr.shape != spec.shape:
                 raise ValueError(
                     f"Obs '{spec.key}' has shape {arr.shape}, expected {spec.shape}"
                 )
-            if arr.dtype != spec.dtype:
-                arr = arr.astype(spec.dtype)
+            # ZMQ zero-copy send in env_agent uses copy=False and requires contiguous buffers.
+            arr = np.ascontiguousarray(arr, dtype=spec.dtype)
             packed.append(arr)
         return packed
 

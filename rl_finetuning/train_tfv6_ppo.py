@@ -14,7 +14,14 @@ import re
 import time
 from collections import deque
 
-import gymnasium as gym
+try:
+    import gymnasium as gym
+    from gymnasium.envs.registration import register
+except ModuleNotFoundError as exc:
+    raise ModuleNotFoundError(
+        "gymnasium is required for rl_finetuning/train_tfv6_ppo.py. "
+        "Install with `pip install gymnasium` (or `pip install -r requirements.txt`)."
+    ) from exc
 import jsonpickle
 import jsonpickle.ext.numpy as jsonpickle_numpy
 import numpy as np
@@ -22,7 +29,6 @@ import torch
 import torch.nn.functional as F
 import wandb
 import zmq
-from gymnasium.envs.registration import register
 from pytictoc import TicToc
 from tensorboardX import SummaryWriter
 from torch import nn, optim
@@ -117,6 +123,10 @@ def parse_args(config):
                       nargs='?',
                       const=True,
                       help='if toggled, print observation/action shapes on first step')
+    parser.add_argument('--heartbeat_steps',
+                      type=int,
+                      default=0,
+                      help='If >0, print a heartbeat every N rollout steps on rank 0.')
 
     parser.add_argument('--cuda',
                       type=lambda x: bool(strtobool(x)),
@@ -912,12 +922,19 @@ def main():
     exp_suggest = np.zeros((local_bs_per_env, args.num_envs_per_proc), dtype=np.int32)
 
     # TRY NOT TO MODIFY: start the game
+    if rank == 0:
+        print(
+            "[startup] Waiting for first observation from leaderboard env...",
+            flush=True,
+        )
     reset_obs = env.reset(
         seed=[
             args.seed + rank * args.num_envs_per_proc + i
             for i in range(args.num_envs_per_proc)
         ]
     )
+    if rank == 0:
+        print("[startup] Received first observation, starting PPO loop.", flush=True)
     next_obs = {}
     for key, space in env.single_observation_space.spaces.items():
         dtype = torch.uint8 if space.dtype == np.uint8 else torch.float32
@@ -1043,6 +1060,17 @@ def main():
         for step in range(0, local_bs_per_env):
             config.global_step += 1 * world_size * args.num_envs_per_proc
             local_processed_samples += 1 * world_size * args.num_envs_per_proc
+            if (
+                args.heartbeat_steps > 0
+                and rank == 0
+                and step % args.heartbeat_steps == 0
+            ):
+                print(
+                    f"[heartbeat] update {update}/{num_updates - 1} "
+                    f"step {step}/{local_bs_per_env - 1} "
+                    f"global_step={config.global_step}",
+                    flush=True,
+                )
 
             for key in obs.keys():
                 obs[key][step] = next_obs[key]
