@@ -50,6 +50,7 @@ class TFv6PPOPolicy(nn.Module):
         use_correlated_noise: bool = True,
         correlated_noise_rho: float = 0.8,
         noise_ramp: bool = True,
+        train_planning_decoder_only: bool = True,
     ) -> None:
         super().__init__()
         self.observation_space = observation_space
@@ -67,6 +68,8 @@ class TFv6PPOPolicy(nn.Module):
         )
         self.tfv6.load_state_dict(state_dict, strict=True)
         self.tfv6.to(self.device)
+
+        self.train_planning_decoder_only = train_planning_decoder_only
 
         # Match TFv6 inference behavior (autocast when mixed precision is enabled).
         self.autocast_dtype = self.training_config.torch_float_type
@@ -89,6 +92,15 @@ class TFv6PPOPolicy(nn.Module):
                 getattr(rl_config, "correlated_noise_rho", self.correlated_noise_rho)
             )
             self.noise_ramp = bool(getattr(rl_config, "noise_ramp", self.noise_ramp))
+            self.train_planning_decoder_only = bool(
+                getattr(
+                    rl_config,
+                    "train_planning_decoder_only",
+                    self.train_planning_decoder_only,
+                )
+            )
+
+        self._configure_trainable_tfv6_modules()
 
         if self.use_correlated_noise:
             self.action_dist = CorrelatedGaussianDistribution(
@@ -104,6 +116,21 @@ class TFv6PPOPolicy(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(256, 1),
         )
+
+    def _set_module_trainable(self, module: nn.Module, trainable: bool) -> None:
+        for param in module.parameters():
+            param.requires_grad = trainable
+
+    def _configure_trainable_tfv6_modules(self) -> None:
+        if self.train_planning_decoder_only:
+            # Decoder-only RL finetuning: keep TFv6 frozen except planning decoder.
+            self._set_module_trainable(self.tfv6, False)
+            if hasattr(self.tfv6, "planning_decoder"):
+                self._set_module_trainable(self.tfv6.planning_decoder, True)
+            return
+
+        # Partial/full finetuning mode.
+        self._set_module_trainable(self.tfv6, True)
 
     def _build_value_features(self) -> torch.Tensor:
         kv = getattr(self.tfv6.planning_decoder, "kv", None)

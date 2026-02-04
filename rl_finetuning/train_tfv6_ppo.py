@@ -113,6 +113,12 @@ def parse_args(config):
                       type=str,
                       default='model',
                       help='Prefix of TFv6 model files inside checkpoint folder.')
+    parser.add_argument('--train_planning_decoder_only',
+                      type=lambda x: bool(strtobool(x)),
+                      default=config.train_planning_decoder_only,
+                      nargs='?',
+                      const=True,
+                      help='If true, only TFv6 planning decoder (plus PPO heads) is trainable.')
     parser.add_argument('--tcp_store_port', type=int, required=True, help='port for the key value store')
     parser.add_argument('--learning_rate',
                       type=float,
@@ -857,13 +863,34 @@ def main():
         tfv6_prefix=args.tfv6_prefix,
         device=device,
         rl_config=config,
+        train_planning_decoder_only=args.train_planning_decoder_only,
     ).to(device)
     if rank == 0:
+        tfv6_trainable = sum(
+            p.numel() for p in agent.tfv6.parameters() if p.requires_grad
+        )
+        tfv6_total = sum(p.numel() for p in agent.tfv6.parameters())
+        backbone_trainable = sum(
+            p.numel() for p in agent.tfv6.backbone.parameters() if p.requires_grad
+        )
+        planning_trainable = sum(
+            p.numel()
+            for p in agent.tfv6.planning_decoder.parameters()
+            if p.requires_grad
+        )
         print(
             "[debug_amp] "
             f"autocast_enabled={agent.autocast_enabled} "
             f"autocast_dtype={agent.autocast_dtype} "
-            f"training_cfg_mixed_precision={agent.training_config.use_mixed_precision_training}",
+            f"training_cfg_mixed_precision={agent.training_config.use_mixed_precision_training} "
+            f"train_planning_decoder_only={agent.train_planning_decoder_only}",
+            flush=True,
+        )
+        print(
+            "[debug_trainable] "
+            f"tfv6_trainable={tfv6_trainable}/{tfv6_total} "
+            f"backbone_trainable={backbone_trainable} "
+            f"planning_decoder_trainable={planning_trainable}",
             flush=True,
         )
     _log_cuda_memory_snapshot(rank, device, "after_policy_init", args.debug_memory)
