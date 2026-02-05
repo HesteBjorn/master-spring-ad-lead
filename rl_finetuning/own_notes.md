@@ -94,6 +94,7 @@ outputs/rl_logs/TFV6_PPO_SMOKE_OVERNIGHT/model_latest_000000xxx.pth
 
 ## Weekend run with auto-carla restarts
 ```bash
+NO_PROGRESS_TIMEOUT_SECONDS=300 \
 SPS_THRESHOLD=10 SPS_CONSECUTIVE=3 \
 TARGET_HOURS=86 ASSUMED_SPS=10 \
 ROUTE_PROFILE=debug_suite \
@@ -104,5 +105,5 @@ LEADERBOARD_READY_TIMEOUT_SECONDS=180 \
 bash rl_finetuning/run_tfv6_watch_carlaresets_overnight.sh \
 outputs/checkpoints/tfv6_resnet34 \
 outputs/rl_logs \
-TFV6_PPO_WEEKEND_TEST_20260205
+TFV6_PPO_WEEKEND_20260205
 ```

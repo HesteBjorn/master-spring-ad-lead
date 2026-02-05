@@ -18,6 +18,8 @@ CARLA_PORT="${CARLA_PORT:-2000}"
 CARLA_BOOT_WAIT_SECONDS="${CARLA_BOOT_WAIT_SECONDS:-30}"
 LEADERBOARD_READY_TIMEOUT_SECONDS="${LEADERBOARD_READY_TIMEOUT_SECONDS:-120}"
 LEADERBOARD_READY_PATTERN="${LEADERBOARD_READY_PATTERN:-Connecting to gymnasium server}"
+NO_PROGRESS_TIMEOUT_SECONDS="${NO_PROGRESS_TIMEOUT_SECONDS:-180}"
+NO_PROGRESS_POLL_SECONDS="${NO_PROGRESS_POLL_SECONDS:-60}"
 
 CHECKPOINT="$(realpath -m "${CHECKPOINT}")"
 LOGDIR="$(realpath -m "${LOGDIR}")"
@@ -97,6 +99,27 @@ wait_for_leaderboard_ready() {
   return 1
 }
 
+monitor_no_progress() {
+  local log_file="$1"
+  local run_pid="$2"
+  local trigger_file="$3"
+  while kill -0 "${run_pid}" >/dev/null 2>&1; do
+    if [[ -f "${log_file}" ]]; then
+      local last_ts
+      last_ts="$(stat -c %Y "${log_file}")"
+      local now_ts
+      now_ts="$(date +%s)"
+      if (( now_ts - last_ts > NO_PROGRESS_TIMEOUT_SECONDS )); then
+        echo "[sps-watch] No trainer log updates for ${NO_PROGRESS_TIMEOUT_SECONDS}s; triggering restart."
+        echo "STALL_TRIGGER" >"${trigger_file}"
+        kill "${run_pid}" >/dev/null 2>&1 || true
+        exit 2
+      fi
+    fi
+    sleep "${NO_PROGRESS_POLL_SECONDS}"
+  done
+}
+
 while true; do
   start_carla
 
@@ -146,10 +169,13 @@ while true; do
   fi
 
   monitor_sps "${trainer_log}" "${run_pid}" "${trigger_file}" &
-  monitor_pid=$!
+  sps_monitor_pid=$!
+  monitor_no_progress "${trainer_log}" "${run_pid}" "${trigger_file}" &
+  stall_monitor_pid=$!
 
   wait "${run_pid}" || true
-  kill "${monitor_pid}" >/dev/null 2>&1 || true
+  kill "${sps_monitor_pid}" >/dev/null 2>&1 || true
+  kill "${stall_monitor_pid}" >/dev/null 2>&1 || true
 
   if [[ -f "${trigger_file}" ]]; then
     echo "[sps-watch] Restarting due to SPS trigger."
