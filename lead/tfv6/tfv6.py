@@ -113,7 +113,9 @@ class TFv6(nn.Module):
                 ).to(self.device)
 
     @beartype
-    def forward(self, data: dict[str, typing.Any]) -> Prediction:
+    def forward(
+        self, data: dict[str, typing.Any], skip_perception_heads: bool = False
+    ) -> Prediction:
         self.log = {}
         pred_route = pred_future_waypoints = pred_target_speed_distribution = (
             pred_target_speed_scalar
@@ -150,16 +152,24 @@ class TFv6(nn.Module):
             )
 
         # Semantic segmentation forward pass
-        if self.config.use_carla_data and self.config.use_semantic:
+        if (
+            not skip_perception_heads
+            and self.config.use_carla_data
+            and self.config.use_semantic
+        ):
             pred_semantic = self.semantic_decoder(data, image_features, self.log)
 
         # Depth estimation forward pass
-        if self.config.use_carla_data and self.config.use_depth:
+        if (
+            not skip_perception_heads
+            and self.config.use_carla_data
+            and self.config.use_depth
+        ):
             pred_depth = self.depth_decoder(data, image_features, self.log)
 
         # Bounding box detection forward pass
         bev_feature_grid = self.backbone.top_down(bev_features)
-        if self.config.detect_boxes:
+        if (not skip_perception_heads) and self.config.detect_boxes:
             if self.config.use_carla_data:
                 pred_bounding_box = self.center_net_decoder(
                     data, bev_feature_grid, self.log
@@ -170,7 +180,7 @@ class TFv6(nn.Module):
                 )
 
         # BEV semantic segmentation forward pass
-        if self.config.use_bev_semantic:
+        if (not skip_perception_heads) and self.config.use_bev_semantic:
             if self.config.use_carla_data:
                 pred_bev_semantic = self.bev_semantic_decoder(
                     bev_feature_grid, self.log

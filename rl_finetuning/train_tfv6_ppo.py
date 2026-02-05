@@ -119,6 +119,12 @@ def parse_args(config):
                       nargs='?',
                       const=True,
                       help='If true, only TFv6 planning decoder (plus PPO heads) is trainable.')
+    parser.add_argument('--skip_perception_heads',
+                      type=lambda x: bool(strtobool(x)),
+                      default=config.skip_perception_heads,
+                      nargs='?',
+                      const=True,
+                      help='If true, skip TFv6 semantic/depth/box/BEV heads during RL forward.')
     parser.add_argument('--tcp_store_port', type=int, required=True, help='port for the key value store')
     parser.add_argument('--learning_rate',
                       type=float,

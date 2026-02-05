@@ -84,6 +84,7 @@ class TFv6PPOPolicy(nn.Module):
         self.use_correlated_noise = use_correlated_noise
         self.correlated_noise_rho = correlated_noise_rho
         self.noise_ramp = noise_ramp
+        self.skip_perception_heads = True
         self.log_std_min = -5.0
         self.log_std_max = 2.0
         if rl_config is not None:
@@ -94,6 +95,9 @@ class TFv6PPOPolicy(nn.Module):
                 getattr(rl_config, "correlated_noise_rho", self.correlated_noise_rho)
             )
             self.noise_ramp = bool(getattr(rl_config, "noise_ramp", self.noise_ramp))
+            self.skip_perception_heads = bool(
+                getattr(rl_config, "skip_perception_heads", self.skip_perception_heads)
+            )
             self.log_std_min = float(
                 getattr(rl_config, "log_std_min", self.log_std_min)
             )
@@ -166,7 +170,7 @@ class TFv6PPOPolicy(nn.Module):
             dtype=self.autocast_dtype,
             enabled=self.autocast_enabled,
         ):
-            _ = self.tfv6(obs_dict)
+            _ = self.tfv6(obs_dict, skip_perception_heads=self.skip_perception_heads)
         value_features = self._build_value_features().float()
         return self.value_head(value_features)
 
@@ -184,7 +188,9 @@ class TFv6PPOPolicy(nn.Module):
             dtype=self.autocast_dtype,
             enabled=self.autocast_enabled,
         ):
-            predictions = self.tfv6(obs_dict)
+            predictions = self.tfv6(
+                obs_dict, skip_perception_heads=self.skip_perception_heads
+            )
 
         route = (
             predictions.pred_route
