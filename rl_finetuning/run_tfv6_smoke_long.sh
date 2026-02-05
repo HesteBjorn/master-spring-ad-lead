@@ -80,7 +80,9 @@ if route_id == 0:
     raise RuntimeError(f"No routes selected. towns={sorted(towns)}")
 
 ET.indent(root, space="  ")
-ET.ElementTree(root).write(out_file, encoding="utf-8", xml_declaration=True)
+xml_bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+with gzip.open(out_file, "wb") as f:
+    f.write(xml_bytes)
 print(f"[smoke-long] Built merged route file: {out_file} ({route_id} routes)")
 PY
 }
@@ -88,7 +90,7 @@ PY
 if [[ "${ROUTE_PROFILE}" == "town03_debug" ]]; then
   ROUTE_FILE="${ROUTE_FILE:-${CARL_ROOT}/custom_leaderboard/leaderboard/data/debug_routes_with_scenarios/route_Town03_00.xml.gz}"
 elif [[ "${ROUTE_PROFILE}" == "debug_suite" ]]; then
-  ROUTE_FILE="${ROUTE_FILE:-/tmp/tfv6_debug_suite_routes.xml}"
+  ROUTE_FILE="${ROUTE_FILE:-/tmp/tfv6_debug_suite_routes.xml.gz}"
   build_debug_suite_routes "${ROUTE_FILE}"
 elif [[ "${ROUTE_PROFILE}" == "training" ]]; then
   ROUTE_FILE="${ROUTE_FILE:-${CARL_ROOT}/custom_leaderboard/leaderboard/data/routes_training.xml}"
