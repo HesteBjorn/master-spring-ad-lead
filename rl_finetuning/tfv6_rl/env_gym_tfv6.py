@@ -23,6 +23,8 @@ class CARLAEnvTFv6(gym.Env):
         self.port = port
         self.initialized = False
         self.rl_config = config
+        self.episode_return = 0.0
+        self.episode_length = 0
 
         tfv6_checkpoint = getattr(config, "tfv6_checkpoint", None)
         if tfv6_checkpoint is None:
@@ -72,6 +74,8 @@ class CARLAEnvTFv6(gym.Env):
 
         data = self.socket.recv_multipart(copy=False)
         self.num_recv += 1
+        self.episode_return = 0.0
+        self.episode_length = 0
 
         obs_buffers = data[: len(self.obs_codec.specs)]
         observation = self.obs_codec.unpack(obs_buffers)
@@ -108,6 +112,13 @@ class CARLAEnvTFv6(gym.Env):
             "n_steps": np.frombuffer(data[idx + 3], dtype=np.int32).item(),
             "suggest": np.frombuffer(data[idx + 4], dtype=np.int32).item(),
         }
+        self.episode_return += float(reward)
+        self.episode_length += 1
+        if termination or truncation:
+            info["episode"] = {
+                "r": float(self.episode_return),
+                "l": int(self.episode_length),
+            }
         num_sent = np.frombuffer(data[idx + 5], dtype=np.uint64).item()
 
         if self.num_recv != num_sent:

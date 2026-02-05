@@ -1208,6 +1208,17 @@ def main():
                             total_returns[rank] += single_info["episode"]["r"].item()
                             total_lengths[rank] += single_info["episode"]["l"].item()
                             num_total_returns[rank] += 1
+            elif "episode" in info.keys():
+                episode_info = info["episode"]
+                ep_return = float(episode_info["r"])
+                ep_length = int(episode_info["l"])
+                print(
+                    f"rank: {rank}, config.global_step={config.global_step}, "
+                    f"episodic_return={ep_return}"
+                )
+                total_returns[rank] += ep_return
+                total_lengths[rank] += ep_length
+                num_total_returns[rank] += 1
 
             if config.use_dd_ppo_preempt:
                 num_done = int(num_rollouts_done_store.get("num_done"))
@@ -1714,6 +1725,10 @@ def main():
             )
             writer.add_scalar(
                 "charts/advantages", b_advantages.mean().item(), config.global_step
+            )
+            # Always log a reward signal, even if no episode terminates.
+            writer.add_scalar(
+                "charts/mean_reward", rewards.mean().item(), config.global_step
             )
             # Adjusted so it doesn't count the first epoch which is slower than the rest (converges faster)
             print("SPS:", int(local_processed_samples / (time.time() - start_time)))
