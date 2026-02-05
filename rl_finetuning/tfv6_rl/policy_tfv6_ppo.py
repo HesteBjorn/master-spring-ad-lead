@@ -84,6 +84,8 @@ class TFv6PPOPolicy(nn.Module):
         self.use_correlated_noise = use_correlated_noise
         self.correlated_noise_rho = correlated_noise_rho
         self.noise_ramp = noise_ramp
+        self.log_std_min = -5.0
+        self.log_std_max = 2.0
         if rl_config is not None:
             self.use_correlated_noise = bool(
                 getattr(rl_config, "use_correlated_noise", self.use_correlated_noise)
@@ -92,6 +94,12 @@ class TFv6PPOPolicy(nn.Module):
                 getattr(rl_config, "correlated_noise_rho", self.correlated_noise_rho)
             )
             self.noise_ramp = bool(getattr(rl_config, "noise_ramp", self.noise_ramp))
+            self.log_std_min = float(
+                getattr(rl_config, "log_std_min", self.log_std_min)
+            )
+            self.log_std_max = float(
+                getattr(rl_config, "log_std_max", self.log_std_max)
+            )
             self.train_planning_decoder_only = bool(
                 getattr(
                     rl_config,
@@ -139,15 +147,16 @@ class TFv6PPOPolicy(nn.Module):
         return kv.mean(dim=1)
 
     def _apply_noise_ramp(self, log_std: torch.Tensor) -> torch.Tensor:
+        log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
         if not self.noise_ramp:
             return log_std
         mask = torch.ones(self.action_dim, device=log_std.device, dtype=log_std.dtype)
         if self.action_codec.predict_route and self.action_codec.num_route_points > 0:
             start = self.action_codec.slices.route.start
-            mask[start : start + 2] = 0.0
+            mask[start : start + 2] = 0.5
         if self.action_codec.predict_waypoints and self.action_codec.num_waypoints > 0:
             start = self.action_codec.slices.waypoints.start
-            mask[start : start + 2] = 0.0
+            mask[start : start + 2] = 0.5
         std = torch.exp(log_std) * mask
         return torch.log(std + 1e-6)
 
