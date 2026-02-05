@@ -59,17 +59,14 @@ TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke.sh outputs/checkpoints/tfv6_re
 # Assumes carla server running
 TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke_long.sh outputs/checkpoints/tfv6_resnet34 outputs/rl_logs TFV6_PPO_SMOKE_LONG
 ```
-Or low memory version with different params:
+Can be resumed by passing a 4th arg:
 ```bash
-TFV6_RL_DEBUG=1 \
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-TOTAL_BATCH_SIZE=512 \
-TOTAL_MINIBATCH_SIZE=64 \
-UPDATE_EPOCHS=2 \
-bash rl_finetuning/run_tfv6_smoke_long.sh \
-outputs/checkpoints/tfv6_resnet34 outputs/rl_logs TFV6_PPO_SMOKE_LONG
+TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke_long.sh \
+  outputs/checkpoints/tfv6_resnet34 \
+  outputs/rl_logs \
+  TFV6_PPO_SMOKE_LONG \
+  outputs/rl_logs/TFV6_PPO_SMOKE_LONG/model_latest_000000123.pth
 ```
-
 ## Smoke test overnight:
 ```bash
 # Prepend TARGET_HOURS=10 ASSUMED_SPS=5.5 bash ...  for parameter adjustments.
@@ -77,4 +74,12 @@ bash rl_finetuning/run_tfv6_smoke_overnight.sh \
 outputs/checkpoints/tfv6_resnet34 \
 outputs/rl_logs \
 TFV6_PPO_SMOKE_OVERNIGHT
+```
+And with optional resume argument:
+```bash
+TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke_overnight.sh \
+outputs/checkpoints/tfv6_resnet34 \
+outputs/rl_logs \
+TFV6_PPO_SMOKE_OVERNIGHT \
+outputs/rl_logs/TFV6_PPO_SMOKE_OVERNIGHT/model_latest_000000xxx.pth
 ```

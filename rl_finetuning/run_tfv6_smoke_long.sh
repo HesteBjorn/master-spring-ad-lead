@@ -11,6 +11,7 @@ CARL_ROOT="${REPO_ROOT}/3rd_party/CaRL/CARLA"
 CHECKPOINT="${1:-${REPO_ROOT}/outputs/checkpoints/tfv6_resnet34}"
 LOGDIR="${2:-${REPO_ROOT}/outputs/rl_logs}"
 EXP_NAME="${3:-TFV6_PPO_SMOKE_LONG}"
+CONTINUE_CHECKPOINT="${4:-${CONTINUE_CHECKPOINT:-}}"
 
 GYM_PORT="${GYM_PORT:-5555}"
 CARLA_PORT="${CARLA_PORT:-2000}"
@@ -136,6 +137,9 @@ echo "[smoke-long] update_epochs=${UPDATE_EPOCHS}"
 echo "[smoke-long] track=${TRACK}"
 echo "[smoke-long] debug_memory=${DEBUG_MEMORY}"
 echo "[smoke-long] logs_dir=${RUN_DIR}"
+if [[ -n "${CONTINUE_CHECKPOINT}" ]]; then
+  echo "[smoke-long] continue_checkpoint=${CONTINUE_CHECKPOINT}"
+fi
 
 if [[ "${GPU_TELEMETRY_ENABLE}" == "1" ]] && command -v nvidia-smi >/dev/null 2>&1; then
   INTERVAL_SECONDS="$(awk "BEGIN { printf \"%.3f\", ${GPU_TELEMETRY_INTERVAL_MS} / 1000 }")"
@@ -199,6 +203,15 @@ trap cleanup EXIT
 sleep 2
 
 echo "[smoke-long] Starting TFv6 PPO trainer"
+LOAD_ARG=()
+if [[ -n "${CONTINUE_CHECKPOINT}" ]]; then
+  CONTINUE_CHECKPOINT="$(realpath -m "${CONTINUE_CHECKPOINT}")"
+  if [[ ! -f "${CONTINUE_CHECKPOINT}" ]]; then
+    echo "[smoke-long] ERROR: continue checkpoint not found: ${CONTINUE_CHECKPOINT}"
+    exit 1
+  fi
+  LOAD_ARG=(--load_file "${CONTINUE_CHECKPOINT}")
+fi
 torchrun --nnodes=1 --nproc_per_node=1 --max_restarts=0 \
   --rdzv-backend=c10d --rdzv-endpoint=localhost:0 \
   "${REPO_ROOT}/rl_finetuning/train_tfv6_ppo.py" \
@@ -215,6 +228,7 @@ torchrun --nnodes=1 --nproc_per_node=1 --max_restarts=0 \
   --debug_shapes 1 \
   --heartbeat_steps "${HEARTBEAT_STEPS}" \
   --debug_memory "${DEBUG_MEMORY}" \
+  "${LOAD_ARG[@]}" \
   2>&1 | tee "${TRAINER_LOG}"
 
 echo "[smoke-long] Done. Check TensorBoard logs at ${LOGDIR}/${EXP_NAME}"

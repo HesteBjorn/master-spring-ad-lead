@@ -64,6 +64,24 @@ TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke_long.sh \
   TFV6_PPO_SMOKE_LONG
 ```
 
+You can resume from a checkpoint by passing a 4th argument:
+```bash
+TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke_long.sh \
+  outputs/checkpoints/tfv6_resnet34 \
+  outputs/rl_logs \
+  TFV6_PPO_SMOKE_LONG \
+  outputs/rl_logs/TFV6_PPO_SMOKE_LONG/model_latest_000000xxx.pth
+```
+
+The overnight script accepts the same optional 4th argument:
+```bash
+TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke_overnight.sh \
+  outputs/checkpoints/tfv6_resnet34 \
+  outputs/rl_logs \
+  TFV6_PPO_SMOKE_OVERNIGHT \
+  outputs/rl_logs/TFV6_PPO_SMOKE_OVERNIGHT/model_latest_000000xxx.pth
+```
+
 Default profile is `town03_debug` (scenario route with repetitions). You can switch:
 
 - `ROUTE_PROFILE=debug_suite`: merges selected files from `debug_routes_with_scenarios`.

@@ -10,6 +10,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHECKPOINT="${1:-${REPO_ROOT}/outputs/checkpoints/tfv6_resnet34}"
 LOGDIR="${2:-${REPO_ROOT}/outputs/rl_logs}"
 EXP_NAME="${3:-TFV6_PPO_SMOKE_OVERNIGHT}"
+CONTINUE_CHECKPOINT="${4:-${CONTINUE_CHECKPOINT:-}}"
 
 # CaRL v1.1-style rollout length per env: 256 steps/update.
 # With one environment, TOTAL_BATCH_SIZE is the per-update rollout length.
@@ -52,8 +53,12 @@ echo "[smoke-overnight] rollout_steps_per_env_update=${TOTAL_BATCH_SIZE} (target
 echo "[smoke-overnight] total_timesteps=${TOTAL_TIMESTEPS}"
 echo "[smoke-overnight] estimated_runtime_hours~=${EST_HOURS} (assumed_sps=${ASSUMED_SPS})"
 echo "[smoke-overnight] repetitions=${REPETITIONS} route_profile=${ROUTE_PROFILE}"
+if [[ -n "${CONTINUE_CHECKPOINT}" ]]; then
+  echo "[smoke-overnight] continue_checkpoint=${CONTINUE_CHECKPOINT}"
+fi
 
 exec bash "${REPO_ROOT}/rl_finetuning/run_tfv6_smoke_long.sh" \
   "${CHECKPOINT}" \
   "${LOGDIR}" \
-  "${EXP_NAME}"
+  "${EXP_NAME}" \
+  "${CONTINUE_CHECKPOINT}"
