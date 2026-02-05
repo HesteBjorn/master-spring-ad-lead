@@ -1200,16 +1200,34 @@ def main():
                             exp_suggest[step, idx] = single_info["suggest"]
 
                         # Sum up total returns and how often the env was reset during this iteration.
+                        episode_info = None
                         if "episode" in single_info.keys():
+                            episode_info = single_info["episode"]
+                        elif "tfv6_episode" in single_info.keys():
+                            episode_info = single_info["tfv6_episode"]
+                        if episode_info is not None:
+                            ep_return = float(episode_info["r"])
+                            ep_length = int(episode_info["l"])
                             print(
                                 f"rank: {rank}, config.global_step={config.global_step}, "
-                                f"episodic_return={single_info['episode']['r']}"
+                                f"episodic_return={ep_return}"
                             )
-                            total_returns[rank] += single_info["episode"]["r"].item()
-                            total_lengths[rank] += single_info["episode"]["l"].item()
+                            total_returns[rank] += ep_return
+                            total_lengths[rank] += ep_length
                             num_total_returns[rank] += 1
             elif "episode" in info.keys():
                 episode_info = info["episode"]
+                ep_return = float(episode_info["r"])
+                ep_length = int(episode_info["l"])
+                print(
+                    f"rank: {rank}, config.global_step={config.global_step}, "
+                    f"episodic_return={ep_return}"
+                )
+                total_returns[rank] += ep_return
+                total_lengths[rank] += ep_length
+                num_total_returns[rank] += 1
+            elif "tfv6_episode" in info.keys():
+                episode_info = info["tfv6_episode"]
                 ep_return = float(episode_info["r"])
                 ep_length = int(episode_info["l"])
                 print(

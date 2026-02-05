@@ -115,7 +115,7 @@ class CARLAEnvTFv6(gym.Env):
         self.episode_return += float(reward)
         self.episode_length += 1
         if termination or truncation:
-            info["episode"] = {
+            info["tfv6_episode"] = {
                 "r": float(self.episode_return),
                 "l": int(self.episode_length),
             }
