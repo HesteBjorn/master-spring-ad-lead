@@ -35,6 +35,7 @@ run_dir=""
 sps_monitor_pid=""
 stall_monitor_pid=""
 heartbeat_pid=""
+last_attached_run_dir=""
 
 log() {
   local msg="$1"
@@ -101,29 +102,42 @@ monitor_sps() {
 
   local below=0
   local seen=0
+  local last_count=0
 
-  tail -n 0 -F "${trainer_log}" | while read -r line; do
+  while true; do
     if ! kill -0 "${run_pid}" >/dev/null 2>&1; then
       exit 0
     fi
-    if [[ "${line}" =~ SPS:\ ([0-9]+) ]]; then
-      local sps="${BASH_REMATCH[1]}"
-      seen=$((seen + 1))
-      if (( seen <= SPS_GRACE_UPDATES )); then
-        continue
-      fi
-      if (( sps < SPS_THRESHOLD )); then
-        below=$((below + 1))
-      else
-        below=0
-      fi
-      if (( below >= SPS_CONSECUTIVE )); then
-        log "SPS=${sps} below ${SPS_THRESHOLD} for ${below} updates; triggering restart."
-        echo "SPS_TRIGGER ${sps}" >"${trigger_file}"
-        kill "${run_pid}" >/dev/null 2>&1 || true
-        exit 2
+
+    if [[ -f "${trainer_log}" ]]; then
+      local count
+      count="$(grep -c "^SPS:" "${trainer_log}" 2>/dev/null || true)"
+      count="${count:-0}"
+      if (( count > last_count )); then
+        local sps
+        sps="$(awk '/^SPS:/{v=$2} END{print v}' "${trainer_log}" 2>/dev/null || true)"
+        if [[ "${sps}" =~ ^[0-9]+$ ]]; then
+          seen=$((seen + 1))
+          if (( seen > SPS_GRACE_UPDATES )); then
+            if (( sps < SPS_THRESHOLD )); then
+              below=$((below + 1))
+            else
+              below=0
+            fi
+            if (( below >= SPS_CONSECUTIVE )); then
+              log "SPS=${sps} below ${SPS_THRESHOLD} for ${below} updates; triggering restart."
+              echo "SPS_TRIGGER ${sps}" >"${trigger_file}"
+              if kill -0 "${run_pid}" >/dev/null 2>&1; then
+                kill "${run_pid}" >/dev/null 2>&1 || true
+              fi
+              exit 2
+            fi
+          fi
+        fi
+        last_count="${count}"
       fi
     fi
+    sleep 5
   done
 }
 
@@ -162,7 +176,30 @@ monitor_no_progress() {
   done
 }
 
+wait_for_fresh_run_dir() {
+  local exp_dir="$1"
+  local run_pid="$2"
+  local timeout_seconds="$3"
+  local deadline=$((SECONDS + timeout_seconds))
+  while (( SECONDS < deadline )); do
+    if ! kill -0 "${run_pid}" >/dev/null 2>&1; then
+      return 1
+    fi
+    local candidate
+    candidate="$(ls -td "${exp_dir}"/run_* 2>/dev/null | head -n 1 || true)"
+    if [[ -n "${candidate}" && "${candidate}" != "${last_attached_run_dir}" && -f "${candidate}/trainer.log" ]]; then
+      echo "${candidate}"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 while true; do
+  trigger_file=""
+  sps_monitor_pid=""
+  stall_monitor_pid=""
   start_carla
 
   exp_dir="${LOGDIR}/${EXP_NAME}"
@@ -182,23 +219,24 @@ while true; do
       "${EXP_NAME}" &
   run_pid=$!
 
-  # Wait for trainer log.
+  # Wait for a fresh run dir and trainer log (avoid re-attaching stale runs).
   trainer_log=""
-  for _ in {1..120}; do
-    run_dir="$(ls -td "${exp_dir}"/run_* 2>/dev/null | head -n 1 || true)"
-    if [[ -n "${run_dir}" && -f "${run_dir}/trainer.log" ]]; then
-      trainer_log="${run_dir}/trainer.log"
-      trigger_file="${run_dir}/sps_triggered.txt"
-      break
-    fi
-    sleep 1
-  done
+  run_dir=""
+  run_dir="$(wait_for_fresh_run_dir "${exp_dir}" "${run_pid}" 180 || true)"
+  if [[ -n "${run_dir}" ]]; then
+    trainer_log="${run_dir}/trainer.log"
+    trigger_file="${run_dir}/sps_triggered.txt"
+    last_attached_run_dir="${run_dir}"
+  fi
 
   if [[ -z "${trainer_log}" ]]; then
-    log "ERROR: trainer.log not found; aborting."
+    log "No fresh trainer.log found within timeout; restarting."
     kill "${run_pid}" >/dev/null 2>&1 || true
+    kill_leaderboard
+    kill_trainer
     stop_carla
-    exit 1
+    sleep 5
+    continue
   fi
   log "Attached to run_dir=${run_dir} trainer_log=${trainer_log}"
 
