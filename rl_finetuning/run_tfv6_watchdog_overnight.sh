@@ -23,6 +23,46 @@ NO_PROGRESS_POLL_SECONDS="${NO_PROGRESS_POLL_SECONDS:-60}"
 
 CHECKPOINT="$(realpath -m "${CHECKPOINT}")"
 LOGDIR="$(realpath -m "${LOGDIR}")"
+LOGFILE="${WATCHDOG_LOG:-${LOGDIR}/${EXP_NAME}/watchdog.log}"
+HEARTBEAT_SECONDS="${WATCHDOG_HEARTBEAT_SECONDS:-60}"
+
+mkdir -p "$(dirname "${LOGFILE}")"
+
+run_pid=""
+trainer_log=""
+trigger_file=""
+run_dir=""
+sps_monitor_pid=""
+stall_monitor_pid=""
+heartbeat_pid=""
+
+log() {
+  local msg="$1"
+  printf "[%s] [sps-watch] %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "${msg}" | tee -a "${LOGFILE}"
+}
+
+start_watchdog_heartbeat() {
+  (
+    while true; do
+      sleep "${HEARTBEAT_SECONDS}"
+      log "heartbeat watchdog_pid=$$ run_pid=${run_pid:-none} run_dir=${run_dir:-none}"
+    done
+  ) &
+  heartbeat_pid=$!
+}
+
+on_exit() {
+  local exit_code=$?
+  if [[ -n "${heartbeat_pid}" ]]; then
+    kill "${heartbeat_pid}" >/dev/null 2>&1 || true
+  fi
+  log "exit code=${exit_code} run_pid=${run_pid:-none} run_dir=${run_dir:-none} trigger_file=${trigger_file:-none}"
+}
+
+trap on_exit EXIT INT TERM
+log "watchdog starting checkpoint=${CHECKPOINT} logdir=${LOGDIR} exp_name=${EXP_NAME} logfile=${LOGFILE}"
+log "settings sps_threshold=${SPS_THRESHOLD} sps_consecutive=${SPS_CONSECUTIVE} no_progress_timeout=${NO_PROGRESS_TIMEOUT_SECONDS}s heartbeat=${HEARTBEAT_SECONDS}s"
+start_watchdog_heartbeat
 
 latest_checkpoint() {
   local exp_dir="$1"
@@ -31,16 +71,16 @@ latest_checkpoint() {
 
 start_carla() {
   if [[ "${MANAGE_CARLA}" == "1" ]]; then
-    echo "[sps-watch] Starting CARLA on port ${CARLA_PORT}"
+    log "Starting CARLA on port ${CARLA_PORT}"
     "${REPO_ROOT}/scripts/start_carla.sh" "${CARLA_PORT}"
-    echo "[sps-watch] Waiting ${CARLA_BOOT_WAIT_SECONDS}s for CARLA to be ready"
+    log "Waiting ${CARLA_BOOT_WAIT_SECONDS}s for CARLA to be ready"
     sleep "${CARLA_BOOT_WAIT_SECONDS}"
   fi
 }
 
 stop_carla() {
   if [[ "${MANAGE_CARLA}" == "1" ]]; then
-    echo "[sps-watch] Stopping CARLA"
+    log "Stopping CARLA"
     "${REPO_ROOT}/scripts/clean_carla.sh"
   fi
 }
@@ -78,7 +118,7 @@ monitor_sps() {
         below=0
       fi
       if (( below >= SPS_CONSECUTIVE )); then
-        echo "[sps-watch] SPS=${sps} below ${SPS_THRESHOLD} for ${below} updates; triggering restart."
+        log "SPS=${sps} below ${SPS_THRESHOLD} for ${below} updates; triggering restart."
         echo "SPS_TRIGGER ${sps}" >"${trigger_file}"
         kill "${run_pid}" >/dev/null 2>&1 || true
         exit 2
@@ -110,7 +150,7 @@ monitor_no_progress() {
       local now_ts
       now_ts="$(date +%s)"
       if (( now_ts - last_ts > NO_PROGRESS_TIMEOUT_SECONDS )); then
-        echo "[sps-watch] No trainer log updates for ${NO_PROGRESS_TIMEOUT_SECONDS}s; triggering restart."
+        log "No trainer log updates for ${NO_PROGRESS_TIMEOUT_SECONDS}s; triggering restart."
         echo "STALL_TRIGGER" >"${trigger_file}"
         if kill -0 "${run_pid}" >/dev/null 2>&1; then
           kill "${run_pid}" >/dev/null 2>&1 || true
@@ -130,9 +170,9 @@ while true; do
   resume_ckpt="$(latest_checkpoint "${exp_dir}")"
 
   if [[ -n "${resume_ckpt}" ]]; then
-    echo "[sps-watch] Resuming from ${resume_ckpt}"
+    log "Resuming from ${resume_ckpt}"
   else
-    echo "[sps-watch] Starting fresh (no prior checkpoints)."
+    log "Starting fresh (no prior checkpoints)."
   fi
 
   CONTINUE_CHECKPOINT="${resume_ckpt}" \
@@ -155,14 +195,15 @@ while true; do
   done
 
   if [[ -z "${trainer_log}" ]]; then
-    echo "[sps-watch] ERROR: trainer.log not found; aborting."
+    log "ERROR: trainer.log not found; aborting."
     kill "${run_pid}" >/dev/null 2>&1 || true
     stop_carla
     exit 1
   fi
+  log "Attached to run_dir=${run_dir} trainer_log=${trainer_log}"
 
   if ! wait_for_leaderboard_ready "${run_dir}/leaderboard.log"; then
-    echo "[sps-watch] Leaderboard not ready after ${LEADERBOARD_READY_TIMEOUT_SECONDS}s; restarting."
+    log "Leaderboard not ready after ${LEADERBOARD_READY_TIMEOUT_SECONDS}s; restarting."
     kill_leaderboard
     kill_trainer
     stop_carla
@@ -181,12 +222,12 @@ while true; do
   kill "${stall_monitor_pid}" >/dev/null 2>&1 || true
 
   if [[ "${run_status}" != "0" && ! -f "${trigger_file}" ]]; then
-    echo "[sps-watch] Run exited with status ${run_status}; triggering restart."
+    log "Run exited with status ${run_status}; triggering restart."
     echo "RUN_EXIT ${run_status}" >"${trigger_file}"
   fi
 
   if [[ -f "${trigger_file}" ]]; then
-    echo "[sps-watch] Restarting due to SPS trigger."
+    log "Restarting due to trigger: $(cat "${trigger_file}")"
     kill_leaderboard
     kill_trainer
     stop_carla
@@ -194,6 +235,6 @@ while true; do
     continue
   fi
 
-  echo "[sps-watch] Training finished without SPS trigger."
+  log "Training finished without trigger."
   break
 done

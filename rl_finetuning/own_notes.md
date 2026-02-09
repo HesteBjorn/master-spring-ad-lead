@@ -42,6 +42,13 @@ ssh erikhbj@100.92.150.98
 ```
 Or go to vscode: `Ctrl+Shift+P> Remote-SSH: Connect to Host...`
 
+# Training
+
+## Visualize losses and rewards
+```bash
+tensorboard --logdir outputs/rl_logs
+```
+
 ## Smoke test PPO single update
 Terminal 1:
 ```bash
@@ -75,15 +82,7 @@ outputs/checkpoints/tfv6_resnet34 \
 outputs/rl_logs \
 TFV6_PPO_SMOKE_OVERNIGHT_2
 ```
-Older:
-```bash
-# Prepend TARGET_HOURS=10 ASSUMED_SPS=5.5 bash ...  for parameter adjustments.
-bash rl_finetuning/run_tfv6_smoke_overnight.sh \
-outputs/checkpoints/tfv6_resnet34 \
-outputs/rl_logs \
-TFV6_PPO_SMOKE_OVERNIGHT
-```
-And with optional resume argument:
+OLD with optional resume argument:
 ```bash
 TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke_overnight.sh \
 outputs/checkpoints/tfv6_resnet34 \
@@ -95,15 +94,15 @@ outputs/rl_logs/TFV6_PPO_SMOKE_OVERNIGHT/model_latest_000000xxx.pth
 ## Weekend run with auto-carla restarts
 ```bash
 NO_PROGRESS_TIMEOUT_SECONDS=300 \
-SPS_THRESHOLD=10 SPS_CONSECUTIVE=3 \
-TARGET_HOURS=86 ASSUMED_SPS=10 \
+SPS_THRESHOLD=9 SPS_CONSECUTIVE=3 \
+TARGET_HOURS=70 ASSUMED_SPS=10 \
 ROUTE_PROFILE=debug_suite \
 DEBUG_SUITE_TOWNS=Town01,Town02,Town03,Town04,Town05,Town06 \
 REPETITIONS=300 \
 CARLA_BOOT_WAIT_SECONDS=30 \
 LEADERBOARD_READY_TIMEOUT_SECONDS=180 \
-bash rl_finetuning/run_tfv6_watch_carlaresets_overnight.sh \
+bash rl_finetuning/run_tfv6_watchdog_overnight.sh \
 outputs/checkpoints/tfv6_resnet34 \
 outputs/rl_logs \
-TFV6_PPO_WEEKEND_20260205
+TFV6_PPO_WEEKEND_20260209
 ```
