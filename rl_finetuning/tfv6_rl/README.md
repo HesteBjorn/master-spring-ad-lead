@@ -52,35 +52,28 @@ the rollout intentionally tiny so you can quickly verify gradients/logging.
 Defaults are `total_batch_size=32`, `total_timesteps=32`, `update_epochs=1`.
 If this succeeds, TensorBoard should show at least one PPO update (not just step 0 hyperparameters).
 
-## Longer smoke/debug run (~1 hour)
+## Long local run (single launcher)
 
-Use this when you want more realistic rollouts and enough PPO updates to inspect
-reward/loss trends in TensorBoard.
+Use `train_long_local.sh` for both longer local debug runs and overnight runs.
 
 ```bash
-TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke_long.sh \
+TFV6_RL_DEBUG=1 bash rl_finetuning/train_long_local.sh \
   outputs/checkpoints/tfv6_resnet34 \
   outputs/rl_logs \
-  TFV6_PPO_SMOKE_LONG
+  TFV6_PPO_LONG_LOCAL
 ```
 
 You can resume from a checkpoint by passing a 4th argument:
 ```bash
-TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke_long.sh \
+TFV6_RL_DEBUG=1 bash rl_finetuning/train_long_local.sh \
   outputs/checkpoints/tfv6_resnet34 \
   outputs/rl_logs \
-  TFV6_PPO_SMOKE_LONG \
-  outputs/rl_logs/TFV6_PPO_SMOKE_LONG/model_latest_000000xxx.pth
+  TFV6_PPO_LONG_LOCAL \
+  outputs/rl_logs/TFV6_PPO_LONG_LOCAL/model_latest_000000xxx.pth
 ```
 
-The overnight script accepts the same optional 4th argument:
-```bash
-TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke_overnight.sh \
-  outputs/checkpoints/tfv6_resnet34 \
-  outputs/rl_logs \
-  TFV6_PPO_SMOKE_OVERNIGHT \
-  outputs/rl_logs/TFV6_PPO_SMOKE_OVERNIGHT/model_latest_000000xxx.pth
-```
+Use only:
+- `rl_finetuning/train_long_local.sh`
 
 Default profile is `town03_debug` (scenario route with repetitions). You can switch:
 

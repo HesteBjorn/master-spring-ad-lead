@@ -49,60 +49,21 @@ Or go to vscode: `Ctrl+Shift+P> Remote-SSH: Connect to Host...`
 tensorboard --logdir outputs/rl_logs
 ```
 
-## Smoke test PPO single update
-Terminal 1:
-```bash
-bash ./scripts/clean_carla.sh
-bash ./scripts/start_carla.sh
-```
-Terminal 2:
+## Long local run without watchdog (not reccommended)
 ```bash
 # Assumes carla server running
-TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke.sh outputs/checkpoints/tfv6_resnet34 outputs/rl_logs TFV6_PPO_SMOKE
-```
-
-## Smoke test long
-```bash
-# Assumes carla server running
-TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke_long.sh outputs/checkpoints/tfv6_resnet34 outputs/rl_logs TFV6_PPO_SMOKE_LONG
-```
-Can be resumed by passing a 4th arg:
-```bash
-TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke_long.sh \
+bash rl_finetuning/train_long_local.sh \
   outputs/checkpoints/tfv6_resnet34 \
   outputs/rl_logs \
-  TFV6_PPO_SMOKE_LONG \
-  outputs/rl_logs/TFV6_PPO_SMOKE_LONG/model_latest_000000123.pth
-```
-## Smoke test overnight:
-Complete with carla resets:
-```bash
-bash rl_finetuning/run_tfv6_smoke_overnight_watch.sh \
-outputs/checkpoints/tfv6_resnet34 \
-outputs/rl_logs \
-TFV6_PPO_SMOKE_OVERNIGHT_2
-```
-OLD with optional resume argument:
-```bash
-TFV6_RL_DEBUG=1 bash rl_finetuning/run_tfv6_smoke_overnight.sh \
-outputs/checkpoints/tfv6_resnet34 \
-outputs/rl_logs \
-TFV6_PPO_SMOKE_OVERNIGHT \
-outputs/rl_logs/TFV6_PPO_SMOKE_OVERNIGHT/model_latest_000000xxx.pth
+  TFV6_PPO_LONG_LOCAL \
+  # outputs/rl_logs/TFV6_PPO_LONG_LOCAL/model_latest_000000123.pth  # Optional resume argument, pointing to model .pth
 ```
 
 ## Weekend run with auto-carla restarts
 ```bash
-NO_PROGRESS_TIMEOUT_SECONDS=300 \
-SPS_THRESHOLD=9 SPS_CONSECUTIVE=3 \
-TARGET_HOURS=70 ASSUMED_SPS=10 \
-ROUTE_PROFILE=debug_suite \
-DEBUG_SUITE_TOWNS=Town01,Town02,Town03,Town04,Town05,Town06 \
-REPETITIONS=300 \
-CARLA_BOOT_WAIT_SECONDS=30 \
-LEADERBOARD_READY_TIMEOUT_SECONDS=180 \
+RUN_CONFIG_FILE=rl_finetuning/configs/weekend_local_run.env \
 bash rl_finetuning/run_tfv6_watchdog_overnight.sh \
-outputs/checkpoints/tfv6_resnet34 \
-outputs/rl_logs \
-TFV6_PPO_WEEKEND_20260209
+  outputs/checkpoints/tfv6_resnet34 \
+  outputs/rl_logs \
+  TFV6_PPO_WEEKEND_20260210
 ```

@@ -229,7 +229,7 @@ while true; do
   fi
 
   CONTINUE_CHECKPOINT="${resume_ckpt}" \
-    bash "${REPO_ROOT}/rl_finetuning/run_tfv6_smoke_overnight.sh" \
+    bash "${REPO_ROOT}/rl_finetuning/train_long_local.sh" \
       "${CHECKPOINT}" \
       "${LOGDIR}" \
       "${EXP_NAME}" &

@@ -1,23 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Longer TFv6 PPO smoke/debug run.
-# Keeps the CaRL two-process debug pattern (leaderboard + learner) but uses
-# longer rollouts and more PPO updates for TensorBoard sanity checks.
+# Long local TFv6 PPO training run (leaderboard + trainer in one script).
+# Designed as the single source of truth for long runs.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CARL_ROOT="${REPO_ROOT}/3rd_party/CaRL/CARLA"
 
 CHECKPOINT="${1:-${REPO_ROOT}/outputs/checkpoints/tfv6_resnet34}"
 LOGDIR="${2:-${REPO_ROOT}/outputs/rl_logs}"
-EXP_NAME="${3:-TFV6_PPO_SMOKE_LONG}"
+EXP_NAME="${3:-TFV6_PPO_LONG_LOCAL}"
 CONTINUE_CHECKPOINT="${4:-${CONTINUE_CHECKPOINT:-}}"
 
 RUN_CONFIG_FILE="${RUN_CONFIG_FILE:-}"
 if [[ -n "${RUN_CONFIG_FILE}" ]]; then
   RUN_CONFIG_FILE="$(realpath -m "${RUN_CONFIG_FILE}")"
   if [[ ! -f "${RUN_CONFIG_FILE}" ]]; then
-    echo "[smoke-long] ERROR: RUN_CONFIG_FILE not found: ${RUN_CONFIG_FILE}"
+    echo "[train-long-local] ERROR: RUN_CONFIG_FILE not found: ${RUN_CONFIG_FILE}"
     exit 1
   fi
   set -a
@@ -34,27 +33,40 @@ TCP_STORE_PORT="${TCP_STORE_PORT:-7000}"
 TRACK="${TRACK:-MAP_QUALIFIER}"
 ROUTE_PROFILE="${ROUTE_PROFILE:-town03_debug}"
 
-# "About one hour" defaults on a single env/GPU (depends on SPS on your machine).
-TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-1024}"
-TOTAL_MINIBATCH_SIZE="${TOTAL_MINIBATCH_SIZE:-256}"
-TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-30000}"
+# PPO defaults for long local runs.
+TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-256}"
+TOTAL_MINIBATCH_SIZE="${TOTAL_MINIBATCH_SIZE:-64}"
 UPDATE_EPOCHS="${UPDATE_EPOCHS:-3}"
-HEARTBEAT_STEPS="${HEARTBEAT_STEPS:-128}"
-REPETITIONS="${REPETITIONS:-50}"
+
+# Runtime targeting via assumed SPS (can be overridden by TOTAL_TIMESTEPS).
+TARGET_HOURS="${TARGET_HOURS:-12}"
+ASSUMED_SPS="${ASSUMED_SPS:-5.0}"
+if [[ -z "${TOTAL_TIMESTEPS:-}" ]]; then
+  TOTAL_TIMESTEPS="$(python - <<PY
+target_hours = float("${TARGET_HOURS}")
+sps = float("${ASSUMED_SPS}")
+print(int(target_hours * 3600.0 * sps))
+PY
+)"
+fi
+
+# Avoid route exhaustion by default.
+REPETITIONS="${REPETITIONS:-500}"
 LEADERBOARD_DEBUG="${LEADERBOARD_DEBUG:-0}"
-DEBUG_MEMORY="${DEBUG_MEMORY:-1}"
+HEARTBEAT_STEPS="${HEARTBEAT_STEPS:-64}"
+DEBUG_MEMORY="${DEBUG_MEMORY:-0}"
 GPU_TELEMETRY_ENABLE="${GPU_TELEMETRY_ENABLE:-1}"
-GPU_TELEMETRY_INTERVAL_MS="${GPU_TELEMETRY_INTERVAL_MS:-200}"
+GPU_TELEMETRY_INTERVAL_MS="${GPU_TELEMETRY_INTERVAL_MS:-500}"
 
 CHECKPOINT="$(realpath -m "${CHECKPOINT}")"
 LOGDIR="$(realpath -m "${LOGDIR}")"
 
 if [[ ! -f "${CHECKPOINT}/config.json" ]]; then
-  echo "[smoke-long] ERROR: ${CHECKPOINT}/config.json not found"
+  echo "[train-long-local] ERROR: ${CHECKPOINT}/config.json not found"
   exit 1
 fi
 if ! compgen -G "${CHECKPOINT}/model*.pth" >/dev/null; then
-  echo "[smoke-long] ERROR: no model*.pth found in ${CHECKPOINT}"
+  echo "[train-long-local] ERROR: no model*.pth found in ${CHECKPOINT}"
   exit 1
 fi
 
@@ -96,7 +108,7 @@ ET.indent(root, space="  ")
 xml_bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 with gzip.open(out_file, "wb") as f:
     f.write(xml_bytes)
-print(f"[smoke-long] Built merged route file: {out_file} ({route_id} routes)")
+print(f"[train-long-local] Built merged route file: {out_file} ({route_id} routes)")
 PY
 }
 
@@ -107,17 +119,16 @@ elif [[ "${ROUTE_PROFILE}" == "debug_suite" ]]; then
   build_debug_suite_routes "${ROUTE_FILE}"
 elif [[ "${ROUTE_PROFILE}" == "training" ]]; then
   ROUTE_FILE="${ROUTE_FILE:-${CARL_ROOT}/custom_leaderboard/leaderboard/data/routes_training.xml}"
-  # routes_training already has many routes; repetitions can stay low.
   REPETITIONS="${REPETITIONS:-1}"
 else
-  echo "[smoke-long] ERROR: unsupported ROUTE_PROFILE='${ROUTE_PROFILE}'"
+  echo "[train-long-local] ERROR: unsupported ROUTE_PROFILE='${ROUTE_PROFILE}'"
   echo "Supported: town03_debug | debug_suite | training"
   exit 1
 fi
 
 ROUTE_FILE="$(realpath -m "${ROUTE_FILE}")"
 if [[ ! -f "${ROUTE_FILE}" ]]; then
-  echo "[smoke-long] ERROR: route file not found: ${ROUTE_FILE}"
+  echo "[train-long-local] ERROR: route file not found: ${ROUTE_FILE}"
   exit 1
 fi
 
@@ -141,29 +152,37 @@ GPU_APPS_LOG="${RUN_DIR}/gpu_processes.csv"
 GPU_TELEMETRY_PID=""
 GPU_APPS_PID=""
 
-echo "[smoke-long] checkpoint=${CHECKPOINT}"
-echo "[smoke-long] route_profile=${ROUTE_PROFILE}"
-echo "[smoke-long] route_file=${ROUTE_FILE}"
-echo "[smoke-long] repetitions=${REPETITIONS}"
-echo "[smoke-long] total_timesteps=${TOTAL_TIMESTEPS}"
-echo "[smoke-long] total_batch_size=${TOTAL_BATCH_SIZE}"
-echo "[smoke-long] total_minibatch_size=${TOTAL_MINIBATCH_SIZE}"
-echo "[smoke-long] update_epochs=${UPDATE_EPOCHS}"
-echo "[smoke-long] track=${TRACK}"
-echo "[smoke-long] debug_memory=${DEBUG_MEMORY}"
-echo "[smoke-long] logs_dir=${RUN_DIR}"
+EST_HOURS="$(python - <<PY
+steps = float("${TOTAL_TIMESTEPS}")
+sps = float("${ASSUMED_SPS}")
+print(f"{steps / sps / 3600.0:.2f}")
+PY
+)"
+
+echo "[train-long-local] checkpoint=${CHECKPOINT}"
+echo "[train-long-local] route_profile=${ROUTE_PROFILE}"
+echo "[train-long-local] route_file=${ROUTE_FILE}"
+echo "[train-long-local] repetitions=${REPETITIONS}"
+echo "[train-long-local] total_timesteps=${TOTAL_TIMESTEPS}"
+echo "[train-long-local] est_runtime_hours~=${EST_HOURS} (assumed_sps=${ASSUMED_SPS})"
+echo "[train-long-local] total_batch_size=${TOTAL_BATCH_SIZE}"
+echo "[train-long-local] total_minibatch_size=${TOTAL_MINIBATCH_SIZE}"
+echo "[train-long-local] update_epochs=${UPDATE_EPOCHS}"
+echo "[train-long-local] track=${TRACK}"
+echo "[train-long-local] debug_memory=${DEBUG_MEMORY}"
+echo "[train-long-local] logs_dir=${RUN_DIR}"
 if [[ -n "${CONTINUE_CHECKPOINT}" ]]; then
-  echo "[smoke-long] continue_checkpoint=${CONTINUE_CHECKPOINT}"
+  echo "[train-long-local] continue_checkpoint=${CONTINUE_CHECKPOINT}"
 fi
 if [[ -n "${RUN_CONFIG_FILE}" ]]; then
-  echo "[smoke-long] run_config_file=${RUN_CONFIG_FILE}"
+  echo "[train-long-local] run_config_file=${RUN_CONFIG_FILE}"
 fi
 
 EXTRA_TRAIN_ARGS=()
 if [[ -n "${TRAINER_EXTRA_ARGS:-}" ]]; then
   # shellcheck disable=SC2206
   EXTRA_TRAIN_ARGS=(${TRAINER_EXTRA_ARGS})
-  echo "[smoke-long] trainer_extra_args=${TRAINER_EXTRA_ARGS}"
+  echo "[train-long-local] trainer_extra_args=${TRAINER_EXTRA_ARGS}"
 fi
 
 if [[ "${GPU_TELEMETRY_ENABLE}" == "1" ]] && command -v nvidia-smi >/dev/null 2>&1; then
@@ -185,13 +204,13 @@ if [[ "${GPU_TELEMETRY_ENABLE}" == "1" ]] && command -v nvidia-smi >/dev/null 2>
     done
   ) >"${GPU_APPS_LOG}" 2>&1 &
   GPU_APPS_PID=$!
-  echo "[smoke-long] gpu_telemetry=${GPU_TELEMETRY_LOG}"
-  echo "[smoke-long] gpu_processes=${GPU_APPS_LOG}"
+  echo "[train-long-local] gpu_telemetry=${GPU_TELEMETRY_LOG}"
+  echo "[train-long-local] gpu_processes=${GPU_APPS_LOG}"
 else
-  echo "[smoke-long] GPU telemetry disabled (set GPU_TELEMETRY_ENABLE=1 and ensure nvidia-smi is available)."
+  echo "[train-long-local] GPU telemetry disabled (set GPU_TELEMETRY_ENABLE=1 and ensure nvidia-smi is available)."
 fi
 
-echo "[smoke-long] Starting leaderboard client (expects CARLA server on port ${CARLA_PORT})"
+echo "[train-long-local] Starting leaderboard client (expects CARLA server on port ${CARLA_PORT})"
 python -u "${CARL_ROOT}/custom_leaderboard/leaderboard/leaderboard/leaderboard_evaluator.py" \
   --host 127.0.0.1 \
   --port "${CARLA_PORT}" \
@@ -227,16 +246,17 @@ trap cleanup EXIT
 
 sleep 2
 
-echo "[smoke-long] Starting TFv6 PPO trainer"
+echo "[train-long-local] Starting TFv6 PPO trainer"
 LOAD_ARG=()
 if [[ -n "${CONTINUE_CHECKPOINT}" ]]; then
   CONTINUE_CHECKPOINT="$(realpath -m "${CONTINUE_CHECKPOINT}")"
   if [[ ! -f "${CONTINUE_CHECKPOINT}" ]]; then
-    echo "[smoke-long] ERROR: continue checkpoint not found: ${CONTINUE_CHECKPOINT}"
+    echo "[train-long-local] ERROR: continue checkpoint not found: ${CONTINUE_CHECKPOINT}"
     exit 1
   fi
   LOAD_ARG=(--load_file "${CONTINUE_CHECKPOINT}")
 fi
+
 torchrun --nnodes=1 --nproc_per_node=1 --max_restarts=0 \
   --rdzv-backend=c10d --rdzv-endpoint=localhost:0 \
   "${REPO_ROOT}/rl_finetuning/train_tfv6_ppo.py" \
@@ -257,6 +277,6 @@ torchrun --nnodes=1 --nproc_per_node=1 --max_restarts=0 \
   "${LOAD_ARG[@]}" \
   2>&1 | tee "${TRAINER_LOG}"
 
-echo "[smoke-long] Done. Check TensorBoard logs at ${LOGDIR}/${EXP_NAME}"
-echo "[smoke-long] Leaderboard log: ${LEADERBOARD_LOG}"
-echo "[smoke-long] Trainer log: ${TRAINER_LOG}"
+echo "[train-long-local] Done. Check TensorBoard logs at ${LOGDIR}/${EXP_NAME}"
+echo "[train-long-local] Leaderboard log: ${LEADERBOARD_LOG}"
+echo "[train-long-local] Trainer log: ${TRAINER_LOG}"
