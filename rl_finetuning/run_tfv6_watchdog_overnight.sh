@@ -10,6 +10,19 @@ CHECKPOINT="${1:-${REPO_ROOT}/outputs/checkpoints/tfv6_resnet34}"
 LOGDIR="${2:-${REPO_ROOT}/outputs/rl_logs}"
 EXP_NAME="${3:-TFV6_PPO_SMOKE_OVERNIGHT}"
 
+RUN_CONFIG_FILE="${RUN_CONFIG_FILE:-}"
+if [[ -n "${RUN_CONFIG_FILE}" ]]; then
+  RUN_CONFIG_FILE="$(realpath -m "${RUN_CONFIG_FILE}")"
+  if [[ ! -f "${RUN_CONFIG_FILE}" ]]; then
+    echo "[sps-watch] ERROR: RUN_CONFIG_FILE not found: ${RUN_CONFIG_FILE}"
+    exit 1
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  source "${RUN_CONFIG_FILE}"
+  set +a
+fi
+
 SPS_THRESHOLD="${SPS_THRESHOLD:-7}"
 SPS_CONSECUTIVE="${SPS_CONSECUTIVE:-3}"
 SPS_GRACE_UPDATES="${SPS_GRACE_UPDATES:-5}"
@@ -63,6 +76,9 @@ on_exit() {
 trap on_exit EXIT INT TERM
 log "watchdog starting checkpoint=${CHECKPOINT} logdir=${LOGDIR} exp_name=${EXP_NAME} logfile=${LOGFILE}"
 log "settings sps_threshold=${SPS_THRESHOLD} sps_consecutive=${SPS_CONSECUTIVE} no_progress_timeout=${NO_PROGRESS_TIMEOUT_SECONDS}s heartbeat=${HEARTBEAT_SECONDS}s"
+if [[ -n "${RUN_CONFIG_FILE}" ]]; then
+  log "run_config_file=${RUN_CONFIG_FILE}"
+fi
 start_watchdog_heartbeat
 
 latest_checkpoint() {

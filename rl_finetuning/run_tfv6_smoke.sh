@@ -8,6 +8,19 @@ CHECKPOINT="${1:-${REPO_ROOT}/outputs/checkpoints/tfv6_resnet34}"
 LOGDIR="${2:-${REPO_ROOT}/outputs/rl_logs}"
 EXP_NAME="${3:-TFV6_PPO_SMOKE}"
 
+RUN_CONFIG_FILE="${RUN_CONFIG_FILE:-}"
+if [[ -n "${RUN_CONFIG_FILE}" ]]; then
+  RUN_CONFIG_FILE="$(realpath -m "${RUN_CONFIG_FILE}")"
+  if [[ ! -f "${RUN_CONFIG_FILE}" ]]; then
+    echo "[smoke] ERROR: RUN_CONFIG_FILE not found: ${RUN_CONFIG_FILE}"
+    exit 1
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  source "${RUN_CONFIG_FILE}"
+  set +a
+fi
+
 GYM_PORT="${GYM_PORT:-5555}"
 CARLA_PORT="${CARLA_PORT:-2000}"
 TM_PORT="${TM_PORT:-8000}"
@@ -77,6 +90,12 @@ trap cleanup EXIT
 sleep 2
 
 echo "[smoke] Starting TFv6 PPO trainer"
+EXTRA_TRAIN_ARGS=()
+if [[ -n "${TRAINER_EXTRA_ARGS:-}" ]]; then
+  # shellcheck disable=SC2206
+  EXTRA_TRAIN_ARGS=(${TRAINER_EXTRA_ARGS})
+  echo "[smoke] trainer_extra_args=${TRAINER_EXTRA_ARGS}"
+fi
 torchrun --nnodes=1 --nproc_per_node=1 --max_restarts=0 \
   --rdzv-backend=c10d --rdzv-endpoint=localhost:0 \
   "${REPO_ROOT}/rl_finetuning/train_tfv6_ppo.py" \
@@ -92,6 +111,7 @@ torchrun --nnodes=1 --nproc_per_node=1 --max_restarts=0 \
   --tfv6_checkpoint "${CHECKPOINT}" \
   --debug_shapes 1 \
   --heartbeat_steps 8 \
-  --debug_memory "${DEBUG_MEMORY}"
+  --debug_memory "${DEBUG_MEMORY}" \
+  "${EXTRA_TRAIN_ARGS[@]}"
 
 echo "[smoke] Done. Check TensorBoard logs at ${LOGDIR}/${EXP_NAME}"

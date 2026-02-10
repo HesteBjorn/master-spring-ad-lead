@@ -39,9 +39,9 @@ from rl_finetuning.tfv6_rl.path_utils import ensure_carl_paths
 ensure_carl_paths()
 
 import rl_utils as rl_u  # noqa: E402
-from rl_config import GlobalConfig  # noqa: E402
 
 from rl_finetuning.tfv6_rl.policy_tfv6_ppo import TFv6PPOPolicy  # noqa: E402
+from rl_finetuning.tfv6_rl_config import GlobalConfig  # noqa: E402
 
 jsonpickle_numpy.register_handlers()
 jsonpickle.set_encoder_options("json", sort_keys=True, indent=4)

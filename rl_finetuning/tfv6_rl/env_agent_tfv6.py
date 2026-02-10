@@ -26,7 +26,6 @@ from leaderboard.utils import route_manipulation
 from nav_planner import RoutePlanner as CarlaRoutePlanner
 from reward.roach_reward import RoachReward
 from reward.simple_reward import SimpleReward
-from rl_config import GlobalConfig
 from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 
 from lead.common import common_utils
@@ -40,6 +39,7 @@ from lead.inference.config_closed_loop import ClosedLoopConfig
 from rl_finetuning.tfv6_rl.action_codec import ActionCodec
 from rl_finetuning.tfv6_rl.obs_codec import ObsCodec
 from rl_finetuning.tfv6_rl.policy_tfv6_ppo import load_training_config
+from rl_finetuning.tfv6_rl_config import GlobalConfig
 
 jsonpickle_numpy.register_handlers()
 jsonpickle.set_encoder_options("json", sort_keys=True, indent=4)

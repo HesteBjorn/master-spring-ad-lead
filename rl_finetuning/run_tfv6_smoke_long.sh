@@ -13,6 +13,19 @@ LOGDIR="${2:-${REPO_ROOT}/outputs/rl_logs}"
 EXP_NAME="${3:-TFV6_PPO_SMOKE_LONG}"
 CONTINUE_CHECKPOINT="${4:-${CONTINUE_CHECKPOINT:-}}"
 
+RUN_CONFIG_FILE="${RUN_CONFIG_FILE:-}"
+if [[ -n "${RUN_CONFIG_FILE}" ]]; then
+  RUN_CONFIG_FILE="$(realpath -m "${RUN_CONFIG_FILE}")"
+  if [[ ! -f "${RUN_CONFIG_FILE}" ]]; then
+    echo "[smoke-long] ERROR: RUN_CONFIG_FILE not found: ${RUN_CONFIG_FILE}"
+    exit 1
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  source "${RUN_CONFIG_FILE}"
+  set +a
+fi
+
 GYM_PORT="${GYM_PORT:-5555}"
 CARLA_PORT="${CARLA_PORT:-2000}"
 TM_PORT="${TM_PORT:-8000}"
@@ -142,6 +155,16 @@ echo "[smoke-long] logs_dir=${RUN_DIR}"
 if [[ -n "${CONTINUE_CHECKPOINT}" ]]; then
   echo "[smoke-long] continue_checkpoint=${CONTINUE_CHECKPOINT}"
 fi
+if [[ -n "${RUN_CONFIG_FILE}" ]]; then
+  echo "[smoke-long] run_config_file=${RUN_CONFIG_FILE}"
+fi
+
+EXTRA_TRAIN_ARGS=()
+if [[ -n "${TRAINER_EXTRA_ARGS:-}" ]]; then
+  # shellcheck disable=SC2206
+  EXTRA_TRAIN_ARGS=(${TRAINER_EXTRA_ARGS})
+  echo "[smoke-long] trainer_extra_args=${TRAINER_EXTRA_ARGS}"
+fi
 
 if [[ "${GPU_TELEMETRY_ENABLE}" == "1" ]] && command -v nvidia-smi >/dev/null 2>&1; then
   INTERVAL_SECONDS="$(awk "BEGIN { printf \"%.3f\", ${GPU_TELEMETRY_INTERVAL_MS} / 1000 }")"
@@ -230,6 +253,7 @@ torchrun --nnodes=1 --nproc_per_node=1 --max_restarts=0 \
   --debug_shapes 1 \
   --heartbeat_steps "${HEARTBEAT_STEPS}" \
   --debug_memory "${DEBUG_MEMORY}" \
+  "${EXTRA_TRAIN_ARGS[@]}" \
   "${LOAD_ARG[@]}" \
   2>&1 | tee "${TRAINER_LOG}"
 
