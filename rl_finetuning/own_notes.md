@@ -67,3 +67,10 @@ bash rl_finetuning/run_tfv6_watchdog_overnight.sh \
   outputs/rl_logs \
   TFV6_PPO_WEEKEND_20260210
 ```
+
+## Kill watchdog
+```bash
+pkill -f "rl_finetuning/run_tfv6_watchdog_overnight.sh|rl_finetuning/train_long_local.sh|rl_finetuning/train_tfv6_ppo.py|torchrun.*train_tfv6_ppo.py|custom_leaderboard/leaderboard/leaderboard/leaderboard_evaluator.py|CarlaUE4|CarlaUE4-Linux-Shipping|nvidia-smi  --query"
+sleep 2
+ps -ef | rg "run_tfv6_watchdog_overnight|train_long_local|train_tfv6_ppo|torchrun|leaderboard_evaluator|CarlaUE4|nvidia-smi --query" -i
+```
