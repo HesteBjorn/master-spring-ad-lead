@@ -216,6 +216,46 @@ class PPORolloutVisualizer:
                 )
             prev = (px, py)
 
+    def _draw_target_marker(
+        self,
+        bev_img: np.ndarray,
+        point_xy: np.ndarray,
+        color: tuple[int, int, int],
+        radius: int,
+        label: str,
+    ) -> tuple[bool, tuple[int, int]]:
+        px, py = self._world_to_bev(float(point_xy[0]), float(point_xy[1]))
+        h, w = bev_img.shape[:2]
+        in_view = 0 <= px < w and 0 <= py < h
+        if in_view:
+            cv2.circle(bev_img, (px, py), radius, color, -1)
+            cv2.putText(
+                bev_img,
+                label,
+                (px + 8, py - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                color,
+                1,
+                lineType=cv2.LINE_AA,
+            )
+            return True, (px, py)
+
+        cx = int(np.clip(px, 0, w - 1))
+        cy = int(np.clip(py, 0, h - 1))
+        cv2.circle(bev_img, (cx, cy), radius + 1, color, 2)
+        cv2.putText(
+            bev_img,
+            f"{label}(OOB)",
+            (max(2, cx + 8), max(14, cy - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            color,
+            1,
+            lineType=cv2.LINE_AA,
+        )
+        return False, (cx, cy)
+
     def _build_bev(
         self,
         lidar: np.ndarray,
@@ -225,7 +265,7 @@ class PPORolloutVisualizer:
         route_mean: np.ndarray | None,
         waypoints_sample: np.ndarray | None,
         waypoints_mean: np.ndarray | None,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, dict[str, object]]:
         bev = lidar.astype(np.float32)
         if bev.ndim == 3:
             bev = bev[0]
@@ -270,14 +310,12 @@ class PPORolloutVisualizer:
             lineType=cv2.LINE_AA,
         )
 
-        tp_px, tp_py = self._world_to_bev(
-            float(target_point[0]), float(target_point[1])
+        tp_in_view, tp_drawn = self._draw_target_marker(
+            bev_img, target_point, color=(10, 10, 220), radius=7, label="TP"
         )
-        tpn_px, tpn_py = self._world_to_bev(
-            float(target_point_next[0]), float(target_point_next[1])
+        tpn_in_view, tpn_drawn = self._draw_target_marker(
+            bev_img, target_point_next, color=(30, 170, 240), radius=6, label="TP+1"
         )
-        cv2.circle(bev_img, (tp_px, tp_py), 7, (10, 10, 220), -1)
-        cv2.circle(bev_img, (tpn_px, tpn_py), 6, (30, 170, 240), -1)
 
         self._draw_polyline(
             bev_img, route_mean, color=(230, 110, 0), radius=6, line_thickness=2
@@ -292,7 +330,12 @@ class PPORolloutVisualizer:
             bev_img, waypoints_sample, color=(50, 190, 60), radius=4, line_thickness=2
         )
 
-        return bev_img
+        return bev_img, {
+            "tp_in_view": tp_in_view,
+            "tp_next_in_view": tpn_in_view,
+            "tp_drawn_px": tp_drawn,
+            "tp_next_drawn_px": tpn_drawn,
+        }
 
     def _add_legend(self, panel: np.ndarray) -> None:
         legend_items = [
@@ -383,7 +426,7 @@ class PPORolloutVisualizer:
         )
 
         rgb = np.transpose(obs["rgb"], (1, 2, 0)).astype(np.uint8)
-        bev = self._build_bev(
+        bev, target_debug = self._build_bev(
             lidar=obs["rasterized_lidar"],
             target_point=obs["target_point"],
             target_point_next=obs["target_point_next"],
@@ -412,6 +455,16 @@ class PPORolloutVisualizer:
             (
                 f"std[min/mean/max]={std.min():.4f}/{std.mean():.4f}/{std.max():.4f}"
                 f" | action_dim={sampled_action.shape[0]}"
+            ),
+            (
+                "target_point "
+                f"xy=({float(obs['target_point'][0]):+.2f},{float(obs['target_point'][1]):+.2f}) "
+                f"in_view={int(target_debug['tp_in_view'])}"
+            ),
+            (
+                "target_point_next "
+                f"xy=({float(obs['target_point_next'][0]):+.2f},{float(obs['target_point_next'][1]):+.2f}) "
+                f"in_view={int(target_debug['tp_next_in_view'])}"
             ),
             (
                 "sample ctrl "
