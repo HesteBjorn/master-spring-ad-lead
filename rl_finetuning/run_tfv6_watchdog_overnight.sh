@@ -9,6 +9,37 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHECKPOINT="${1:-${REPO_ROOT}/outputs/checkpoints/tfv6_resnet34}"
 LOGDIR="${2:-${REPO_ROOT}/outputs/rl_logs}"
 EXP_NAME="${3:-TFV6_PPO_SMOKE_OVERNIGHT}"
+shift_args=3
+if (( $# >= shift_args )); then
+  shift "${shift_args}"
+else
+  shift "$#"
+fi
+
+WATCHDOG_DEBUG_VIZ="${WATCHDOG_DEBUG_VIZ:-0}"
+WATCHDOG_DEBUG_VIZ_EVERY_N="${WATCHDOG_DEBUG_VIZ_EVERY_N:-1}"
+WATCHDOG_DEBUG_VIZ_MAX_IMAGES="${WATCHDOG_DEBUG_VIZ_MAX_IMAGES:-0}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --debug-viz)
+      WATCHDOG_DEBUG_VIZ=1
+      shift
+      ;;
+    --debug-viz-every-n)
+      WATCHDOG_DEBUG_VIZ_EVERY_N="${2:?missing value for --debug-viz-every-n}"
+      shift 2
+      ;;
+    --debug-viz-max-images)
+      WATCHDOG_DEBUG_VIZ_MAX_IMAGES="${2:?missing value for --debug-viz-max-images}"
+      shift 2
+      ;;
+    *)
+      echo "[sps-watch] ERROR: unknown argument '$1'"
+      exit 1
+      ;;
+  esac
+done
 
 RUN_CONFIG_FILE="${RUN_CONFIG_FILE:-}"
 if [[ -n "${RUN_CONFIG_FILE}" ]]; then
@@ -76,6 +107,7 @@ on_exit() {
 trap on_exit EXIT INT TERM
 log "watchdog starting checkpoint=${CHECKPOINT} logdir=${LOGDIR} exp_name=${EXP_NAME} logfile=${LOGFILE}"
 log "settings sps_threshold=${SPS_THRESHOLD} sps_consecutive=${SPS_CONSECUTIVE} no_progress_timeout=${NO_PROGRESS_TIMEOUT_SECONDS}s heartbeat=${HEARTBEAT_SECONDS}s"
+log "debug_viz=${WATCHDOG_DEBUG_VIZ} debug_viz_every_n=${WATCHDOG_DEBUG_VIZ_EVERY_N} debug_viz_max_images=${WATCHDOG_DEBUG_VIZ_MAX_IMAGES}"
 if [[ -n "${RUN_CONFIG_FILE}" ]]; then
   log "run_config_file=${RUN_CONFIG_FILE}"
 fi
@@ -229,6 +261,9 @@ while true; do
   fi
 
   CONTINUE_CHECKPOINT="${resume_ckpt}" \
+  TFV6_DEBUG_VIZ="${WATCHDOG_DEBUG_VIZ}" \
+  TFV6_DEBUG_VIZ_EVERY_N="${WATCHDOG_DEBUG_VIZ_EVERY_N}" \
+  TFV6_DEBUG_VIZ_MAX_IMAGES="${WATCHDOG_DEBUG_VIZ_MAX_IMAGES}" \
     bash "${REPO_ROOT}/rl_finetuning/train_long_local.sh" \
       "${CHECKPOINT}" \
       "${LOGDIR}" \

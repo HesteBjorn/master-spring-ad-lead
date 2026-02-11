@@ -173,6 +173,28 @@ def parse_args(config):
                       nargs='?',
                       const=True,
                       help='If true, print CUDA memory snapshots around minibatch forward/backward.')
+    parser.add_argument('--run_dir',
+                      type=str,
+                      default='',
+                      help='Concrete run folder from launcher script. Used for debug artifacts.')
+    parser.add_argument('--debug_viz',
+                      type=lambda x: bool(strtobool(x)),
+                      default=False,
+                      nargs='?',
+                      const=True,
+                      help='If true, dump rollout debug visualizations to run_dir/debug_viz.')
+    parser.add_argument('--debug_viz_every_n',
+                      type=int,
+                      default=1,
+                      help='Write one debug visualization every N rollout steps.')
+    parser.add_argument('--debug_viz_max_images',
+                      type=int,
+                      default=0,
+                      help='Maximum number of debug images to write (0 means unlimited).')
+    parser.add_argument('--debug_viz_image_scale',
+                      type=int,
+                      default=3,
+                      help='Scale factor for BEV rendering in debug visualizations.')
 
     parser.add_argument('--cuda',
                       type=lambda x: bool(strtobool(x)),
@@ -1061,6 +1083,33 @@ def main():
 
     print(f"Rank:{rank}, Created obs", flush=True)
 
+    debug_viz = None
+    if args.debug_viz and rank == 0:
+        from rl_finetuning.tfv6_rl.debug_rollout_viz import PPORolloutVisualizer
+
+        debug_root = (
+            args.run_dir if args.run_dir else os.path.join(exp_folder, "latest")
+        )
+        debug_dir = os.path.join(debug_root, "debug_viz")
+        debug_viz = PPORolloutVisualizer(
+            training_config=agent.module.training_config
+            if isinstance(agent, torch.nn.parallel.DistributedDataParallel)
+            else agent.training_config,
+            action_codec=agent.module.action_codec
+            if isinstance(agent, torch.nn.parallel.DistributedDataParallel)
+            else agent.action_codec,
+            output_dir=debug_dir,
+            num_envs=args.num_envs_per_proc,
+            every_n=args.debug_viz_every_n,
+            max_images=args.debug_viz_max_images,
+            image_scale=args.debug_viz_image_scale,
+        )
+        print(
+            f"[debug_viz] enabled path={debug_dir} "
+            f"every_n={args.debug_viz_every_n} max_images={args.debug_viz_max_images}",
+            flush=True,
+        )
+
     for update in tqdm(range(start_step, num_updates), disable=rank != 0):
         if config.cpu_collect:
             device = "cpu"
@@ -1183,6 +1232,32 @@ def main():
                 termination, truncation
             )  # Not treated separately in original PPO
             rewards[step] = torch.tensor(reward, device=device, dtype=torch.float32)
+
+            if debug_viz is not None:
+                for env_idx in range(args.num_envs_per_proc):
+                    obs_for_viz = {
+                        key: obs[key][step, env_idx].detach().cpu().numpy()
+                        for key in env.single_observation_space.spaces.keys()
+                    }
+                    debug_viz.maybe_write(
+                        global_step=config.global_step,
+                        rollout_step=step,
+                        update_idx=update,
+                        env_idx=env_idx,
+                        obs=obs_for_viz,
+                        reward=float(reward[env_idx]),
+                        done=bool(done[env_idx]),
+                        truncated=bool(truncation[env_idx]),
+                        sampled_action=np.clip(
+                            action[env_idx].detach().cpu().numpy(), -1.0, 1.0
+                        ),
+                        mean_action=np.clip(
+                            mu[env_idx].detach().cpu().numpy(), -1.0, 1.0
+                        ),
+                        log_std=sigma[env_idx].detach().cpu().numpy(),
+                        value_estimate=float(value[env_idx].item()),
+                    )
+
             next_done = torch.tensor(done, device=device, dtype=torch.float32)
             next_obs = {
                 key: torch.tensor(

@@ -10,7 +10,43 @@ CARL_ROOT="${REPO_ROOT}/3rd_party/CaRL/CARLA"
 CHECKPOINT="${1:-${REPO_ROOT}/outputs/checkpoints/tfv6_resnet34}"
 LOGDIR="${2:-${REPO_ROOT}/outputs/rl_logs}"
 EXP_NAME="${3:-TFV6_PPO_LONG_LOCAL}"
-CONTINUE_CHECKPOINT="${4:-${CONTINUE_CHECKPOINT:-}}"
+CONTINUE_CHECKPOINT="${CONTINUE_CHECKPOINT:-}"
+shift_args=3
+if [[ -n "${4:-}" && "${4}" != --* ]]; then
+  CONTINUE_CHECKPOINT="${4}"
+  shift_args=4
+fi
+
+TFV6_DEBUG_VIZ="${TFV6_DEBUG_VIZ:-0}"
+TFV6_DEBUG_VIZ_EVERY_N="${TFV6_DEBUG_VIZ_EVERY_N:-1}"
+TFV6_DEBUG_VIZ_MAX_IMAGES="${TFV6_DEBUG_VIZ_MAX_IMAGES:-0}"
+
+if (( $# >= shift_args )); then
+  shift "${shift_args}"
+else
+  shift "$#"
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --debug-viz)
+      TFV6_DEBUG_VIZ=1
+      shift
+      ;;
+    --debug-viz-every-n)
+      TFV6_DEBUG_VIZ_EVERY_N="${2:?missing value for --debug-viz-every-n}"
+      shift 2
+      ;;
+    --debug-viz-max-images)
+      TFV6_DEBUG_VIZ_MAX_IMAGES="${2:?missing value for --debug-viz-max-images}"
+      shift 2
+      ;;
+    *)
+      echo "[train-long-local] ERROR: unknown argument '$1'"
+      exit 1
+      ;;
+  esac
+done
 
 RUN_CONFIG_FILE="${RUN_CONFIG_FILE:-}"
 if [[ -n "${RUN_CONFIG_FILE}" ]]; then
@@ -170,6 +206,9 @@ echo "[train-long-local] total_minibatch_size=${TOTAL_MINIBATCH_SIZE}"
 echo "[train-long-local] update_epochs=${UPDATE_EPOCHS}"
 echo "[train-long-local] track=${TRACK}"
 echo "[train-long-local] debug_memory=${DEBUG_MEMORY}"
+echo "[train-long-local] debug_viz=${TFV6_DEBUG_VIZ}"
+echo "[train-long-local] debug_viz_every_n=${TFV6_DEBUG_VIZ_EVERY_N}"
+echo "[train-long-local] debug_viz_max_images=${TFV6_DEBUG_VIZ_MAX_IMAGES}"
 echo "[train-long-local] logs_dir=${RUN_DIR}"
 if [[ -n "${CONTINUE_CHECKPOINT}" ]]; then
   echo "[train-long-local] continue_checkpoint=${CONTINUE_CHECKPOINT}"
@@ -273,6 +312,10 @@ torchrun --nnodes=1 --nproc_per_node=1 --max_restarts=0 \
   --debug_shapes 1 \
   --heartbeat_steps "${HEARTBEAT_STEPS}" \
   --debug_memory "${DEBUG_MEMORY}" \
+  --run_dir "${RUN_DIR}" \
+  --debug_viz "${TFV6_DEBUG_VIZ}" \
+  --debug_viz_every_n "${TFV6_DEBUG_VIZ_EVERY_N}" \
+  --debug_viz_max_images "${TFV6_DEBUG_VIZ_MAX_IMAGES}" \
   "${EXTRA_TRAIN_ARGS[@]}" \
   "${LOAD_ARG[@]}" \
   2>&1 | tee "${TRAINER_LOG}"
