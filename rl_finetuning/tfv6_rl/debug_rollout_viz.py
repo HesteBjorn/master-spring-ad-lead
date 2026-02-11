@@ -169,6 +169,18 @@ class PPORolloutVisualizer:
         self.command_names = {
             int(k.value): v for k, v in CARLA_NAVIGATION_COMMAND_STR_MAP.items()
         }
+        self.steer_modality = self.config_closed_loop.steer_modality
+        self.throttle_modality = self.config_closed_loop.throttle_modality
+        self.brake_modality = self.config_closed_loop.brake_modality
+        self.target_speed_active_for_control = (
+            self.throttle_modality == "target_speed"
+            or self.brake_modality == "target_speed"
+        )
+        self.waypoints_active_for_control = (
+            self.steer_modality == "waypoint"
+            or self.throttle_modality == "waypoint"
+            or self.brake_modality == "waypoint"
+        )
 
         self.size_width = int(
             (self.training_config.max_y_meter - self.training_config.min_y_meter)
@@ -317,18 +329,28 @@ class PPORolloutVisualizer:
             bev_img, target_point_next, color=(30, 170, 240), radius=6, label="TP+1"
         )
 
-        self._draw_polyline(
-            bev_img, route_mean, color=(230, 110, 0), radius=6, line_thickness=2
-        )
-        self._draw_polyline(
-            bev_img, route_sample, color=(20, 80, 230), radius=5, line_thickness=2
-        )
-        self._draw_polyline(
-            bev_img, waypoints_mean, color=(170, 100, 200), radius=4, line_thickness=2
-        )
-        self._draw_polyline(
-            bev_img, waypoints_sample, color=(50, 190, 60), radius=4, line_thickness=2
-        )
+        if self.steer_modality == "route":
+            self._draw_polyline(
+                bev_img, route_mean, color=(230, 110, 0), radius=6, line_thickness=2
+            )
+            self._draw_polyline(
+                bev_img, route_sample, color=(20, 80, 230), radius=5, line_thickness=2
+            )
+        if self.waypoints_active_for_control:
+            self._draw_polyline(
+                bev_img,
+                waypoints_mean,
+                color=(170, 100, 200),
+                radius=4,
+                line_thickness=2,
+            )
+            self._draw_polyline(
+                bev_img,
+                waypoints_sample,
+                color=(50, 190, 60),
+                radius=4,
+                line_thickness=2,
+            )
 
         return bev_img, {
             "tp_in_view": tp_in_view,
@@ -338,14 +360,27 @@ class PPORolloutVisualizer:
         }
 
     def _add_legend(self, panel: np.ndarray) -> None:
-        legend_items = [
-            ("Route mean (TFv6)", (230, 110, 0)),
-            ("Route sampled (PPO)", (20, 80, 230)),
-            ("Waypoints mean", (170, 100, 200)),
-            ("Waypoints sampled", (50, 190, 60)),
-            ("Target point", (10, 10, 220)),
-            ("Target point next", (30, 170, 240)),
-        ]
+        legend_items = []
+        if self.steer_modality == "route":
+            legend_items.extend(
+                [
+                    ("Route mean (TFv6)", (230, 110, 0)),
+                    ("Route sampled (PPO)", (20, 80, 230)),
+                ]
+            )
+        if self.waypoints_active_for_control:
+            legend_items.extend(
+                [
+                    ("Waypoints mean", (170, 100, 200)),
+                    ("Waypoints sampled", (50, 190, 60)),
+                ]
+            )
+        legend_items.extend(
+            [
+                ("Target point", (10, 10, 220)),
+                ("Target point next", (30, 170, 240)),
+            ]
+        )
         y = 26
         for name, color in legend_items:
             cv2.rectangle(panel, (14, y - 12), (34, y + 8), color, -1)
@@ -360,6 +395,137 @@ class PPORolloutVisualizer:
                 lineType=cv2.LINE_AA,
             )
             y += 28
+
+    def _draw_speed_distribution(
+        self,
+        panel: np.ndarray,
+        *,
+        mean_speed: float,
+        std_speed: float,
+        selected_speed: float,
+        current_speed: float,
+    ) -> None:
+        x0, y0 = 330, 18
+        w, h = 270, 170
+        cv2.rectangle(panel, (x0, y0), (x0 + w, y0 + h), (210, 210, 210), 1)
+        cv2.putText(
+            panel,
+            "Target-Speed Distribution",
+            (x0 + 8, y0 + 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (20, 20, 20),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
+        # Keep plot high in the corner and reserve a larger bottom margin for ticks/x-label.
+        plot_left = x0 + 12
+        plot_right = x0 + w - 10
+        plot_top = y0 + 48
+        plot_bottom = y0 + h - 42
+        cv2.rectangle(
+            panel, (plot_left, plot_top), (plot_right, plot_bottom), (235, 235, 235), -1
+        )
+        cv2.rectangle(
+            panel, (plot_left, plot_top), (plot_right, plot_bottom), (180, 180, 180), 1
+        )
+
+        max_speed = max(
+            float(self.training_config.max_speed), mean_speed + 4.0 * std_speed
+        )
+        max_speed = max(max_speed, selected_speed + 2.0, current_speed + 2.0, 1.0)
+        xs = np.linspace(0.0, max_speed, 220)
+        sigma = max(1e-3, std_speed)
+        ys = np.exp(-0.5 * ((xs - mean_speed) / sigma) ** 2)
+        ys = ys / (ys.max() + 1e-8)
+
+        def speed_to_px(v: float) -> int:
+            alpha = float(np.clip(v / max_speed, 0.0, 1.0))
+            return int(round(plot_left + alpha * (plot_right - plot_left)))
+
+        def dens_to_py(v: float) -> int:
+            alpha = float(np.clip(v, 0.0, 1.0))
+            return int(round(plot_bottom - alpha * (plot_bottom - plot_top)))
+
+        pts = np.stack(
+            [
+                np.array([speed_to_px(x), dens_to_py(y)])
+                for x, y in zip(xs, ys, strict=False)
+            ]
+        )
+        cv2.polylines(
+            panel,
+            [pts.astype(np.int32)],
+            isClosed=False,
+            color=(30, 120, 220),
+            thickness=2,
+        )
+
+        mean_x = speed_to_px(mean_speed)
+        selected_x = speed_to_px(selected_speed)
+        current_x = speed_to_px(current_speed)
+        cv2.line(
+            panel,
+            (mean_x, plot_top),
+            (mean_x, plot_bottom),
+            (240, 130, 0),
+            2,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.line(
+            panel,
+            (selected_x, plot_top),
+            (selected_x, plot_bottom),
+            (30, 30, 210),
+            2,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.line(
+            panel,
+            (current_x, plot_top),
+            (current_x, plot_bottom),
+            (40, 150, 60),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
+        # Compact summary at the top so it does not collide with x-axis text.
+        cv2.putText(
+            panel,
+            f"mean={mean_speed:.2f}  selected={selected_speed:.2f}  ego={current_speed:.2f}",
+            (x0 + 8, y0 + 36),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            (30, 30, 30),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
+        ticks = np.linspace(0.0, max_speed, 5)
+        for t in ticks:
+            tx = speed_to_px(float(t))
+            cv2.line(panel, (tx, plot_bottom), (tx, plot_bottom + 4), (80, 80, 80), 1)
+            cv2.putText(
+                panel,
+                f"{t:.1f}",
+                (tx - 10, plot_bottom + 16),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.36,
+                (40, 40, 40),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+        cv2.putText(
+            panel,
+            "speed [m/s]",
+            (plot_left + 82, plot_bottom + 32),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (40, 40, 40),
+            1,
+            lineType=cv2.LINE_AA,
+        )
 
     def _put_text_lines(
         self, panel: np.ndarray, lines: list[str], start_y: int = 210
@@ -448,10 +614,34 @@ class PPORolloutVisualizer:
             next_command_idx, f"Cmd {next_command_idx}"
         )
         std = np.exp(log_std.astype(np.float32))
+        target_speed_std = None
+        if self.action_codec.slices.target_speed is not None:
+            speed_idx = self.action_codec.slices.target_speed.start
+            target_speed_std = float(std[speed_idx] * self.action_codec.speed_scale)
+
+        speed_head_enabled = bool(self.training_config.predict_target_speed)
+        wp_head_enabled = bool(self.training_config.predict_temporal_spatial_waypoints)
+        route_head_enabled = bool(self.training_config.predict_spatial_path)
         text_lines = [
             f"update={update_idx} rollout_step={rollout_step} global_step={global_step} env={env_idx}",
             f"reward={reward:+.4f} done={int(done)} trunc={int(truncated)} value={value_estimate:+.4f}",
             f"speed={speed:.3f} m/s | cmd={command_name} | next={next_command_name}",
+            (
+                "heads enabled: "
+                f"route={int(route_head_enabled)} "
+                f"waypoints={int(wp_head_enabled)} "
+                f"target_speed={int(speed_head_enabled)}"
+            ),
+            (
+                "controller feed: "
+                f"steer={self.steer_modality} "
+                f"throttle={self.throttle_modality} "
+                f"brake={self.brake_modality}"
+            ),
+            (
+                "active policy signal: "
+                f"{'target_speed_scalar' if self.target_speed_active_for_control else 'temporal_waypoints'}"
+            ),
             (
                 f"std[min/mean/max]={std.min():.4f}/{std.mean():.4f}/{std.max():.4f}"
                 f" | action_dim={sampled_action.shape[0]}"
@@ -474,18 +664,38 @@ class PPORolloutVisualizer:
                 "mean ctrl   "
                 f"(steer,throttle,brake)=({ctrl_mean.steer:+.3f},{ctrl_mean.throttle:.3f},{ctrl_mean.brake:.1f})"
             ),
-            (
+        ]
+        if self.target_speed_active_for_control:
+            text_lines.append(
                 f"sample target_speed={target_speed_sample:.3f} m/s"
                 if target_speed_sample is not None
                 else "sample target_speed=None"
-            ),
-            (
-                f"mean target_speed={target_speed_mean:.3f} m/s"
-                if target_speed_mean is not None
+            )
+            text_lines.append(
+                (
+                    f"mean target_speed={target_speed_mean:.3f} m/s "
+                    f"(std={target_speed_std:.3f} m/s)"
+                )
+                if (target_speed_mean is not None and target_speed_std is not None)
                 else "mean target_speed=None"
-            ),
-        ]
+            )
+        else:
+            text_lines.append("target-speed plot disabled (waypoint control active)")
         self._put_text_lines(panel, text_lines, start_y=210)
+
+        if (
+            self.target_speed_active_for_control
+            and target_speed_mean is not None
+            and target_speed_sample is not None
+            and target_speed_std is not None
+        ):
+            self._draw_speed_distribution(
+                panel,
+                mean_speed=target_speed_mean,
+                std_speed=target_speed_std,
+                selected_speed=target_speed_sample,
+                current_speed=speed,
+            )
 
         grid = np.concatenate([rgb, bev, panel], axis=1)
         filename = f"u{update_idx:06d}_gs{global_step:012d}_step{rollout_step:04d}_env{env_idx}.jpg"
