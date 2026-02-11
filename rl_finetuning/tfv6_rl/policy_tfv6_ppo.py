@@ -6,9 +6,10 @@ import os
 import torch
 from torch import nn
 
+from lead.inference.config_closed_loop import ClosedLoopConfig
 from lead.tfv6.tfv6 import TFv6
 from lead.training.config_training import TrainingConfig
-from rl_finetuning.tfv6_rl.action_codec import ActionCodec
+from rl_finetuning.tfv6_rl.action_codec import ActionCodec, infer_action_head_usage
 from rl_finetuning.tfv6_rl.gaussian_dist import (
     CorrelatedGaussianDistribution,
     DiagGaussianDistribution,
@@ -78,7 +79,19 @@ class TFv6PPOPolicy(nn.Module):
             and self.device.type == "cuda"
         )
 
-        self.action_codec = ActionCodec(self.training_config)
+        closed_loop_config = ClosedLoopConfig(raise_error_on_missing_key=False)
+        use_route, use_waypoints, use_target_speed = infer_action_head_usage(
+            self.training_config,
+            steer_modality=closed_loop_config.steer_modality,
+            throttle_modality=closed_loop_config.throttle_modality,
+            brake_modality=closed_loop_config.brake_modality,
+        )
+        self.action_codec = ActionCodec(
+            self.training_config,
+            use_route=use_route,
+            use_waypoints=use_waypoints,
+            use_target_speed=use_target_speed,
+        )
         self.action_dim = self.action_codec.action_dim
 
         self.use_correlated_noise = use_correlated_noise
@@ -133,16 +146,43 @@ class TFv6PPOPolicy(nn.Module):
         for param in module.parameters():
             param.requires_grad = trainable
 
+    def _configure_active_planning_heads(self) -> None:
+        """Freeze planning decoder heads that are not part of active PPO actions."""
+        planning_decoder = getattr(self.tfv6, "planning_decoder", None)
+        if planning_decoder is None:
+            return
+
+        if hasattr(planning_decoder, "route_decoder"):
+            self._set_module_trainable(
+                planning_decoder.route_decoder, self.action_codec.predict_route
+            )
+        if hasattr(planning_decoder, "wp_decoder"):
+            self._set_module_trainable(
+                planning_decoder.wp_decoder, self.action_codec.predict_waypoints
+            )
+        if hasattr(planning_decoder, "target_speed_decoder"):
+            self._set_module_trainable(
+                planning_decoder.target_speed_decoder,
+                self.action_codec.predict_target_speed,
+            )
+        # NavSim-only heading head shares waypoint semantics.
+        if hasattr(planning_decoder, "heading_decoder"):
+            self._set_module_trainable(
+                planning_decoder.heading_decoder, self.action_codec.predict_waypoints
+            )
+
     def _configure_trainable_tfv6_modules(self) -> None:
         if self.train_planning_decoder_only:
             # Decoder-only RL finetuning: keep TFv6 frozen except planning decoder.
             self._set_module_trainable(self.tfv6, False)
             if hasattr(self.tfv6, "planning_decoder"):
                 self._set_module_trainable(self.tfv6.planning_decoder, True)
+                self._configure_active_planning_heads()
             return
 
         # Partial/full finetuning mode.
         self._set_module_trainable(self.tfv6, True)
+        self._configure_active_planning_heads()
 
     def _build_value_features(self) -> torch.Tensor:
         kv = getattr(self.tfv6.planning_decoder, "kv", None)
@@ -192,19 +232,15 @@ class TFv6PPOPolicy(nn.Module):
                 obs_dict, skip_perception_heads=self.skip_perception_heads
             )
 
-        route = (
-            predictions.pred_route
-            if self.training_config.predict_spatial_path
-            else None
-        )
+        route = predictions.pred_route if self.action_codec.predict_route else None
         waypoints = (
             predictions.pred_future_waypoints
-            if self.training_config.predict_temporal_spatial_waypoints
+            if self.action_codec.predict_waypoints
             else None
         )
         target_speed = (
             predictions.pred_target_speed_scalar
-            if self.training_config.predict_target_speed
+            if self.action_codec.predict_target_speed
             else None
         )
 

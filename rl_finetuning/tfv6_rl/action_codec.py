@@ -25,11 +25,32 @@ class ActionCodec:
       - target_speed (1)
     """
 
-    def __init__(self, config: TrainingConfig) -> None:
+    def __init__(
+        self,
+        config: TrainingConfig,
+        *,
+        use_route: bool | None = None,
+        use_waypoints: bool | None = None,
+        use_target_speed: bool | None = None,
+    ) -> None:
         self.config = config
-        self.predict_route = bool(config.predict_spatial_path)
-        self.predict_waypoints = bool(config.predict_temporal_spatial_waypoints)
-        self.predict_target_speed = bool(config.predict_target_speed)
+        cfg_route = bool(config.predict_spatial_path)
+        cfg_waypoints = bool(config.predict_temporal_spatial_waypoints)
+        cfg_target_speed = bool(config.predict_target_speed)
+
+        self.predict_route = (
+            cfg_route if use_route is None else bool(cfg_route and use_route)
+        )
+        self.predict_waypoints = (
+            cfg_waypoints
+            if use_waypoints is None
+            else bool(cfg_waypoints and use_waypoints)
+        )
+        self.predict_target_speed = (
+            cfg_target_speed
+            if use_target_speed is None
+            else bool(cfg_target_speed and use_target_speed)
+        )
 
         self.num_route_points = (
             config.num_route_points_prediction if self.predict_route else 0
@@ -208,3 +229,29 @@ class ActionCodec:
         else:
             speed_t = None
         return route_t, waypoints_t, speed_t
+
+
+def infer_action_head_usage(
+    config: TrainingConfig,
+    *,
+    steer_modality: str,
+    throttle_modality: str,
+    brake_modality: str,
+) -> tuple[bool, bool, bool]:
+    """Decide which planning heads must be present in PPO action space.
+
+    We only keep heads that can affect executed control under the selected modalities.
+    """
+    use_route = steer_modality == "route"
+    use_waypoints = any(
+        modality == "waypoint"
+        for modality in (steer_modality, throttle_modality, brake_modality)
+    )
+    use_target_speed = any(
+        modality == "target_speed" for modality in (throttle_modality, brake_modality)
+    )
+    return (
+        bool(config.predict_spatial_path and use_route),
+        bool(config.predict_temporal_spatial_waypoints and use_waypoints),
+        bool(config.predict_target_speed and use_target_speed),
+    )

@@ -8,7 +8,8 @@ import numpy as np
 import zmq
 from gymnasium import spaces
 
-from rl_finetuning.tfv6_rl.action_codec import ActionCodec
+from lead.inference.config_closed_loop import ClosedLoopConfig
+from rl_finetuning.tfv6_rl.action_codec import ActionCodec, infer_action_head_usage
 from rl_finetuning.tfv6_rl.obs_codec import ObsCodec
 from rl_finetuning.tfv6_rl.policy_tfv6_ppo import load_training_config
 
@@ -30,9 +31,21 @@ class CARLAEnvTFv6(gym.Env):
         if tfv6_checkpoint is None:
             raise ValueError("tfv6_checkpoint must be set in config")
         self.training_config = load_training_config(tfv6_checkpoint)
+        self.closed_loop_config = ClosedLoopConfig(raise_error_on_missing_key=False)
 
         self.obs_codec = ObsCodec(self.training_config)
-        self.action_codec = ActionCodec(self.training_config)
+        use_route, use_waypoints, use_target_speed = infer_action_head_usage(
+            self.training_config,
+            steer_modality=self.closed_loop_config.steer_modality,
+            throttle_modality=self.closed_loop_config.throttle_modality,
+            brake_modality=self.closed_loop_config.brake_modality,
+        )
+        self.action_codec = ActionCodec(
+            self.training_config,
+            use_route=use_route,
+            use_waypoints=use_waypoints,
+            use_target_speed=use_target_speed,
+        )
 
         obs_spaces: dict[str, spaces.Box] = {}
         for spec in self.obs_codec.specs:

@@ -36,7 +36,7 @@ from lead.data_loader import carla_dataset_utils, training_cache
 from lead.data_loader.carla_dataset_utils import rasterize_lidar
 from lead.expert.config_expert import ExpertConfig
 from lead.inference.config_closed_loop import ClosedLoopConfig
-from rl_finetuning.tfv6_rl.action_codec import ActionCodec
+from rl_finetuning.tfv6_rl.action_codec import ActionCodec, infer_action_head_usage
 from rl_finetuning.tfv6_rl.obs_codec import ObsCodec
 from rl_finetuning.tfv6_rl.policy_tfv6_ppo import load_training_config
 from rl_finetuning.tfv6_rl_config import GlobalConfig
@@ -216,7 +216,18 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         # directly; for train_parallel-style launches it can be provided by TFV6_CHECKPOINT.
         checkpoint_dir = self._resolve_tfv6_checkpoint_dir(exp_folder)
         self.training_config = load_training_config(checkpoint_dir)
-        self.action_codec = ActionCodec(self.training_config)
+        use_route, use_waypoints, use_target_speed = infer_action_head_usage(
+            self.training_config,
+            steer_modality=self.config_closed_loop.steer_modality,
+            throttle_modality=self.config_closed_loop.throttle_modality,
+            brake_modality=self.config_closed_loop.brake_modality,
+        )
+        self.action_codec = ActionCodec(
+            self.training_config,
+            use_route=use_route,
+            use_waypoints=use_waypoints,
+            use_target_speed=use_target_speed,
+        )
         self.obs_codec = ObsCodec(self.training_config)
         self.controller = ClosedLoopController(
             self.config_closed_loop, self.config_expert, self.training_config

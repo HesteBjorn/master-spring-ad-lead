@@ -619,9 +619,9 @@ class PPORolloutVisualizer:
             speed_idx = self.action_codec.slices.target_speed.start
             target_speed_std = float(std[speed_idx] * self.action_codec.speed_scale)
 
-        speed_head_enabled = bool(self.training_config.predict_target_speed)
-        wp_head_enabled = bool(self.training_config.predict_temporal_spatial_waypoints)
-        route_head_enabled = bool(self.training_config.predict_spatial_path)
+        speed_head_enabled = bool(self.action_codec.predict_target_speed)
+        wp_head_enabled = bool(self.action_codec.predict_waypoints)
+        route_head_enabled = bool(self.action_codec.predict_route)
         text_lines = [
             f"update={update_idx} rollout_step={rollout_step} global_step={global_step} env={env_idx}",
             f"reward={reward:+.4f} done={int(done)} trunc={int(truncated)} value={value_estimate:+.4f}",
