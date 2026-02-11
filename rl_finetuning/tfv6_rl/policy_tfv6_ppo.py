@@ -52,6 +52,7 @@ class TFv6PPOPolicy(nn.Module):
         correlated_noise_rho: float = 0.8,
         noise_ramp: bool = True,
         train_planning_decoder_only: bool = True,
+        start_log_std: float = -4.0,
     ) -> None:
         super().__init__()
         self.observation_space = observation_space
@@ -99,7 +100,7 @@ class TFv6PPOPolicy(nn.Module):
         self.noise_ramp = noise_ramp
         self.skip_perception_heads = True
         self.log_std_min = -5.0
-        self.log_std_max = 2.0
+        self.log_std_max = 1.0
         if rl_config is not None:
             self.use_correlated_noise = bool(
                 getattr(rl_config, "use_correlated_noise", self.use_correlated_noise)
@@ -133,7 +134,7 @@ class TFv6PPOPolicy(nn.Module):
             )
         else:
             self.action_dist = DiagGaussianDistribution(self.action_dim)
-        self.log_std = nn.Parameter(-1.0 * torch.ones(self.action_dim))
+        self.log_std = nn.Parameter(start_log_std * torch.ones(self.action_dim))
 
         value_in_dim = self.training_config.transfuser_token_dim
         self.value_head = nn.Sequential(
