@@ -99,3 +99,27 @@ python -m rl_finetuning.tfv6_rl.dry_run \
   --batch-size 2 \
   --sample-type mean
 ```
+
+## Aggregated Speed Distribution Shift Analysis
+
+Compares target-speed scalar predictions from:
+- `TF_v6` (old/base checkpoint)
+- `Finetuned Policy` (finetuned checkpoint)
+
+across all discovered route frames under a data root, using the same real-observation
+construction path as dry-run (`build_real_obs`).
+
+Run:
+```bash
+python rl_finetuning/analyze_speed_distribution_shift.py \
+  --old-checkpoint outputs/checkpoints/tfv6_resnet34/model_0030_0.pth \
+  --finetuned-checkpoint outputs/rl_logs/TFV6_PPO_WEEKEND_20260212_linear/model_latest_000000065.pth \
+  --data-root data/carla_leaderboard2/data \
+  --output-dir outputs/local_evaluation \
+  --output-stem speed_distribution_shift_all_routes
+```
+
+Outputs:
+- Plot: `outputs/local_evaluation/speed_distribution_shift_all_routes.png`
+- Aggregate stats: `outputs/local_evaluation/speed_distribution_shift_all_routes.txt`
+- Per-route CSV: `outputs/local_evaluation/speed_distribution_shift_all_routes_per_route.csv`
