@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from lead.common.constants import CARLA_NAVIGATION_COMMAND_STR_MAP, LIDAR_COLOR
+from lead.common.constants import LIDAR_COLOR
 from lead.common.pid_controller import (
     LateralPIDController,
     PIDController,
@@ -147,6 +147,7 @@ class PPORolloutVisualizer:
         action_codec: ActionCodec,
         output_dir: str,
         num_envs: int,
+        gamma: float = 0.99,
         every_n: int = 1,
         max_images: int = 0,
         image_scale: int = 3,
@@ -154,11 +155,14 @@ class PPORolloutVisualizer:
         self.training_config = training_config
         self.action_codec = action_codec
         self.output_dir = output_dir
+        self.gamma = float(gamma)
         self.every_n = max(1, int(every_n))
         self.max_images = max(0, int(max_images))
         self.image_scale = max(1, int(image_scale))
         os.makedirs(self.output_dir, exist_ok=True)
         self.images_written = 0
+        self.discounted_returns = [0.0 for _ in range(max(1, num_envs))]
+        self.episode_returns = [0.0 for _ in range(max(1, num_envs))]
 
         self.config_closed_loop = ClosedLoopConfig(raise_error_on_missing_key=False)
         self.config_expert = ExpertConfig()
@@ -166,9 +170,6 @@ class PPORolloutVisualizer:
             _ClosedLoopControlAdapter(self.config_closed_loop, self.config_expert)
             for _ in range(max(1, num_envs))
         ]
-        self.command_names = {
-            int(k.value): v for k, v in CARLA_NAVIGATION_COMMAND_STR_MAP.items()
-        }
         self.steer_modality = self.config_closed_loop.steer_modality
         self.throttle_modality = self.config_closed_loop.throttle_modality
         self.brake_modality = self.config_closed_loop.brake_modality
@@ -583,14 +584,6 @@ class PPORolloutVisualizer:
             None if target_speed_mean is None else float(target_speed_mean[0])
         )
 
-        controller = self.controllers[env_idx % len(self.controllers)]
-        ctrl_sample = controller.infer_control(
-            route_sample, waypoints_sample, target_speed_sample, speed
-        )
-        ctrl_mean = controller.infer_control(
-            route_mean, waypoints_mean, target_speed_mean, speed
-        )
-
         rgb = np.transpose(obs["rgb"], (1, 2, 0)).astype(np.uint8)
         bev, target_debug = self._build_bev(
             lidar=obs["rasterized_lidar"],
@@ -607,45 +600,27 @@ class PPORolloutVisualizer:
         panel = np.full((rgb_h, 620, 3), 248, dtype=np.uint8)
         self._add_legend(panel)
 
-        command_idx = int(np.argmax(obs["command"])) + 1
-        next_command_idx = int(np.argmax(obs["next_command"])) + 1
-        command_name = self.command_names.get(command_idx, f"Cmd {command_idx}")
-        next_command_name = self.command_names.get(
-            next_command_idx, f"Cmd {next_command_idx}"
-        )
         std = np.exp(log_std.astype(np.float32))
         target_speed_std = None
         if self.action_codec.slices.target_speed is not None:
             speed_idx = self.action_codec.slices.target_speed.start
             target_speed_std = float(std[speed_idx] * self.action_codec.speed_scale)
 
-        speed_head_enabled = bool(self.action_codec.predict_target_speed)
-        wp_head_enabled = bool(self.action_codec.predict_waypoints)
-        route_head_enabled = bool(self.action_codec.predict_route)
+        env_slot = env_idx % len(self.discounted_returns)
+        self.episode_returns[env_slot] += reward
+        self.discounted_returns[env_slot] = (
+            reward + self.gamma * self.discounted_returns[env_slot]
+        )
+        episode_return = float(self.episode_returns[env_slot])
+        discounted_return = float(self.discounted_returns[env_slot])
+
         text_lines = [
-            f"update={update_idx} rollout_step={rollout_step} global_step={global_step} env={env_idx}",
-            f"reward={reward:+.4f} done={int(done)} trunc={int(truncated)} value={value_estimate:+.4f}",
-            f"speed={speed:.3f} m/s | cmd={command_name} | next={next_command_name}",
+            f"update={update_idx} step={rollout_step}",
             (
-                "heads enabled: "
-                f"route={int(route_head_enabled)} "
-                f"waypoints={int(wp_head_enabled)} "
-                f"target_speed={int(speed_head_enabled)}"
+                f"reward={reward:+.4f} cumulative_reward={episode_return:+.4f} "
+                f"discounted_return={discounted_return:+.4f} value={value_estimate:+.4f}"
             ),
-            (
-                "controller feed: "
-                f"steer={self.steer_modality} "
-                f"throttle={self.throttle_modality} "
-                f"brake={self.brake_modality}"
-            ),
-            (
-                "active policy signal: "
-                f"{'target_speed_scalar' if self.target_speed_active_for_control else 'temporal_waypoints'}"
-            ),
-            (
-                f"std[min/mean/max]={std.min():.4f}/{std.mean():.4f}/{std.max():.4f}"
-                f" | action_dim={sampled_action.shape[0]}"
-            ),
+            f"std[min/mean/max]={std.min():.4f}/{std.mean():.4f}/{std.max():.4f}",
             (
                 "target_point "
                 f"xy=({float(obs['target_point'][0]):+.2f},{float(obs['target_point'][1]):+.2f}) "
@@ -656,31 +631,7 @@ class PPORolloutVisualizer:
                 f"xy=({float(obs['target_point_next'][0]):+.2f},{float(obs['target_point_next'][1]):+.2f}) "
                 f"in_view={int(target_debug['tp_next_in_view'])}"
             ),
-            (
-                "sample ctrl "
-                f"(steer,throttle,brake)=({ctrl_sample.steer:+.3f},{ctrl_sample.throttle:.3f},{ctrl_sample.brake:.1f})"
-            ),
-            (
-                "mean ctrl   "
-                f"(steer,throttle,brake)=({ctrl_mean.steer:+.3f},{ctrl_mean.throttle:.3f},{ctrl_mean.brake:.1f})"
-            ),
         ]
-        if self.target_speed_active_for_control:
-            text_lines.append(
-                f"sample target_speed={target_speed_sample:.3f} m/s"
-                if target_speed_sample is not None
-                else "sample target_speed=None"
-            )
-            text_lines.append(
-                (
-                    f"mean target_speed={target_speed_mean:.3f} m/s "
-                    f"(std={target_speed_std:.3f} m/s)"
-                )
-                if (target_speed_mean is not None and target_speed_std is not None)
-                else "mean target_speed=None"
-            )
-        else:
-            text_lines.append("target-speed plot disabled (waypoint control active)")
         self._put_text_lines(panel, text_lines, start_y=210)
 
         if (
@@ -696,6 +647,10 @@ class PPORolloutVisualizer:
                 selected_speed=target_speed_sample,
                 current_speed=speed,
             )
+
+        if done or truncated:
+            self.episode_returns[env_slot] = 0.0
+            self.discounted_returns[env_slot] = 0.0
 
         top_row = np.concatenate([bev, panel], axis=1)
         top_h, top_w = top_row.shape[:2]

@@ -1100,6 +1100,7 @@ def main():
             else agent.action_codec,
             output_dir=debug_dir,
             num_envs=args.num_envs_per_proc,
+            gamma=config.gamma,
             every_n=args.debug_viz_every_n,
             max_images=args.debug_viz_max_images,
             image_scale=args.debug_viz_image_scale,
