@@ -161,8 +161,18 @@ class PPORolloutVisualizer:
         self.image_scale = max(1, int(image_scale))
         os.makedirs(self.output_dir, exist_ok=True)
         self.images_written = 0
-        self.discounted_returns = [0.0 for _ in range(max(1, num_envs))]
         self.episode_returns = [0.0 for _ in range(max(1, num_envs))]
+        self.pending_forward_return_stamps: dict[
+            int, list[tuple[int, int, str, int]]
+        ] = {}
+        self.negative_reward_burst_remaining = [0 for _ in range(max(1, num_envs))]
+        self.negative_reward_burst_len = 5
+        self.prev_values = [None for _ in range(max(1, num_envs))]
+        self.value_burst_remaining = [0 for _ in range(max(1, num_envs))]
+        self.value_burst_len = 10
+        # Always-on value triggers when debug viz is enabled.
+        self.value_low_threshold = 0.0
+        self.value_drop_threshold = 0.25
 
         self.config_closed_loop = ClosedLoopConfig(raise_error_on_missing_key=False)
         self.config_expert = ExpertConfig()
@@ -561,9 +571,33 @@ class PPORolloutVisualizer:
         log_std: np.ndarray,
         value_estimate: float,
     ) -> None:
-        if rollout_step % self.every_n != 0:
+        env_slot = env_idx % len(self.episode_returns)
+        if reward < 0.0:
+            self.negative_reward_burst_remaining[env_slot] = max(
+                self.negative_reward_burst_remaining[env_slot],
+                self.negative_reward_burst_len,
+            )
+
+        prev_value = self.prev_values[env_slot]
+        value_is_low = value_estimate < self.value_low_threshold
+        value_dropped = (
+            prev_value is not None
+            and (prev_value - value_estimate) > self.value_drop_threshold
+        )
+        if value_is_low or value_dropped:
+            self.value_burst_remaining[env_slot] = max(
+                self.value_burst_remaining[env_slot],
+                self.value_burst_len,
+            )
+
+        regular_cadence_due = (global_step % self.every_n) == 0
+        burst_due = self.negative_reward_burst_remaining[env_slot] > 0
+        value_burst_due = self.value_burst_remaining[env_slot] > 0
+        if not regular_cadence_due and not burst_due and not value_burst_due:
+            self.prev_values[env_slot] = value_estimate
             return
         if self.max_images > 0 and self.images_written >= self.max_images:
+            self.prev_values[env_slot] = value_estimate
             return
 
         speed = float(obs["speed"][0])
@@ -606,20 +640,16 @@ class PPORolloutVisualizer:
             speed_idx = self.action_codec.slices.target_speed.start
             target_speed_std = float(std[speed_idx] * self.action_codec.speed_scale)
 
-        env_slot = env_idx % len(self.discounted_returns)
         self.episode_returns[env_slot] += reward
-        self.discounted_returns[env_slot] = (
-            reward + self.gamma * self.discounted_returns[env_slot]
-        )
         episode_return = float(self.episode_returns[env_slot])
-        discounted_return = float(self.discounted_returns[env_slot])
 
         text_lines = [
             f"update={update_idx} step={rollout_step}",
             (
                 f"reward={reward:+.4f} cumulative_reward={episode_return:+.4f} "
-                f"discounted_return={discounted_return:+.4f} value={value_estimate:+.4f}"
+                f"value={value_estimate:+.4f}"
             ),
+            "forward_discounted_return=pending",
             f"std[min/mean/max]={std.min():.4f}/{std.mean():.4f}/{std.max():.4f}",
             (
                 "target_point "
@@ -650,7 +680,6 @@ class PPORolloutVisualizer:
 
         if done or truncated:
             self.episode_returns[env_slot] = 0.0
-            self.discounted_returns[env_slot] = 0.0
 
         top_row = np.concatenate([bev, panel], axis=1)
         top_h, top_w = top_row.shape[:2]
@@ -686,3 +715,51 @@ class PPORolloutVisualizer:
             [int(cv2.IMWRITE_JPEG_QUALITY), 92],
         )
         self.images_written += 1
+        stamp_x = bev.shape[1] + 14
+        self.pending_forward_return_stamps.setdefault(update_idx, []).append(
+            (rollout_step, env_idx, os.path.join(self.output_dir, filename), stamp_x)
+        )
+
+        if self.negative_reward_burst_remaining[env_slot] > 0:
+            self.negative_reward_burst_remaining[env_slot] -= 1
+        if self.value_burst_remaining[env_slot] > 0:
+            self.value_burst_remaining[env_slot] -= 1
+        self.prev_values[env_slot] = value_estimate
+
+    def stamp_forward_returns(
+        self, update_idx: int, forward_returns: np.ndarray
+    ) -> None:
+        records = self.pending_forward_return_stamps.pop(update_idx, [])
+        if not records or forward_returns.ndim != 2:
+            return
+
+        num_steps, num_envs = forward_returns.shape
+        for rollout_step, env_idx, image_path, stamp_x in records:
+            if rollout_step >= num_steps or env_idx >= num_envs:
+                continue
+            if not os.path.isfile(image_path):
+                continue
+            image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+            if image is None:
+                continue
+
+            forward_return = float(forward_returns[rollout_step, env_idx])
+            y_top, y_bottom = 238, 266
+            cv2.rectangle(
+                image,
+                (stamp_x - 2, y_top),
+                (stamp_x + 560, y_bottom),
+                (248, 248, 248),
+                -1,
+            )
+            cv2.putText(
+                image,
+                f"forward_discounted_return={forward_return:+.4f}",
+                (stamp_x, 258),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (20, 20, 20),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+            cv2.imwrite(image_path, image, [int(cv2.IMWRITE_JPEG_QUALITY), 92])

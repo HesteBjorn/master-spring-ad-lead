@@ -1384,6 +1384,12 @@ def main():
                     returns[t] = rewards[t] + args.gamma * nextnonterminal * next_return
                 advantages = returns - values
 
+        if debug_viz is not None and rank == 0:
+            debug_viz.stamp_forward_returns(
+                update_idx=update,
+                forward_returns=returns[:num_collected_steps].detach().cpu().numpy(),
+            )
+
         if config.cpu_collect:
             device = (
                 torch.device(f"cuda:{args.gpu_ids[rank]}")
