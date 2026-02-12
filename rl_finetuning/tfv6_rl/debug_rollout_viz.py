@@ -697,7 +697,33 @@ class PPORolloutVisualizer:
                 current_speed=speed,
             )
 
-        grid = np.concatenate([rgb, bev, panel], axis=1)
+        top_row = np.concatenate([bev, panel], axis=1)
+        top_h, top_w = top_row.shape[:2]
+        camera_h = int(round(rgb_h * (top_w / max(1, rgb_w))))
+        rgb_resized = cv2.resize(rgb, (top_w, camera_h), interpolation=cv2.INTER_LINEAR)
+
+        cv2.putText(
+            top_row,
+            "BEV + POLICY DEBUG",
+            (12, 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (15, 15, 15),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.putText(
+            rgb_resized,
+            "CAMERA SENSOR",
+            (12, 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2,
+            lineType=cv2.LINE_AA,
+        )
+        separator = np.full((8, top_w, 3), 235, dtype=np.uint8)
+        grid = np.concatenate([top_row, separator, rgb_resized], axis=0)
         filename = f"u{update_idx:06d}_gs{global_step:012d}_step{rollout_step:04d}_env{env_idx}.jpg"
         cv2.imwrite(
             os.path.join(self.output_dir, filename),
