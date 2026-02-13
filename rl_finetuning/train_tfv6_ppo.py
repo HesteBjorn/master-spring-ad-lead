@@ -347,6 +347,18 @@ def parse_args(config):
                       default=config.beta_min_a_b_value,
                       help='Nugget that gets added to the softplus output of the network.'
                       'Aims to prevent degenerate distributions with the Beta.')
+    parser.add_argument('--log_std_init',
+                      type=float,
+                      default=config.log_std_init,
+                      help='Initial bias value for the state-dependent log_std head.')
+    parser.add_argument('--log_std_min',
+                      type=float,
+                      default=config.log_std_min,
+                      help='Minimum log_std value after clamping.')
+    parser.add_argument('--log_std_max',
+                      type=float,
+                      default=config.log_std_max,
+                      help='Maximum log_std value after clamping.')
     parser.add_argument('--use_rpo',
                       type=lambda x: bool(strtobool(x)),
                       default=config.use_rpo,
@@ -1832,6 +1844,50 @@ def main():
             writer.add_scalar(
                 "charts/advantages", b_advantages.mean().item(), config.global_step
             )
+            # Policy uncertainty diagnostics from rollout-time log_std samples.
+            rollout_log_std = b_old_sigmas
+            rollout_std = torch.exp(rollout_log_std)
+            writer.add_scalar(
+                "policy/log_std_mean", rollout_log_std.mean().item(), config.global_step
+            )
+            writer.add_scalar(
+                "policy/log_std_min", rollout_log_std.min().item(), config.global_step
+            )
+            writer.add_scalar(
+                "policy/log_std_max", rollout_log_std.max().item(), config.global_step
+            )
+            writer.add_scalar(
+                "policy/std_mean", rollout_std.mean().item(), config.global_step
+            )
+            writer.add_scalar(
+                "policy/std_min", rollout_std.min().item(), config.global_step
+            )
+            writer.add_scalar(
+                "policy/std_max", rollout_std.max().item(), config.global_step
+            )
+
+            action_codec = agent.module.action_codec
+            if action_codec.predict_route:
+                route_slice = action_codec.slices.route
+                writer.add_scalar(
+                    "policy/std_route_mean",
+                    rollout_std[:, route_slice].mean().item(),
+                    config.global_step,
+                )
+            if action_codec.predict_waypoints:
+                waypoints_slice = action_codec.slices.waypoints
+                writer.add_scalar(
+                    "policy/std_waypoints_mean",
+                    rollout_std[:, waypoints_slice].mean().item(),
+                    config.global_step,
+                )
+            if action_codec.predict_target_speed:
+                speed_slice = action_codec.slices.target_speed
+                writer.add_scalar(
+                    "policy/std_target_speed",
+                    rollout_std[:, speed_slice].mean().item(),
+                    config.global_step,
+                )
             # Always log a reward signal, even if no episode terminates.
             writer.add_scalar(
                 "charts/mean_reward", rewards.mean().item(), config.global_step

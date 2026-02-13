@@ -500,7 +500,7 @@ def main():
         "--log-std-init",
         type=float,
         default=None,
-        help="Override PPO log_std initialization for visualization (e.g. -4.0).",
+        help="Override PPO log_std head bias initialization for visualization (e.g. -4.0).",
     )
     parser.add_argument(
         "--use_correlated_noise",
@@ -533,7 +533,8 @@ def main():
     ).to(device)
     if args.log_std_init is not None:
         with torch.no_grad():
-            policy.log_std.fill_(float(args.log_std_init))
+            policy.log_std_head.bias.fill_(float(args.log_std_init))
+            policy.log_std_head.weight.zero_()
 
     if args.data_root or args.route_dir:
         data_root = Path(args.data_root) if args.data_root else None
@@ -576,7 +577,8 @@ def main():
             predictions.pred_future_waypoints,
             predictions.pred_target_speed_scalar,
         ).float()
-        log_std = policy.log_std.unsqueeze(0).expand_as(action_mean)
+        value_features = policy._build_value_features().float()
+        log_std = policy.log_std_head(value_features)
         log_std = policy._apply_noise_ramp(log_std)
         dist = policy.action_dist.proba_distribution(action_mean, log_std)
 

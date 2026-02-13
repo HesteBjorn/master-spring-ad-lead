@@ -104,42 +104,46 @@ class CorrelatedGaussianDistribution(nn.Module):
     def proba_distribution(
         self, mean_actions: torch.Tensor, log_std: torch.Tensor
     ) -> CorrelatedGaussianDistribution:
-        if log_std.ndim == 2:
-            log_std = log_std[0]
-        std = torch.exp(log_std)
+        if mean_actions.ndim == 1:
+            mean_actions = mean_actions.unsqueeze(0)
+        if log_std.ndim == 1:
+            log_std = log_std.unsqueeze(0).expand_as(mean_actions)
 
+        std = torch.exp(log_std)
         device = mean_actions.device
         dtype = mean_actions.dtype
+        batch_size = mean_actions.shape[0]
 
-        blocks = []
-        if self.action_codec.predict_route:
-            route_std = std[self.action_codec.slices.route]
-            blocks.append(
-                self._build_cov_block(
-                    route_std, self.action_codec.num_route_points, device, dtype
+        scale_trils = []
+        for i in range(batch_size):
+            std_row = std[i]
+            blocks = []
+            if self.action_codec.predict_route:
+                route_std = std_row[self.action_codec.slices.route]
+                blocks.append(
+                    self._build_cov_block(
+                        route_std, self.action_codec.num_route_points, device, dtype
+                    )
                 )
-            )
-        if self.action_codec.predict_waypoints:
-            wp_std = std[self.action_codec.slices.waypoints]
-            blocks.append(
-                self._build_cov_block(
-                    wp_std, self.action_codec.num_waypoints, device, dtype
+            if self.action_codec.predict_waypoints:
+                wp_std = std_row[self.action_codec.slices.waypoints]
+                blocks.append(
+                    self._build_cov_block(
+                        wp_std, self.action_codec.num_waypoints, device, dtype
+                    )
                 )
-            )
-        if self.action_codec.predict_target_speed:
-            speed_std = std[self.action_codec.slices.target_speed]
-            speed_cov = (
-                speed_std.pow(2).reshape(1, 1)
-                + torch.eye(1, device=device, dtype=dtype) * self.jitter
-            )
-            blocks.append(speed_cov)
+            if self.action_codec.predict_target_speed:
+                speed_std = std_row[self.action_codec.slices.target_speed]
+                speed_cov = (
+                    speed_std.pow(2).reshape(1, 1)
+                    + torch.eye(1, device=device, dtype=dtype) * self.jitter
+                )
+                blocks.append(speed_cov)
 
-        if len(blocks) == 1:
-            cov = blocks[0]
-        else:
-            cov = torch.block_diag(*blocks)
+            cov = blocks[0] if len(blocks) == 1 else torch.block_diag(*blocks)
+            scale_trils.append(torch.linalg.cholesky(cov))
 
-        scale_tril = torch.linalg.cholesky(cov)
+        scale_tril = torch.stack(scale_trils, dim=0)
         self.distribution = MultivariateNormal(loc=mean_actions, scale_tril=scale_tril)
         return self
 

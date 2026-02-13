@@ -52,7 +52,6 @@ class TFv6PPOPolicy(nn.Module):
         correlated_noise_rho: float = 0.8,
         noise_ramp: bool = True,
         train_planning_decoder_only: bool = True,
-        start_log_std: float = -4.0,
     ) -> None:
         super().__init__()
         self.observation_space = observation_space
@@ -99,6 +98,7 @@ class TFv6PPOPolicy(nn.Module):
         self.correlated_noise_rho = correlated_noise_rho
         self.noise_ramp = noise_ramp
         self.skip_perception_heads = True
+        self.log_std_init = -4.0
         self.log_std_min = -5.0
         self.log_std_max = 1.0
         if rl_config is not None:
@@ -111,6 +111,9 @@ class TFv6PPOPolicy(nn.Module):
             self.noise_ramp = bool(getattr(rl_config, "noise_ramp", self.noise_ramp))
             self.skip_perception_heads = bool(
                 getattr(rl_config, "skip_perception_heads", self.skip_perception_heads)
+            )
+            self.log_std_init = float(
+                getattr(rl_config, "log_std_init", self.log_std_init)
             )
             self.log_std_min = float(
                 getattr(rl_config, "log_std_min", self.log_std_min)
@@ -134,9 +137,11 @@ class TFv6PPOPolicy(nn.Module):
             )
         else:
             self.action_dist = DiagGaussianDistribution(self.action_dim)
-        self.log_std = nn.Parameter(start_log_std * torch.ones(self.action_dim))
-
         value_in_dim = self.training_config.transfuser_token_dim
+        self.log_std_head = nn.Linear(value_in_dim, self.action_dim)
+        nn.init.zeros_(self.log_std_head.weight)
+        nn.init.constant_(self.log_std_head.bias, self.log_std_init)
+
         self.value_head = nn.Sequential(
             nn.Linear(value_in_dim, 256),
             nn.ReLU(inplace=True),
@@ -246,7 +251,8 @@ class TFv6PPOPolicy(nn.Module):
         )
 
         action_mean = self.action_codec.encode(route, waypoints, target_speed).float()
-        log_std = self.log_std.unsqueeze(0).expand_as(action_mean)
+        value_features = self._build_value_features().float()
+        log_std = self.log_std_head(value_features)
         log_std = self._apply_noise_ramp(log_std)
         dist = self.action_dist.proba_distribution(action_mean, log_std)
 
@@ -258,7 +264,6 @@ class TFv6PPOPolicy(nn.Module):
         if entropy.ndim > 1:
             entropy = entropy.sum(1)
 
-        value_features = self._build_value_features().float()
         values = self.value_head(value_features)
 
         exp_loss = None
