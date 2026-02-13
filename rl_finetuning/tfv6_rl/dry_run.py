@@ -15,7 +15,6 @@ from lead.common import constants as viz_constants
 from lead.common.constants import RadarDataIndex
 from lead.data_loader import carla_dataset_utils
 from lead.data_loader.carla_dataset_utils import rasterize_lidar
-from rl_finetuning.tfv6_rl.action_codec import ActionCodec
 from rl_finetuning.tfv6_rl.obs_codec import ObsCodec
 from rl_finetuning.tfv6_rl.policy_tfv6_ppo import TFv6PPOPolicy, load_training_config
 
@@ -373,16 +372,13 @@ def visualize_predictions(
     rasterized_lidar: np.ndarray,
     config,
     pred_route: np.ndarray | None,
-    pred_waypoints: np.ndarray | None,
     tp_prev: np.ndarray,
     tp: np.ndarray,
     tp_next: np.ndarray,
     sampled_routes: list[np.ndarray],
-    sampled_wps: list[np.ndarray],
     target_speed: float | None,
     sample_speeds: list[float],
     output_path: Path,
-    show_sampled_waypoints: bool,
 ):
     bev = _build_bev_image(rasterized_lidar, config)
     scale = 4
@@ -396,9 +392,6 @@ def visualize_predictions(
     if pred_route is not None:
         route_pix = _meters_to_pixel(pred_route, config, scale)
         _draw_path(bev, route_pix, viz_constants.PREDICTION_ROUTE_COLOR, radius=4)
-    if pred_waypoints is not None:
-        wp_pix = _meters_to_pixel(pred_waypoints, config, scale)
-        _draw_points(bev, wp_pix, viz_constants.PREDICTION_WAYPOINT_COLOR, radius=5)
 
     sample_colors = [
         viz_constants.rgb(255, 0, 255),
@@ -408,14 +401,11 @@ def visualize_predictions(
         viz_constants.rgb(0, 128, 255),
         viz_constants.rgb(255, 0, 128),
     ]
-    for i, (sr, sw) in enumerate(zip(sampled_routes, sampled_wps, strict=False)):
+    for i, sr in enumerate(sampled_routes):
         color = sample_colors[i % len(sample_colors)]
         if sr is not None:
             route_pix = _meters_to_pixel(sr, config, scale)
             _draw_polyline(bev, route_pix, color, thickness=1)
-        if show_sampled_waypoints and sw is not None:
-            wp_pix = _meters_to_pixel(sw, config, scale)
-            _draw_points(bev, wp_pix, color, radius=3)
 
     rgb_vis = np.transpose(rgb, (1, 2, 0))
     rgb_vis = cv2.cvtColor(rgb_vis, cv2.COLOR_RGB2BGR)
@@ -520,7 +510,6 @@ def main():
 
     training_config = load_training_config(args.checkpoint)
     obs_codec = ObsCodec(training_config)
-    action_codec = ActionCodec(training_config)
 
     policy = TFv6PPOPolicy(
         observation_space=None,
@@ -531,6 +520,7 @@ def main():
         use_correlated_noise=args.use_correlated_noise,
         correlated_noise_rho=args.correlated_noise_rho,
     ).to(device)
+    action_codec = policy.action_codec
     if args.log_std_init is not None:
         with torch.no_grad():
             policy.log_std_head.bias.fill_(float(args.log_std_init))
@@ -559,11 +549,6 @@ def main():
             if predictions.pred_route is not None
             else None
         )
-        waypoints = (
-            predictions.pred_future_waypoints.detach().cpu().float().numpy()[0]
-            if predictions.pred_future_waypoints is not None
-            else None
-        )
         target_speed = (
             float(
                 predictions.pred_target_speed_scalar.detach().cpu().float().numpy()[0]
@@ -583,7 +568,6 @@ def main():
         dist = policy.action_dist.proba_distribution(action_mean, log_std)
 
         sampled_routes = []
-        sampled_wps = []
         sample_speeds = []
         for _ in range(args.num_samples):
             act = torch.clamp(dist.sample(), -1.0, 1.0)
@@ -594,12 +578,7 @@ def main():
                 sampled_routes.append(r[0])
             else:
                 sampled_routes.append(None)
-            if w is not None:
-                if isinstance(w, torch.Tensor):
-                    w = w.detach().cpu().numpy()
-                sampled_wps.append(w[0])
-            else:
-                sampled_wps.append(None)
+            _ = w
             if s is not None:
                 if isinstance(s, torch.Tensor):
                     s = s.detach().cpu().numpy()
@@ -611,16 +590,13 @@ def main():
             rasterized_lidar=obs_np["rasterized_lidar"],
             config=training_config,
             pred_route=route,
-            pred_waypoints=waypoints,
             tp_prev=obs_np["target_point_previous"],
             tp=obs_np["target_point"],
             tp_next=obs_np["target_point_next"],
             sampled_routes=sampled_routes,
-            sampled_wps=sampled_wps,
             target_speed=target_speed,
             sample_speeds=sample_speeds,
             output_path=output_path,
-            show_sampled_waypoints=args.show_sampled_waypoints,
         )
         print(f"[dry_run] Wrote visualization to {output_path}")
         return
