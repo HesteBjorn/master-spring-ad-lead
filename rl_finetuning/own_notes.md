@@ -88,7 +88,7 @@ Update data-root with the most recent checkpoint
 ```bash
 python rl_finetuning/analyze_speed_distribution_shift.py \
 --old-checkpoint outputs/checkpoints/tfv6_resnet34/model_0030_0.pth \
---finetuned-checkpoint outputs/rl_logs/TFV6_PPO_WEEKEND_20260212_linear/model_latest_000000081.pth \
+--finetuned-checkpoint outputs/rl_logs/TFV6_PPO_WEEKEND_20260213/model_latest_000000145.pth \
 --data-root data/carla_leaderboard2/data \
 --output-dir outputs/local_evaluation \
 --output-stem speed_distribution_shift_all_routes
