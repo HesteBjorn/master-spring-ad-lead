@@ -163,10 +163,14 @@ class PPORolloutVisualizer:
         self.images_written = 0
         self.episode_returns = [0.0 for _ in range(max(1, num_envs))]
         self.pending_forward_return_stamps: dict[
-            int, list[tuple[int, int, str, int]]
+            int, list[tuple[int, int, str, int, int]]
         ] = {}
         self.negative_reward_burst_remaining = [0 for _ in range(max(1, num_envs))]
-        self.negative_reward_burst_len = 5
+        self.negative_reward_burst_len_terminal = 2
+        self.negative_reward_burst_len_non_terminal = 10
+        self.random_burst_remaining = [0 for _ in range(max(1, num_envs))]
+        self.random_burst_len = 10
+        self.random_burst_probability = 0.003
         self.prev_values = [None for _ in range(max(1, num_envs))]
         self.value_burst_remaining = [0 for _ in range(max(1, num_envs))]
         self.value_burst_len = 10
@@ -363,6 +367,8 @@ class PPORolloutVisualizer:
                 line_thickness=2,
             )
 
+        self._overlay_legend_on_bev(bev_img)
+
         return bev_img, {
             "tp_in_view": tp_in_view,
             "tp_next_in_view": tpn_in_view,
@@ -370,7 +376,7 @@ class PPORolloutVisualizer:
             "tp_next_drawn_px": tpn_drawn,
         }
 
-    def _add_legend(self, panel: np.ndarray) -> None:
+    def _overlay_legend_on_bev(self, bev: np.ndarray) -> None:
         legend_items = []
         if self.steer_modality == "route":
             legend_items.extend(
@@ -386,38 +392,56 @@ class PPORolloutVisualizer:
                     ("Waypoints sampled", (50, 190, 60)),
                 ]
             )
-        legend_items.extend(
-            [
-                ("Target point", (10, 10, 220)),
-                ("Target point next", (30, 170, 240)),
-            ]
-        )
-        y = 26
+
+        row_h = 32
+        swatch = 16
+        font_scale = 0.68
+        x_right = bev.shape[1] - 8
+        y_top = 10
+
+        max_text_w = 0
+        for name, _ in legend_items:
+            size = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)[0]
+            max_text_w = max(max_text_w, size[0])
+        panel_w = swatch + 6 + max_text_w + 10
+        panel_h = row_h * len(legend_items) + 8
+        x0 = max(0, x_right - panel_w)
+        y0 = y_top
+        cv2.rectangle(bev, (x0, y0), (x0 + panel_w, y0 + panel_h), (245, 245, 245), -1)
+        cv2.rectangle(bev, (x0, y0), (x0 + panel_w, y0 + panel_h), (190, 190, 190), 1)
+
+        y = y0 + 22
         for name, color in legend_items:
-            cv2.rectangle(panel, (14, y - 12), (34, y + 8), color, -1)
+            cv2.rectangle(
+                bev, (x0 + 6, y - swatch + 2), (x0 + 6 + swatch, y + 2), color, -1
+            )
             cv2.putText(
-                panel,
+                bev,
                 name,
-                (42, y + 4),
+                (x0 + 6 + swatch + 5, y + 1),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.52,
+                font_scale,
                 (30, 30, 30),
                 1,
                 lineType=cv2.LINE_AA,
             )
-            y += 28
+            y += row_h
 
     def _draw_speed_distribution(
         self,
         panel: np.ndarray,
         *,
+        x0: int,
+        y0: int,
+        w: int,
+        h: int,
         mean_speed: float,
         std_speed: float,
         selected_speed: float,
         current_speed: float,
     ) -> None:
-        x0, y0 = 330, 18
-        w, h = 270, 170
+        if w < 120 or h < 120:
+            return
         cv2.rectangle(panel, (x0, y0), (x0 + w, y0 + h), (210, 210, 210), 1)
         cv2.putText(
             panel,
@@ -433,8 +457,8 @@ class PPORolloutVisualizer:
         # Keep plot high in the corner and reserve a larger bottom margin for ticks/x-label.
         plot_left = x0 + 12
         plot_right = x0 + w - 10
-        plot_top = y0 + 48
-        plot_bottom = y0 + h - 42
+        plot_top = y0 + 64
+        plot_bottom = y0 + h - 44
         cv2.rectangle(
             panel, (plot_left, plot_top), (plot_right, plot_bottom), (235, 235, 235), -1
         )
@@ -512,6 +536,35 @@ class PPORolloutVisualizer:
             1,
             lineType=cv2.LINE_AA,
         )
+        cv2.putText(
+            panel,
+            f"std={std_speed:.2f}",
+            (x0 + 8, y0 + 52),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            (30, 30, 30),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
+        low_x = speed_to_px(max(0.0, mean_speed - std_speed))
+        high_x = speed_to_px(mean_speed + std_speed)
+        cv2.line(
+            panel,
+            (low_x, plot_top),
+            (low_x, plot_bottom),
+            (180, 180, 60),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.line(
+            panel,
+            (high_x, plot_top),
+            (high_x, plot_bottom),
+            (180, 180, 60),
+            1,
+            lineType=cv2.LINE_AA,
+        )
 
         ticks = np.linspace(0.0, max_speed, 5)
         for t in ticks:
@@ -530,13 +583,232 @@ class PPORolloutVisualizer:
         cv2.putText(
             panel,
             "speed [m/s]",
-            (plot_left + 82, plot_bottom + 32),
+            (plot_left + max(30, (plot_right - plot_left) // 3), plot_bottom + 30),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.42,
             (40, 40, 40),
             1,
             lineType=cv2.LINE_AA,
         )
+
+    def _draw_spatial_std_profile(
+        self,
+        panel: np.ndarray,
+        *,
+        x0: int,
+        y0: int,
+        w: int,
+        h: int,
+        route_point_std: np.ndarray | None,
+        waypoint_point_std: np.ndarray | None,
+    ) -> None:
+        if route_point_std is None and waypoint_point_std is None:
+            return
+
+        if w < 180 or h < 130:
+            return
+
+        cv2.rectangle(panel, (x0, y0), (x0 + w, y0 + h), (210, 210, 210), 1)
+        cv2.putText(
+            panel,
+            "Spatial Std Profile",
+            (x0 + 8, y0 + 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (20, 20, 20),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
+        plot_left = x0 + 12
+        plot_right = x0 + w - 10
+        plot_top = y0 + 46
+        plot_bottom = y0 + h - 34
+        cv2.rectangle(
+            panel, (plot_left, plot_top), (plot_right, plot_bottom), (235, 235, 235), -1
+        )
+        cv2.rectangle(
+            panel, (plot_left, plot_top), (plot_right, plot_bottom), (180, 180, 180), 1
+        )
+
+        max_points = 0
+        if route_point_std is not None:
+            max_points = max(max_points, int(route_point_std.shape[0]))
+        if waypoint_point_std is not None:
+            max_points = max(max_points, int(waypoint_point_std.shape[0]))
+        max_points = max(max_points, 1)
+
+        max_std = 0.0
+        if route_point_std is not None and route_point_std.size > 0:
+            max_std = max(max_std, float(route_point_std.max()))
+        if waypoint_point_std is not None and waypoint_point_std.size > 0:
+            max_std = max(max_std, float(waypoint_point_std.max()))
+        max_std = max(max_std * 1.1, 1e-3)
+
+        def idx_to_px(i: int, n: int) -> int:
+            if n <= 1:
+                return int(round((plot_left + plot_right) / 2))
+            alpha = float(i) / float(n - 1)
+            return int(round(plot_left + alpha * (plot_right - plot_left)))
+
+        def std_to_py(v: float) -> int:
+            alpha = float(np.clip(v / max_std, 0.0, 1.0))
+            return int(round(plot_bottom - alpha * (plot_bottom - plot_top)))
+
+        def draw_series(values: np.ndarray | None, color: tuple[int, int, int]) -> None:
+            if values is None or values.size == 0:
+                return
+            pts = np.array(
+                [
+                    [idx_to_px(i, values.shape[0]), std_to_py(float(v))]
+                    for i, v in enumerate(values)
+                ],
+                dtype=np.int32,
+            )
+            cv2.polylines(
+                panel,
+                [pts],
+                isClosed=False,
+                color=color,
+                thickness=2,
+                lineType=cv2.LINE_AA,
+            )
+            for p in pts:
+                cv2.circle(panel, tuple(p), 2, color, -1, lineType=cv2.LINE_AA)
+
+        draw_series(route_point_std, (20, 80, 230))
+        draw_series(waypoint_point_std, (50, 190, 60))
+
+        cv2.putText(
+            panel,
+            f"max std={max_std:.3f}",
+            (plot_left, y0 + h - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.36,
+            (40, 40, 40),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.putText(
+            panel,
+            "x: point index [-]",
+            (plot_left + max(70, (plot_right - plot_left) // 2 - 20), y0 + h - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.34,
+            (40, 40, 40),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.putText(
+            panel,
+            "y: std",
+            (x0 + 8, y0 + 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.34,
+            (40, 40, 40),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
+        # x-axis tick marks (point index)
+        x_tick_count = min(5, max_points)
+        if x_tick_count >= 2:
+            for i in range(x_tick_count):
+                idx = int(round(i * (max_points - 1) / (x_tick_count - 1)))
+                tx = idx_to_px(idx, max_points)
+                cv2.line(
+                    panel,
+                    (tx, plot_bottom),
+                    (tx, plot_bottom + 4),
+                    (80, 80, 80),
+                    1,
+                    lineType=cv2.LINE_AA,
+                )
+                cv2.putText(
+                    panel,
+                    f"{idx}",
+                    (tx - 8, plot_bottom + 16),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.33,
+                    (40, 40, 40),
+                    1,
+                    lineType=cv2.LINE_AA,
+                )
+
+        # y-axis tick marks (std value)
+        y_ticks = np.linspace(0.0, max_std, 4)
+        for yv in y_ticks:
+            ty = std_to_py(float(yv))
+            cv2.line(
+                panel,
+                (plot_left - 4, ty),
+                (plot_left, ty),
+                (80, 80, 80),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+            cv2.putText(
+                panel,
+                f"{yv:.2f}",
+                (plot_left - 40, ty + 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.31,
+                (40, 40, 40),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+
+        legend_x = x0 + 122
+        legend_y = y0 + 36
+        if route_point_std is not None and route_point_std.size > 0:
+            cv2.rectangle(
+                panel,
+                (legend_x, legend_y - 8),
+                (legend_x + 12, legend_y + 4),
+                (20, 80, 230),
+                -1,
+            )
+            cv2.putText(
+                panel,
+                "route",
+                (legend_x + 16, legend_y + 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                (30, 30, 30),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+            legend_x += 62
+        if waypoint_point_std is not None and waypoint_point_std.size > 0:
+            cv2.rectangle(
+                panel,
+                (legend_x, legend_y - 8),
+                (legend_x + 12, legend_y + 4),
+                (50, 190, 60),
+                -1,
+            )
+            cv2.putText(
+                panel,
+                "waypoints",
+                (legend_x + 16, legend_y + 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                (30, 30, 30),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+
+    def _prepare_bev_for_column(
+        self, bev: np.ndarray, target_h: int, target_w: int
+    ) -> np.ndarray:
+        # Rotate so ego heading points up in the rendered column.
+        bev = np.rot90(bev, k=1)
+        bev = np.ascontiguousarray(bev)
+        # Crop small left/right margins to save width.
+        crop = int(0.08 * bev.shape[1])
+        if 2 * crop < bev.shape[1] - 20:
+            bev = bev[:, crop:-crop]
+        return cv2.resize(bev, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
     def _put_text_lines(
         self, panel: np.ndarray, lines: list[str], start_y: int = 210
@@ -573,10 +845,19 @@ class PPORolloutVisualizer:
     ) -> None:
         env_slot = env_idx % len(self.episode_returns)
         if reward < 0.0:
+            is_terminal_transition = bool(done) or bool(truncated)
+            burst_len = (
+                self.negative_reward_burst_len_terminal
+                if is_terminal_transition
+                else self.negative_reward_burst_len_non_terminal
+            )
             self.negative_reward_burst_remaining[env_slot] = max(
                 self.negative_reward_burst_remaining[env_slot],
-                self.negative_reward_burst_len,
+                burst_len,
             )
+        if self.random_burst_remaining[env_slot] <= 0:
+            if np.random.random() < self.random_burst_probability:
+                self.random_burst_remaining[env_slot] = self.random_burst_len
 
         prev_value = self.prev_values[env_slot]
         value_is_low = value_estimate < self.value_low_threshold
@@ -593,7 +874,13 @@ class PPORolloutVisualizer:
         regular_cadence_due = (global_step % self.every_n) == 0
         burst_due = self.negative_reward_burst_remaining[env_slot] > 0
         value_burst_due = self.value_burst_remaining[env_slot] > 0
-        if not regular_cadence_due and not burst_due and not value_burst_due:
+        random_burst_due = self.random_burst_remaining[env_slot] > 0
+        if (
+            not regular_cadence_due
+            and not burst_due
+            and not value_burst_due
+            and not random_burst_due
+        ):
             self.prev_values[env_slot] = value_estimate
             return
         if self.max_images > 0 and self.images_written >= self.max_images:
@@ -629,13 +916,52 @@ class PPORolloutVisualizer:
             waypoints_mean=waypoints_mean,
         )
         rgb_h, rgb_w = rgb.shape[:2]
-        bev = cv2.resize(bev, (int(bev.shape[1] * rgb_h / bev.shape[0]), rgb_h))
+        # Keep legacy overall resolution basis, then widen total canvas by 50%.
+        legacy_bev_w = int(round(rgb_h * (self.bev_w / max(1, self.bev_h))))
+        base_final_w = legacy_bev_w + 620
+        final_w = int(round(base_final_w * 1.5))
+        legacy_cam_h = int(round(rgb_h * (base_final_w / max(1, rgb_w))))
+        final_h = rgb_h + 8 + legacy_cam_h
 
-        panel = np.full((rgb_h, 620, 3), 248, dtype=np.uint8)
-        self._add_legend(panel)
+        # Keep BEV column size unchanged by widening.
+        left_w = int(round(final_h * (2.0 / 3.0)))
+        left_w = min(left_w, int(base_final_w * 0.46))
+        left_w = max(left_w, 220)
+        gap = 8
+        right_x = left_w + gap
+        right_w = final_w - right_x
+        cam_h = int(round(rgb_h * (right_w / max(1, rgb_w))))
+        cam_h = min(cam_h, int(final_h * 0.52))
+        cam_h = max(cam_h, 120)
+        top_h = final_h - gap - cam_h
+        top_h = max(top_h, 240)
+        cam_h = final_h - gap - top_h
+
+        bev_col = self._prepare_bev_for_column(bev, target_h=final_h, target_w=left_w)
+        self._overlay_legend_on_bev(bev_col)
+
+        scalar_w = int(round(right_w * 0.56))
+        graph_w = right_w - gap - scalar_w
+        scalar_panel = np.full((top_h, scalar_w, 3), 248, dtype=np.uint8)
+        graphs_panel = np.full((top_h, graph_w, 3), 248, dtype=np.uint8)
 
         std = np.exp(log_std.astype(np.float32))
         target_speed_std = None
+        route_point_std = None
+        waypoint_point_std = None
+
+        if self.action_codec.slices.route is not None:
+            route_slice = self.action_codec.slices.route
+            route_std_flat = std[route_slice]
+            route_std_xy = route_std_flat.reshape(-1, 2)
+            route_point_std = np.sqrt(np.mean(np.square(route_std_xy), axis=1))
+
+        if self.action_codec.slices.waypoints is not None:
+            wp_slice = self.action_codec.slices.waypoints
+            wp_std_flat = std[wp_slice]
+            wp_std_xy = wp_std_flat.reshape(-1, 2)
+            waypoint_point_std = np.sqrt(np.mean(np.square(wp_std_xy), axis=1))
+
         if self.action_codec.slices.target_speed is not None:
             speed_idx = self.action_codec.slices.target_speed.start
             target_speed_std = float(std[speed_idx] * self.action_codec.speed_scale)
@@ -662,7 +988,11 @@ class PPORolloutVisualizer:
                 f"in_view={int(target_debug['tp_next_in_view'])}"
             ),
         ]
-        self._put_text_lines(panel, text_lines, start_y=210)
+        text_start_y = 244
+        line_h = 24
+        if text_start_y + line_h * len(text_lines) > top_h - 10:
+            text_start_y = max(24, top_h - 10 - line_h * len(text_lines))
+        self._put_text_lines(scalar_panel, text_lines, start_y=text_start_y)
 
         if (
             self.target_speed_active_for_control
@@ -670,32 +1000,47 @@ class PPORolloutVisualizer:
             and target_speed_sample is not None
             and target_speed_std is not None
         ):
+            graph_top_h = int(round(top_h * 0.54))
+            graph_bottom_h = top_h - gap - graph_top_h
             self._draw_speed_distribution(
-                panel,
+                graphs_panel,
+                x0=0,
+                y0=0,
+                w=graph_w,
+                h=graph_top_h,
                 mean_speed=target_speed_mean,
                 std_speed=target_speed_std,
                 selected_speed=target_speed_sample,
                 current_speed=speed,
             )
+            self._draw_spatial_std_profile(
+                graphs_panel,
+                x0=0,
+                y0=graph_top_h + gap,
+                w=graph_w,
+                h=graph_bottom_h,
+                route_point_std=route_point_std,
+                waypoint_point_std=waypoint_point_std,
+            )
+        else:
+            self._draw_spatial_std_profile(
+                graphs_panel,
+                x0=0,
+                y0=0,
+                w=graph_w,
+                h=top_h,
+                route_point_std=route_point_std,
+                waypoint_point_std=waypoint_point_std,
+            )
 
         if done or truncated:
             self.episode_returns[env_slot] = 0.0
 
-        top_row = np.concatenate([bev, panel], axis=1)
-        top_h, top_w = top_row.shape[:2]
-        camera_h = int(round(rgb_h * (top_w / max(1, rgb_w))))
-        rgb_resized = cv2.resize(rgb, (top_w, camera_h), interpolation=cv2.INTER_LINEAR)
+        right_top = np.full((top_h, right_w, 3), 248, dtype=np.uint8)
+        right_top[:, :scalar_w] = scalar_panel
+        right_top[:, scalar_w + gap : scalar_w + gap + graph_w] = graphs_panel
 
-        cv2.putText(
-            top_row,
-            "BEV + POLICY DEBUG",
-            (12, 20),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (15, 15, 15),
-            1,
-            lineType=cv2.LINE_AA,
-        )
+        rgb_resized = cv2.resize(rgb, (right_w, cam_h), interpolation=cv2.INTER_LINEAR)
         cv2.putText(
             rgb_resized,
             "CAMERA SENSOR",
@@ -706,25 +1051,49 @@ class PPORolloutVisualizer:
             2,
             lineType=cv2.LINE_AA,
         )
-        separator = np.full((8, top_w, 3), 235, dtype=np.uint8)
-        grid = np.concatenate([top_row, separator, rgb_resized], axis=0)
+
+        right_col = np.full((final_h, right_w, 3), 235, dtype=np.uint8)
+        right_col[:top_h] = right_top
+        right_col[top_h + gap : top_h + gap + cam_h] = rgb_resized
+
+        grid = np.full((final_h, final_w, 3), 235, dtype=np.uint8)
+        grid[:, :left_w] = bev_col
+        grid[:, right_x : right_x + right_w] = right_col
+        cv2.putText(
+            grid,
+            "BEV + POLICY DEBUG",
+            (12, 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (15, 15, 15),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
         filename = f"u{update_idx:06d}_gs{global_step:012d}_step{rollout_step:04d}_env{env_idx}.jpg"
+        os.makedirs(self.output_dir, exist_ok=True)
+        image_path = os.path.join(self.output_dir, filename)
         cv2.imwrite(
-            os.path.join(self.output_dir, filename),
+            image_path,
             grid,
             [int(cv2.IMWRITE_JPEG_QUALITY), 92],
         )
         self.images_written += 1
-        stamp_x = bev.shape[1] + 14
+
+        stamp_x = right_x + 12
+        stamp_y = text_start_y + 2 * line_h
         self.pending_forward_return_stamps.setdefault(update_idx, []).append(
-            (rollout_step, env_idx, os.path.join(self.output_dir, filename), stamp_x)
+            (rollout_step, env_idx, image_path, stamp_x, stamp_y)
         )
 
         if self.negative_reward_burst_remaining[env_slot] > 0:
             self.negative_reward_burst_remaining[env_slot] -= 1
         if self.value_burst_remaining[env_slot] > 0:
             self.value_burst_remaining[env_slot] -= 1
+        if self.random_burst_remaining[env_slot] > 0:
+            self.random_burst_remaining[env_slot] -= 1
         self.prev_values[env_slot] = value_estimate
+        return
 
     def stamp_forward_returns(
         self, update_idx: int, forward_returns: np.ndarray
@@ -734,7 +1103,8 @@ class PPORolloutVisualizer:
             return
 
         num_steps, num_envs = forward_returns.shape
-        for rollout_step, env_idx, image_path, stamp_x in records:
+        for rollout_step, env_idx, image_path, stamp_x, stamp_y in records:
+            os.makedirs(self.output_dir, exist_ok=True)
             if rollout_step >= num_steps or env_idx >= num_envs:
                 continue
             if not os.path.isfile(image_path):
@@ -744,7 +1114,7 @@ class PPORolloutVisualizer:
                 continue
 
             forward_return = float(forward_returns[rollout_step, env_idx])
-            y_top, y_bottom = 238, 266
+            y_top, y_bottom = stamp_y - 16, stamp_y + 8
             cv2.rectangle(
                 image,
                 (stamp_x - 2, y_top),
@@ -755,7 +1125,7 @@ class PPORolloutVisualizer:
             cv2.putText(
                 image,
                 f"forward_discounted_return={forward_return:+.4f}",
-                (stamp_x, 258),
+                (stamp_x, stamp_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
                 (20, 20, 20),

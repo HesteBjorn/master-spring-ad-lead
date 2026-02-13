@@ -78,6 +78,11 @@ ps -ef | rg "run_tfv6_watchdog_overnight|train_long_local|train_tfv6_ppo|torchru
 
 # Analysis
 
+## Debug viz folder to mp4
+```bash
+rl_finetuning/m4p_convert_folder.sh outputs/rl_logs/TFV6_PPO_WEEKEND_20260213/run_20260213_144404/debug_viz
+```
+
 ## Analyse action distribution shift from TFv6 to Fine tuned model:
 Update data-root with the most recent checkpoint
 ```bash
