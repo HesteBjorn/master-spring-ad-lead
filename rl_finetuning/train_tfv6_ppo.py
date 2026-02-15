@@ -347,15 +347,15 @@ def parse_args(config):
                       default=config.beta_min_a_b_value,
                       help='Nugget that gets added to the softplus output of the network.'
                       'Aims to prevent degenerate distributions with the Beta.')
-    parser.add_argument('--log_std_init',
+    parser.add_argument('--log_std_init', '--log-std-init',
                       type=float,
                       default=config.log_std_init,
                       help='Initial bias value for the state-dependent log_std head.')
-    parser.add_argument('--log_std_min',
+    parser.add_argument('--log_std_min', '--log-std-min',
                       type=float,
                       default=config.log_std_min,
                       help='Minimum log_std value after clamping.')
-    parser.add_argument('--log_std_max',
+    parser.add_argument('--log_std_max', '--log-std-max',
                       type=float,
                       default=config.log_std_max,
                       help='Maximum log_std value after clamping.')

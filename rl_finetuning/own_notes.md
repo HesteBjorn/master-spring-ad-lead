@@ -65,8 +65,9 @@ RUN_CONFIG_FILE=rl_finetuning/configs/weekend_local_run_stable.env \
 bash rl_finetuning/run_tfv6_watchdog_overnight.sh \
   outputs/checkpoints/tfv6_resnet34 \
   outputs/rl_logs \
-  TFV6_PPO_WEEKEND_20260213 \
-  --debug-viz --debug-viz-every-n 10000 --debug-viz-max-images 100  # Optional debug visualization
+  TFV6_PPO_WEEKEND_20260214_correlationrho095_logstd45 \
+  --debug-viz --debug-viz-every-n 1 --debug-viz-max-images 100  # Optional debug visualization
+
 ```
 
 ## Kill watchdog

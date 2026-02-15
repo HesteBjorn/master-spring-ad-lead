@@ -157,7 +157,8 @@
                 "--data-root", "data/carla_leaderboard2/data",
                 "--frame", "66",
                 "--num-samples", "6",
-                "--log-std-init", "-4.0",
+                "--correlated_noise_rho", "0.95",
+                "--log-std-init", "-4.5",
                 "--output", "outputs/rl_logs/dryrun/tfv6_vis.png",
                 // "--use_correlated_noise", "True",
                 // "--correlated_noise_rho", "0.8"
