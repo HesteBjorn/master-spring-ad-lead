@@ -1,9 +1,10 @@
-## Bench2Drive
+# Evaluation
+## Bench2Drive Idun
 From repo root in idun run: `bash slurm/experiments/001_example/020_b2d_0.sh` to create many slurm jobs for B2D.
 
 `cd /outputs/evaluation/001_example/020_b2d_0/` for å finne resultater fra idun.
 
-## Run dashboard from idun files
+## Run b2d dashboard from idun files
 ```bash
 # Login to idun and port forward
 ssh -L 5000:localhost:5000 erikhbj@idun.hpc.ntnu.no
@@ -33,15 +34,6 @@ bash scripts/start_carla.sh
 bash scripts/eval_bench2drive.sh
 ```
 
-## SSH with vscode to 5090 computer
-Connect to eduroam network (or VPN)
-```bash
-# Tailscale IP: erikhbj@100.92.150.98
-# Trenger ikke være på VPN. Anbefalt ikke.
-ssh erikhbj@100.92.150.98
-```
-Or go to vscode: `Ctrl+Shift+P> Remote-SSH: Connect to Host...`
-
 # Training
 
 ## Visualize losses and rewards
@@ -67,7 +59,6 @@ bash rl_finetuning/run_tfv6_watchdog_overnight.sh \
   outputs/rl_logs \
   TFV6_PPO_WEEKEND_20260214_correlationrho095_logstd45 \
   --debug-viz --debug-viz-every-n 1 --debug-viz-max-images 100  # Optional debug visualization
-
 ```
 
 ## Kill watchdog
@@ -89,8 +80,18 @@ Update data-root with the most recent checkpoint
 ```bash
 python rl_finetuning/analyze_speed_distribution_shift.py \
 --old-checkpoint outputs/checkpoints/tfv6_resnet34/model_0030_0.pth \
---finetuned-checkpoint outputs/rl_logs/TFV6_PPO_WEEKEND_20260213/model_latest_000000145.pth \
+--finetuned-checkpoint outputs/rl_logs/TFV6_PPO_WEEKEND_20260214_correlationrho095_logstd45/model_latest_000000099.pth \
 --data-root data/carla_leaderboard2/data \
 --output-dir outputs/local_evaluation \
 --output-stem speed_distribution_shift_all_routes
 ```
+
+# Div
+## SSH with vscode to 5090 computer
+Connect to eduroam network (or VPN)
+```bash
+# Tailscale IP: erikhbj@100.92.150.98
+# Trenger ikke være på VPN. Anbefalt ikke.
+ssh erikhbj@100.92.150.98
+```
+Or go to vscode: `Ctrl+Shift+P> Remote-SSH: Connect to Host...`
