@@ -86,6 +86,51 @@ def _log_cuda_memory_snapshot(
     )
 
 
+def _iter_episode_stats(info: dict):
+    """Yield (return, length) pairs from vector or scalar episode info."""
+
+    def _iter_from_episode_dict(episode_info: dict, done_mask=None):
+        returns = np.asarray(episode_info["r"])
+        lengths = np.asarray(episode_info["l"])
+
+        if returns.ndim == 0:
+            yield float(returns.item()), int(lengths.item())
+            return
+
+        flat_returns = returns.reshape(-1)
+        flat_lengths = lengths.reshape(-1)
+        if done_mask is not None:
+            flat_done_mask = np.asarray(done_mask, dtype=bool).reshape(-1)
+        else:
+            # Fallback if no explicit done mask is available.
+            flat_done_mask = flat_lengths > 0
+
+        for idx, is_done in enumerate(flat_done_mask):
+            if is_done:
+                yield float(flat_returns[idx]), int(flat_lengths[idx])
+
+    if "final_info" in info:
+        for single_info in info["final_info"]:
+            if single_info is None:
+                continue
+            if "episode" in single_info:
+                yield from _iter_from_episode_dict(single_info["episode"])
+            elif "tfv6_episode" in single_info:
+                yield from _iter_from_episode_dict(single_info["tfv6_episode"])
+        return
+
+    if "episode" in info:
+        yield from _iter_from_episode_dict(
+            info["episode"], done_mask=info.get("_episode")
+        )
+        return
+
+    if "tfv6_episode" in info:
+        yield from _iter_from_episode_dict(
+            info["tfv6_episode"], done_mask=info.get("_tfv6_episode")
+        )
+
+
 def save(model, optimizer, config, folder, model_file, optimizer_file):
     model_file = os.path.join(folder, model_file)
     torch.save(model.module.state_dict(), model_file)
@@ -1293,37 +1338,7 @@ def main():
                             exp_n_steps[step, idx] = single_info["n_steps"]
                             exp_suggest[step, idx] = single_info["suggest"]
 
-                        # Sum up total returns and how often the env was reset during this iteration.
-                        episode_info = None
-                        if "episode" in single_info.keys():
-                            episode_info = single_info["episode"]
-                        elif "tfv6_episode" in single_info.keys():
-                            episode_info = single_info["tfv6_episode"]
-                        if episode_info is not None:
-                            ep_return = float(episode_info["r"])
-                            ep_length = int(episode_info["l"])
-                            print(
-                                f"rank: {rank}, config.global_step={config.global_step}, "
-                                f"episodic_return={ep_return}"
-                            )
-                            total_returns[rank] += ep_return
-                            total_lengths[rank] += ep_length
-                            num_total_returns[rank] += 1
-            elif "episode" in info.keys():
-                episode_info = info["episode"]
-                ep_return = float(episode_info["r"])
-                ep_length = int(episode_info["l"])
-                print(
-                    f"rank: {rank}, config.global_step={config.global_step}, "
-                    f"episodic_return={ep_return}"
-                )
-                total_returns[rank] += ep_return
-                total_lengths[rank] += ep_length
-                num_total_returns[rank] += 1
-            elif "tfv6_episode" in info.keys():
-                episode_info = info["tfv6_episode"]
-                ep_return = float(episode_info["r"])
-                ep_length = int(episode_info["l"])
+            for ep_return, ep_length in _iter_episode_stats(info):
                 print(
                     f"rank: {rank}, config.global_step={config.global_step}, "
                     f"episodic_return={ep_return}"

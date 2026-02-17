@@ -87,6 +87,32 @@ are exposed as environment variables in the script.
 3. Optional debug:
    - Set `TFV6_RL_DEBUG=1` in the environment to enable extra logging in the agent.
 
+## Parallel TFv6 PPO training (CaRL-style)
+
+For robust multi-environment training with CARLA restart handling (CaRL-like flow), use:
+
+```bash
+RUN_CONFIG_FILE=rl_finetuning/configs/weekend_local_run_stable.env \
+bash rl_finetuning/train_tfv6_ppo_parallell.sh \
+  outputs/checkpoints/tfv6_resnet34 \
+  outputs/rl_logs \
+  TFV6_PPO_PARALLEL_LOCAL \
+```
+
+This launcher starts:
+- one CARLA server + leaderboard client per environment
+- distributed trainer workers via `torchrun`
+- auto-resume from latest `model_latest_*.pth`
+- crash monitoring + full process-group restarts (matching CaRL `train_parallel.py` behavior)
+
+Configuration is controlled via env vars or `RUN_CONFIG_FILE`, e.g.:
+- `NUM_ENVS_PER_NODE`
+- `NUM_ENVS_PER_GPU`
+- `GPU_IDS`
+- `TRAIN_TOWNS`
+- `ROUTES_FOLDER`
+- `TRAINER_EXTRA_ARGS`
+
 ## Notes
 - Observation schema and action layout are derived from the TFv6 checkpoint config.
 - Action vector includes route, waypoints, and target speed (the activated planning heads).

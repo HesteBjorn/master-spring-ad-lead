@@ -14,6 +14,8 @@ Notes:
 - Profiles are optional. If `RUN_CONFIG_FILE` is unset, script behavior stays unchanged.
 - You can pass extra trainer CLI flags via `TRAINER_EXTRA_ARGS`.
 - Watchdog uses the same launcher internally: `rl_finetuning/run_tfv6_watchdog_overnight.sh`.
+- Parallel CaRL-style launcher also supports `RUN_CONFIG_FILE`:
+  - `rl_finetuning/train_tfv6_ppo_parallell.sh`
 
 Weekend profile:
 

@@ -68,6 +68,20 @@ sleep 2
 ps -ef | rg "run_tfv6_watchdog_overnight|train_long_local|train_tfv6_ppo|torchrun|leaderboard_evaluator|CarlaUE4|nvidia-smi --query" -i
 ```
 
+## Parallell training
+### Local parallell training
+```bash
+RUN_CONFIG_FILE=rl_finetuning/configs/weekend_local_run_stable.env \
+bash rl_finetuning/train_tfv6_ppo_parallell.sh \
+  outputs/checkpoints/tfv6_resnet34 \
+  outputs/rl_logs \
+  TFV6_PPO_PARALLEL_LOCAL \
+```
+
+### Slurm parallell training
+TODO
+
+
 # Analysis
 
 ## Debug viz folder to mp4
