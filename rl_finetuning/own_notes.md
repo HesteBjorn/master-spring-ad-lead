@@ -71,15 +71,31 @@ ps -ef | rg "run_tfv6_watchdog_overnight|train_long_local|train_tfv6_ppo|torchru
 ## Parallell training
 ### Local parallell training
 ```bash
-RUN_CONFIG_FILE=rl_finetuning/configs/weekend_local_run_stable.env \
+# Multi env in parallel
+RUN_CONFIG_FILE=rl_finetuning/configs/train_parallel_singleGPU.env \
 bash rl_finetuning/train_tfv6_ppo_parallell.sh \
   outputs/checkpoints/tfv6_resnet34 \
   outputs/rl_logs \
-  TFV6_PPO_PARALLEL_LOCAL \
+  TFV6_PPO_PARALLEL_LOCAL_MULTIENV_SINGLEGPU \
+  --debug 1
 ```
 
 ### Slurm parallell training
-TODO
+```bash
+sbatch --export=ALL,RUN_CONFIG_FILE=rl_finetuning/configs/train_parallel_idun.env rl_finetuning/train_tfv6_ppo_parallell_slurm.slurm```
+
+### Kill all running processes
+```bash
+pkill -f "train_tfv6_ppo_parallell.sh" || true
+pkill -f "train_parallel_tfv6_ppo.py" || true
+pkill -f "start_learner_dd_ppo_tfv6_ppo.sh" || true
+pkill -f "torchrun.*rl_finetuning/train_tfv6_ppo.py" || true
+pkill -f "leaderboard_evaluator.py" || true
+pkill -f "start_leaderboard_tfv6_ppo.sh" || true
+pkill -f "CarlaUE4-Linux-Shipping" || true
+pkill -f "CarlaUE4.sh" || true
+ps -ef | rg "CarlaUE4|leaderboard_evaluator|train_parallel_tfv6_ppo|train_tfv6_ppo.py|torchrun|tensorboard" || true
+```
 
 
 # Analysis
