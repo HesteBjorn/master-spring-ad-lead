@@ -15,6 +15,12 @@ class GlobalConfig(CaRLGlobalConfig):
         super().__init__()
         # Keep TFv6 default behavior independent from upstream CaRL defaults.
         self.lr_schedule = "linear"
+        # TFv6 PPO policy defaults.
+        self.use_correlated_noise = True
+        self.correlated_noise_rho = 0.8
+        self.noise_ramp = True
+        self.skip_perception_heads = True
+        self.train_planning_decoder_only = True
         # TFv6 PPO policy noise defaults (state-dependent log_std head).
         self.log_std_init = -4.0
         self.log_std_min = -5.0
