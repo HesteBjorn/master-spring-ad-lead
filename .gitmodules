@@ -1,0 +1,3 @@
+[submodule "3rd_party/CaRL"]
+	path = 3rd_party/CaRL
+	url = https://github.com/autonomousvision/CaRL.git
