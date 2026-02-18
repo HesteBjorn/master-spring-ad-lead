@@ -6,11 +6,11 @@
 #SBATCH --partition=GPUQ
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
-#SBATCH --time=0-01:00:00
-#SBATCH --constraint=gpu32g|gpu40g|gpu80g
+#SBATCH --time=3-00:00:00
+#SBATCH --constraint=gpu40g|gpu80g
 #SBATCH --output=outputs/rl_logs/slurm_%j.out
 #SBATCH --error=outputs/rl_logs/slurm_%j.err
 
@@ -71,4 +71,4 @@ bash rl_finetuning/train_tfv6_ppo_parallell.sh \
   "${CHECKPOINT_DIR}" \
   "${LOGDIR}" \
   "${EXP_NAME}" \
-  --debug 1
+  --debug 0
