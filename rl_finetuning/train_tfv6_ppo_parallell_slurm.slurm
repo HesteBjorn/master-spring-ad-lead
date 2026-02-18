@@ -17,6 +17,7 @@
 set -euo pipefail
 
 cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
+export LEAD_PROJECT_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
 
 # Keep behavior consistent with existing experiment scripts.
 source slurm/init.sh
