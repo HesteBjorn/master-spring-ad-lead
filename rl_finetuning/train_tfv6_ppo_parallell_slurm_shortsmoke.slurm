@@ -14,7 +14,7 @@
 #SBATCH --output=outputs/rl_logs/slurm_%j.out
 #SBATCH --error=outputs/rl_logs/slurm_%j.err
 
-set -euo pipefail
+set -eo pipefail
 
 cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
 export LEAD_PROJECT_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
