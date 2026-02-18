@@ -3,14 +3,14 @@
 #SBATCH --account=share-ie-idi
 #SBATCH --mail-user=erikhbj@stud.ntnu.no
 #SBATCH --mail-type=ALL
-#SBATCH --partition=GPUQ
+#SBATCH --partition=short
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:4
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=256G
-#SBATCH --time=0-01:00:00
-#SBATCH --constraint=gpu32g|gpu40g|gpu80g
+#SBATCH --gres=gpu:2
+#SBATCH --cpus-per-task=24
+#SBATCH --mem=120G
+#SBATCH --time=0-00:20:00
+#SBATCH --constraint=gpu16g|gpu32g|gpu40g|gpu80g
 #SBATCH --output=outputs/rl_logs/slurm_%j.out
 #SBATCH --error=outputs/rl_logs/slurm_%j.err
 
