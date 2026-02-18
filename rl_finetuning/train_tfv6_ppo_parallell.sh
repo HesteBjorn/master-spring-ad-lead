@@ -102,8 +102,23 @@ CARLA_SECONDARY_THREADS="${CARLA_SECONDARY_THREADS:-8}"
 
 TOTAL_BATCH_SIZE="${TOTAL_BATCH_SIZE:-256}"
 TOTAL_MINIBATCH_SIZE="${TOTAL_MINIBATCH_SIZE:-64}"
+STEPS_PER_ENV="${STEPS_PER_ENV:-}"
 UPDATE_EPOCHS="${UPDATE_EPOCHS:-3}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-10000000}"
+
+if [[ -n "${STEPS_PER_ENV}" ]]; then
+  if ! [[ "${STEPS_PER_ENV}" =~ ^[0-9]+$ ]] || (( STEPS_PER_ENV <= 0 )); then
+    echo "[train-tfv6-ppo-parallell] ERROR: STEPS_PER_ENV must be a positive integer, got: ${STEPS_PER_ENV}"
+    exit 1
+  fi
+  TOTAL_NUM_ENVS=$((NUM_ENVS_PER_NODE * NUM_NODES))
+  TOTAL_BATCH_SIZE=$((TOTAL_NUM_ENVS * STEPS_PER_ENV))
+  if (( TOTAL_BATCH_SIZE % 4 != 0 )); then
+    echo "[train-tfv6-ppo-parallell] ERROR: derived TOTAL_BATCH_SIZE (${TOTAL_BATCH_SIZE}) is not divisible by 4."
+    exit 1
+  fi
+  TOTAL_MINIBATCH_SIZE=$((TOTAL_BATCH_SIZE / 4))
+fi
 
 EXTRA_TRAIN_ARGS=()
 if [[ -n "${TRAINER_EXTRA_ARGS:-}" ]]; then
@@ -120,6 +135,9 @@ echo "[train-tfv6-ppo-parallell] num_nodes=${NUM_NODES} node_id=${NODE_ID} rdzv=
 echo "[train-tfv6-ppo-parallell] train_towns=${TRAIN_TOWNS} routes_folder=${ROUTES_FOLDER}"
 echo "[train-tfv6-ppo-parallell] carla_server_profile=tfv6_sensor_safe (threading_on, no_rendering_mode=False)"
 echo "[train-tfv6-ppo-parallell] carla_threads rpc=${CARLA_RPC_THREADS} streaming=${CARLA_STREAMING_THREADS} secondary=${CARLA_SECONDARY_THREADS}"
+if [[ -n "${STEPS_PER_ENV}" ]]; then
+  echo "[train-tfv6-ppo-parallell] steps_per_env=${STEPS_PER_ENV} total_num_envs=$((NUM_ENVS_PER_NODE * NUM_NODES)) (derived batch sizing enabled)"
+fi
 echo "[train-tfv6-ppo-parallell] total_batch_size=${TOTAL_BATCH_SIZE} total_minibatch_size=${TOTAL_MINIBATCH_SIZE} update_epochs=${UPDATE_EPOCHS} total_timesteps=${TOTAL_TIMESTEPS}"
 
 python -u "${REPO_ROOT}/rl_finetuning/train_parallel_tfv6_ppo.py" \
