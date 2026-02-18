@@ -82,7 +82,8 @@ bash rl_finetuning/train_tfv6_ppo_parallell.sh \
 
 ### Slurm parallell training
 ```bash
-sbatch --export=ALL,RUN_CONFIG_FILE=rl_finetuning/configs/train_parallel_idun.env rl_finetuning/train_tfv6_ppo_parallell_slurm.slurm```
+sbatch --export=ALL,RUN_CONFIG_FILE=rl_finetuning/configs/train_parallel_idun.env rl_finetuning/train_tfv6_ppo_parallell_slurm.slurm
+```
 
 ### Kill all running processes
 ```bash
@@ -125,3 +126,14 @@ Connect to eduroam network (or VPN)
 ssh erikhbj@100.92.150.98
 ```
 Or go to vscode: `Ctrl+Shift+P> Remote-SSH: Connect to Host...`
+
+## Tmux: Keep terminal alive across SSH
+```bash
+# Create new terminal
+tmux new -s rltrain
+# ... use terminal
+
+# detach: Ctrl+b, then d
+tmux ls
+tmux attach -t rltrain
+```
