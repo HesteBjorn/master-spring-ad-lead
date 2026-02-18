@@ -7,7 +7,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:8
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=48
 #SBATCH --mem=256G
 #SBATCH --time=3-00:00:00
 #SBATCH --constraint=gpu40g|gpu80g
@@ -42,12 +42,21 @@ GPU_COUNT="$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)"
 GPU_IDS="$(seq -s ' ' 0 $((GPU_COUNT - 1)))"
 GPU_MEM_MIB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n1)"
 
-# Target 2 envs/GPU when VRAM is sufficient. Fallback to 1 for small GPUs.
+# Auto-pick envs/GPU from detected VRAM unless user overrides NUM_ENVS_PER_GPU.
+# Targets:
+# - 80GB class: 4 envs/GPU
+# - 40GB class: 3 envs/GPU
+# - 24-39GB class: 2 envs/GPU
+# - smaller cards: 1 env/GPU
 if [[ "${NUM_ENVS_PER_GPU:-}" == "" ]]; then
-  if (( GPU_MEM_MIB < 24000 )); then
-    NUM_ENVS_PER_GPU=1
-  else
+  if (( GPU_MEM_MIB >= 76000 )); then
+    NUM_ENVS_PER_GPU=4
+  elif (( GPU_MEM_MIB >= 38000 )); then
+    NUM_ENVS_PER_GPU=3
+  elif (( GPU_MEM_MIB >= 24000 )); then
     NUM_ENVS_PER_GPU=2
+  else
+    NUM_ENVS_PER_GPU=1
   fi
 fi
 
