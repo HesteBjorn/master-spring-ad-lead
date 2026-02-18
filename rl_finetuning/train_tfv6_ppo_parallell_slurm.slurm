@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
 #SBATCH --time=0-01:00:00
-#SBATCH --constraint=gpu32g
+#SBATCH --constraint=gpu32g|gpu40g|gpu80g
 #SBATCH --output=outputs/rl_logs/slurm_%j.out
 #SBATCH --error=outputs/rl_logs/slurm_%j.err
 
