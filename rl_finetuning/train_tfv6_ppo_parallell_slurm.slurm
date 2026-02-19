@@ -9,8 +9,8 @@
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=256G
-#SBATCH --time=3-00:00:00
-#SBATCH --constraint=gpu40g|gpu80g
+#SBATCH --time=1-00:00:00
+#SBATCH --constraint=gpu80g
 #SBATCH --output=outputs/rl_logs/slurm_%j.out
 #SBATCH --error=outputs/rl_logs/slurm_%j.err
 
@@ -40,7 +40,7 @@ nvidia-smi
 
 GPU_COUNT="$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)"
 GPU_IDS="$(seq -s ' ' 0 $((GPU_COUNT - 1)))"
-GPU_MEM_MIB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n1)"
+GPU_MEM_MIB="$(nvidia-smi --id=0 --query-gpu=memory.total --format=csv,noheader,nounits)"
 
 # Auto-pick envs/GPU from detected VRAM unless user overrides NUM_ENVS_PER_GPU.
 # Targets:
