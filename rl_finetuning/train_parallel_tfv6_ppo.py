@@ -385,7 +385,11 @@ if __name__ == "__main__":
         raw_logdir = args.log_root
         logdir = os.path.join(raw_logdir, args.exp_name)
         os.makedirs(logdir, exist_ok=True)
-        os.makedirs(os.path.join(raw_logdir, "logs"), exist_ok=True)
+        slurm_job_id = os.environ.get("SLURM_JOB_ID", "").strip()
+        logs_folder_name = f"logs_{slurm_job_id}" if slurm_job_id else "logs"
+        process_logdir = os.path.join(raw_logdir, logs_folder_name)
+        os.makedirs(process_logdir, exist_ok=True)
+        print(f"[launcher] process_logs={process_logdir}")
 
         route_files = build_route_files(args)
 
@@ -398,28 +402,28 @@ if __name__ == "__main__":
             if args.debug:
                 server_outs.append(
                     open(
-                        f"{raw_logdir}/logs/server_out_{i:03d}.txt",
+                        os.path.join(process_logdir, f"server_out_{i:03d}.txt"),
                         "w",
                         encoding="utf-8",
                     )
                 )
                 server_errs.append(
                     open(
-                        f"{raw_logdir}/logs/server_err_{i:03d}.txt",
+                        os.path.join(process_logdir, f"server_err_{i:03d}.txt"),
                         "w",
                         encoding="utf-8",
                     )
                 )
                 client_outs.append(
                     open(
-                        f"{raw_logdir}/logs/client_out_{i:03d}.txt",
+                        os.path.join(process_logdir, f"client_out_{i:03d}.txt"),
                         "w",
                         encoding="utf-8",
                     )
                 )
                 client_errs.append(
                     open(
-                        f"{raw_logdir}/logs/client_err_{i:03d}.txt",
+                        os.path.join(process_logdir, f"client_err_{i:03d}.txt"),
                         "w",
                         encoding="utf-8",
                     )
@@ -564,10 +568,14 @@ if __name__ == "__main__":
 
             if args.debug:
                 train_out = open(
-                    f"{raw_logdir}/logs/train_out.txt", "w", encoding="utf-8"
+                    os.path.join(process_logdir, "train_out.txt"),
+                    "w",
+                    encoding="utf-8",
                 )
                 train_err = open(
-                    f"{raw_logdir}/logs/train_err.txt", "w", encoding="utf-8"
+                    os.path.join(process_logdir, "train_err.txt"),
+                    "w",
+                    encoding="utf-8",
                 )
             else:
                 train_out = sys.stdout
