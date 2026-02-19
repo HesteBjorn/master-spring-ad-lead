@@ -45,32 +45,62 @@ cleanup() {
 }
 trap cleanup EXIT
 
-index=0
+OUTPUT_STEM="${OUTPUT_NAME%.mp4}"
+
+declare -A GROUP_COUNTS=()
+declare -A GROUP_DIRS=()
+
 for image_path in "${IMAGE_FILES[@]}"; do
-  printf -v seq_name "frame_%06d.jpg" "$index"
+  image_name="$(basename "$image_path")"
+  group_key="default"
+  if [[ "$image_name" =~ _env([0-9]+)\.[jJ][pP][eE]?[gG]$ ]]; then
+    group_key="env${BASH_REMATCH[1]}"
+  fi
+
+  if [[ -z "${GROUP_COUNTS[$group_key]+x}" ]]; then
+    GROUP_COUNTS[$group_key]=0
+    GROUP_DIRS[$group_key]="$TMP_DIR/$group_key"
+    mkdir -p "${GROUP_DIRS[$group_key]}"
+  fi
+
+  idx="${GROUP_COUNTS[$group_key]}"
+  printf -v seq_name "frame_%06d.jpg" "$idx"
   abs_image_path="$(realpath "$image_path")"
-  ln -s "$abs_image_path" "$TMP_DIR/$seq_name"
-  ((index += 1))
+  ln -s "$abs_image_path" "${GROUP_DIRS[$group_key]}/$seq_name"
+  GROUP_COUNTS[$group_key]=$((idx + 1))
 done
 
-ffmpeg -hide_banner -loglevel error -y \
-  -framerate "$FPS" \
-  -start_number 0 \
-  -i "$TMP_DIR/frame_%06d.jpg" \
-  -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2:in_range=pc:out_range=tv,format=yuv420p" \
-  -c:v libx264 \
-  -preset "$PRESET" \
-  -crf "$CRF" \
-  -movflags +faststart \
-  "$OUTPUT_PATH"
+declare -a WRITTEN_OUTPUTS=()
+for group_key in "${!GROUP_COUNTS[@]}"; do
+  group_dir="${GROUP_DIRS[$group_key]}"
+  if [[ "$group_key" == "default" ]]; then
+    group_output_path="${RUN_DIR}/${OUTPUT_STEM}.mp4"
+  else
+    group_output_path="${RUN_DIR}/${OUTPUT_STEM}_${group_key}.mp4"
+  fi
 
-if [[ ! -s "$OUTPUT_PATH" ]]; then
-  echo "Error: output video missing or empty: $OUTPUT_PATH" >&2
-  exit 1
-fi
+  ffmpeg -hide_banner -loglevel error -y \
+    -framerate "$FPS" \
+    -start_number 0 \
+    -i "$group_dir/frame_%06d.jpg" \
+    -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2:in_range=pc:out_range=tv,format=yuv420p" \
+    -c:v libx264 \
+    -preset "$PRESET" \
+    -crf "$CRF" \
+    -movflags +faststart \
+    "$group_output_path"
+
+  if [[ ! -s "$group_output_path" ]]; then
+    echo "Error: output video missing or empty: $group_output_path" >&2
+    exit 1
+  fi
+  WRITTEN_OUTPUTS+=("$group_output_path")
+done
 
 rm -rf "$INPUT_DIR"
 
-echo "Wrote: $OUTPUT_PATH"
-echo "Frames: ${#IMAGE_FILES[@]} | FPS: $FPS"
+for output in "${WRITTEN_OUTPUTS[@]}"; do
+  echo "Wrote: $output"
+done
+echo "Frames: ${#IMAGE_FILES[@]} | FPS: $FPS | Groups: ${#WRITTEN_OUTPUTS[@]}"
 echo "Deleted source folder: $INPUT_DIR"
