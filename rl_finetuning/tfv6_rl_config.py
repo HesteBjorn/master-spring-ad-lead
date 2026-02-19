@@ -25,3 +25,5 @@ class GlobalConfig(CaRLGlobalConfig):
         self.log_std_init = -4.0
         self.log_std_min = -5.0
         self.log_std_max = 1.0
+        # Use a higher LR for std head so state-dependent uncertainty adapts faster.
+        self.log_std_head_lr_mult = 5.0

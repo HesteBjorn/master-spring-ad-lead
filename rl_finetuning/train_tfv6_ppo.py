@@ -404,6 +404,10 @@ def parse_args(config):
                       type=float,
                       default=config.log_std_max,
                       help='Maximum log_std value after clamping.')
+    parser.add_argument('--log_std_head_lr_mult',
+                      type=float,
+                      default=config.log_std_head_lr_mult,
+                      help='Learning-rate multiplier for the log_std prediction head.')
     parser.add_argument('--use_rpo',
                       type=lambda x: bool(strtobool(x)),
                       default=config.use_rpo,
@@ -1014,18 +1018,56 @@ def main():
 
         print("Total trainable parameters: ", num_params)
 
+    trainable_named_params = [
+        (name, param) for name, param in agent.named_parameters() if param.requires_grad
+    ]
+    log_std_named_params = [
+        (name, param)
+        for name, param in trainable_named_params
+        if "log_std_head." in name
+    ]
+    base_named_params = [
+        (name, param)
+        for name, param in trainable_named_params
+        if "log_std_head." not in name
+    ]
+
+    optimizer_param_groups = []
+    if base_named_params:
+        optimizer_param_groups.append(
+            {
+                "params": [param for _, param in base_named_params],
+                "lr": config.current_learning_rate,
+                "is_log_std_head": False,
+            }
+        )
+    if log_std_named_params:
+        optimizer_param_groups.append(
+            {
+                "params": [param for _, param in log_std_named_params],
+                "lr": config.current_learning_rate * config.log_std_head_lr_mult,
+                "is_log_std_head": True,
+            }
+        )
+
+    if rank == 0 and log_std_named_params:
+        print(
+            "[optimizer] "
+            f"log_std_head_lr_mult={config.log_std_head_lr_mult} "
+            f"log_std_head_trainable_params={sum(p.numel() for _, p in log_std_named_params)}",
+            flush=True,
+        )
+
     if config.weight_decay > 0.0:
         optimizer = optim.AdamW(
-            agent.parameters(),
-            lr=config.current_learning_rate,
+            optimizer_param_groups,
             eps=config.adam_eps,
             weight_decay=config.weight_decay,
             betas=(config.beta_1, config.beta_2),
         )
     else:
         optimizer = optim.Adam(
-            agent.parameters(),
-            lr=config.current_learning_rate,
+            optimizer_param_groups,
             eps=config.adam_eps,
             betas=(config.beta_1, config.beta_2),
         )
@@ -1034,12 +1076,19 @@ def main():
 
     # Load optimizer
     if args.load_file is not None:
-        optimizer.load_state_dict(
-            torch.load(
-                args.load_file.replace("model_", "optimizer_"), map_location=device
+        try:
+            optimizer.load_state_dict(
+                torch.load(
+                    args.load_file.replace("model_", "optimizer_"), map_location=device
+                )
             )
-        )
-        print(f"Rank:{rank}, Load model")
+            print(f"Rank:{rank}, Load model")
+        except ValueError as exc:
+            print(
+                f"Rank:{rank}, warning: optimizer state mismatch while loading resume checkpoint ({exc}). "
+                "Continuing with freshly initialized optimizer.",
+                flush=True,
+            )
         if rank == 0:
             writer.add_scalar(
                 "charts/restart", 1, config.global_step
@@ -1229,7 +1278,12 @@ def main():
             )
 
         for param_group in optimizer.param_groups:
-            param_group["lr"] = config.current_learning_rate
+            lr_mult = (
+                config.log_std_head_lr_mult
+                if param_group.get("is_log_std_head", False)
+                else 1.0
+            )
+            param_group["lr"] = config.current_learning_rate * lr_mult
 
         t0 = TicToc()  # Data collect
         t1 = TicToc()  # Forward pass

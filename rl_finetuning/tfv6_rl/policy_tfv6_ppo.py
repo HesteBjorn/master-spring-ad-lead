@@ -139,7 +139,9 @@ class TFv6PPOPolicy(nn.Module):
             self.action_dist = DiagGaussianDistribution(self.action_dim)
         value_in_dim = self.training_config.transfuser_token_dim
         self.log_std_head = nn.Linear(value_in_dim, self.action_dim)
-        nn.init.zeros_(self.log_std_head.weight)
+        nn.init.normal_(
+            self.log_std_head.weight, mean=0.0, std=1e-3
+        )  # Small close to zero init value to allow bias to dominate early, but still random for stability in differentiation.
         nn.init.constant_(self.log_std_head.bias, self.log_std_init)
 
         self.value_head = nn.Sequential(
