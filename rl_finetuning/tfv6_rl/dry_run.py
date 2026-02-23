@@ -523,8 +523,13 @@ def main():
     action_codec = policy.action_codec
     if args.log_std_init is not None:
         with torch.no_grad():
-            policy.action_noise_head.bias.fill_(float(args.log_std_init))
-            policy.action_noise_head.weight.zero_()
+            final_noise_layer = policy.action_noise_head[-1]
+            final_noise_layer.bias.fill_(
+                policy.action_noise_codec.default_head_bias_from_log_std_init(
+                    float(args.log_std_init)
+                )
+            )
+            final_noise_layer.weight.zero_()
 
     if args.data_root or args.route_dir:
         data_root = Path(args.data_root) if args.data_root else None

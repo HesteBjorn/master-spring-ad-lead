@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -160,9 +161,16 @@ class CorrelatedGaussianDistribution(nn.Module):
 class DiagBetaDistribution(nn.Module):
     """Independent Beta per action dimension on [-1, 1], parameterized via mean + concentration."""
 
-    def __init__(self, eps: float = 1e-4) -> None:
+    def __init__(
+        self,
+        eps: float = 1e-4,
+        concentration_min: float = 2.0,
+        concentration_max: float = 200.0,
+    ) -> None:
         super().__init__()
         self.eps = float(eps)
+        self.concentration_min = float(concentration_min)
+        self.concentration_max = float(concentration_max)
         self.distribution: Beta | None = None
         self._mean_actions: torch.Tensor | None = None
 
@@ -171,7 +179,11 @@ class DiagBetaDistribution(nn.Module):
     ) -> DiagBetaDistribution:
         mean_actions = torch.clamp(mean_actions, -1.0 + self.eps, 1.0 - self.eps)
         mean01 = torch.clamp((mean_actions + 1.0) * 0.5, self.eps, 1.0 - self.eps)
-        concentration = torch.clamp(concentration, min=2.0 + self.eps, max=200.0)
+        concentration = torch.clamp(
+            concentration,
+            min=self.concentration_min + self.eps,
+            max=self.concentration_max,
+        )
         alpha = torch.clamp(mean01 * concentration, min=self.eps)
         beta = torch.clamp((1.0 - mean01) * concentration, min=self.eps)
         self.distribution = Beta(alpha, beta)
@@ -239,6 +251,9 @@ class ActionNoiseCodec:
         noise_ramp: bool = True,
         log_std_min: float = -5.0,
         log_std_max: float = 1.0,
+        beta_eps: float = 1e-4,
+        beta_concentration_min: float = 2.0,
+        beta_concentration_max: float = 200.0,
     ) -> None:
         self.action_codec = action_codec
         self.distribution_type = str(distribution_type)
@@ -247,6 +262,9 @@ class ActionNoiseCodec:
         self.noise_ramp = bool(noise_ramp)
         self.log_std_min = float(log_std_min)
         self.log_std_max = float(log_std_max)
+        self.beta_eps = float(beta_eps)
+        self.beta_concentration_min = float(beta_concentration_min)
+        self.beta_concentration_max = float(beta_concentration_max)
 
         self.group_names: list[str] = []
         self.group_slices: list[slice] = []
@@ -274,7 +292,11 @@ class ActionNoiseCodec:
             self.noise_pred_dim = len(
                 self.group_names
             )  # one concentration per active head type
-            self.action_dist = DiagBetaDistribution()
+            self.action_dist = DiagBetaDistribution(
+                eps=self.beta_eps,
+                concentration_min=self.beta_concentration_min,
+                concentration_max=self.beta_concentration_max,
+            )
         else:
             raise ValueError(
                 f"Unsupported action noise distribution: {self.distribution_type}"
@@ -334,7 +356,9 @@ class ActionNoiseCodec:
     def beta_diagnostics_from_head(
         self, mean_actions: torch.Tensor, head_pred: torch.Tensor
     ) -> NoiseDiagnostics:
-        grouped_concentration = torch.nn.functional.softplus(head_pred) + 2.0
+        grouped_concentration = (
+            torch.nn.functional.softplus(head_pred) + self.beta_concentration_min
+        )
         return self.beta_diagnostics_from_noise_pred(
             mean_actions, grouped_concentration
         )
@@ -355,6 +379,33 @@ class ActionNoiseCodec:
             noise_pred=grouped_concentration,
             diag_std=diag_std,
             diag_log_std=diag_log_std,
+        )
+
+    def _softplus_inverse(self, x: float) -> float:
+        if x <= 0.0:
+            return -20.0
+        if x > 20.0:
+            return x
+        return math.log(math.expm1(x))
+
+    def default_head_bias_from_log_std_init(self, log_std_init: float) -> float:
+        """Map a desired Gaussian-style log-std target to this codec's head preactivation."""
+        if self.distribution_type == "gaussian":
+            return float(log_std_init)
+
+        # For Beta on [-1, 1], match the center-point symmetric Beta std:
+        # std_center = 1 / sqrt(concentration + 1), then clip to feasible concentration.
+        target_std = max(math.exp(float(log_std_init)), 1e-8)
+        target_concentration = (1.0 / (target_std * target_std)) - 1.0
+        target_concentration = min(
+            max(
+                target_concentration,
+                self.beta_concentration_min + self.beta_eps,
+            ),
+            self.beta_concentration_max,
+        )
+        return self._softplus_inverse(
+            target_concentration - self.beta_concentration_min
         )
 
     def diagnostics_from_head(

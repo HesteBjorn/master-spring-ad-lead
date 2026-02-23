@@ -141,15 +141,21 @@ class TFv6PPOPolicy(nn.Module):
         )
         self.action_dist = self.action_noise_codec.action_dist
         value_in_dim = self.training_config.transfuser_token_dim
-        # Predict grouped noise parameters; ActionNoiseCodec defines the dimension (i.e. same std for all route points or individual)
-        # and maps them to the chosen exploration distribution.
-        self.action_noise_head = nn.Linear(
-            value_in_dim, self.action_noise_codec.noise_pred_dim
+        # Predict grouped noise parameters with a small MLP head.
+        # Hidden size matches the TFv6 planning token width for a minimal increase in capacity.
+        self.action_noise_head = nn.Sequential(
+            nn.Linear(value_in_dim, value_in_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(value_in_dim, self.action_noise_codec.noise_pred_dim),
         )
-        nn.init.normal_(
-            self.action_noise_head.weight, mean=0.0, std=1e-3
-        )  # Small close to zero init value to allow bias to dominate early, but still random for stability in differentiation.
-        nn.init.constant_(self.action_noise_head.bias, self.log_std_init)
+        final_noise_layer = self.action_noise_head[-1]
+        nn.init.zeros_(
+            final_noise_layer.weight
+        )  # Exact constant initialization; bias sets the initial exploration level.
+        init_noise_bias = self.action_noise_codec.default_head_bias_from_log_std_init(
+            self.log_std_init
+        )
+        nn.init.constant_(final_noise_layer.bias, init_noise_bias)
 
         self.value_head = nn.Sequential(
             nn.Linear(value_in_dim, 256),
