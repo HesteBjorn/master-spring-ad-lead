@@ -10,10 +10,7 @@ from lead.inference.config_closed_loop import ClosedLoopConfig
 from lead.tfv6.tfv6 import TFv6
 from lead.training.config_training import TrainingConfig
 from rl_finetuning.tfv6_rl.action_codec import ActionCodec, infer_action_head_usage
-from rl_finetuning.tfv6_rl.gaussian_dist import (
-    CorrelatedGaussianDistribution,
-    DiagGaussianDistribution,
-)
+from rl_finetuning.tfv6_rl.action_noise_codec import ActionNoiseCodec
 
 
 def load_training_config(checkpoint_dir: str) -> TrainingConfig:
@@ -93,7 +90,6 @@ class TFv6PPOPolicy(nn.Module):
             use_target_speed=use_target_speed,
         )
         self.action_dim = self.action_codec.action_dim
-
         self.use_correlated_noise = use_correlated_noise
         self.correlated_noise_rho = correlated_noise_rho
         self.noise_ramp = noise_ramp
@@ -101,6 +97,7 @@ class TFv6PPOPolicy(nn.Module):
         self.log_std_init = -4.0
         self.log_std_min = -5.0
         self.log_std_max = 1.0
+        self.action_noise_dist = "gaussian"
         if rl_config is not None:
             self.use_correlated_noise = bool(
                 getattr(rl_config, "use_correlated_noise", self.use_correlated_noise)
@@ -121,6 +118,9 @@ class TFv6PPOPolicy(nn.Module):
             self.log_std_max = float(
                 getattr(rl_config, "log_std_max", self.log_std_max)
             )
+            self.action_noise_dist = str(
+                getattr(rl_config, "action_noise_dist", self.action_noise_dist)
+            )
             self.train_planning_decoder_only = bool(
                 getattr(
                     rl_config,
@@ -130,19 +130,26 @@ class TFv6PPOPolicy(nn.Module):
             )
 
         self._configure_trainable_tfv6_modules()
-
-        if self.use_correlated_noise:
-            self.action_dist = CorrelatedGaussianDistribution(
-                self.action_codec, rho=self.correlated_noise_rho
-            )
-        else:
-            self.action_dist = DiagGaussianDistribution(self.action_dim)
+        self.action_noise_codec = ActionNoiseCodec(
+            self.action_codec,
+            distribution_type=self.action_noise_dist,
+            use_correlated_gaussian=self.use_correlated_noise,
+            correlated_noise_rho=self.correlated_noise_rho,
+            noise_ramp=self.noise_ramp,
+            log_std_min=self.log_std_min,
+            log_std_max=self.log_std_max,
+        )
+        self.action_dist = self.action_noise_codec.action_dist
         value_in_dim = self.training_config.transfuser_token_dim
-        self.log_std_head = nn.Linear(value_in_dim, self.action_dim)
+        # Predict grouped noise parameters; ActionNoiseCodec defines the dimension (i.e. same std for all route points or individual)
+        # and maps them to the chosen exploration distribution.
+        self.action_noise_head = nn.Linear(
+            value_in_dim, self.action_noise_codec.noise_pred_dim
+        )
         nn.init.normal_(
-            self.log_std_head.weight, mean=0.0, std=1e-3
+            self.action_noise_head.weight, mean=0.0, std=1e-3
         )  # Small close to zero init value to allow bias to dominate early, but still random for stability in differentiation.
-        nn.init.constant_(self.log_std_head.bias, self.log_std_init)
+        nn.init.constant_(self.action_noise_head.bias, self.log_std_init)
 
         self.value_head = nn.Sequential(
             nn.Linear(value_in_dim, 256),
@@ -198,19 +205,8 @@ class TFv6PPOPolicy(nn.Module):
             raise RuntimeError("Planning decoder context tokens not available.")
         return kv.mean(dim=1)
 
-    def _apply_noise_ramp(self, log_std: torch.Tensor) -> torch.Tensor:
-        log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
-        if not self.noise_ramp:
-            return log_std
-        mask = torch.ones(self.action_dim, device=log_std.device, dtype=log_std.dtype)
-        if self.action_codec.predict_route and self.action_codec.num_route_points > 0:
-            start = self.action_codec.slices.route.start
-            mask[start : start + 2] = 0.5
-        if self.action_codec.predict_waypoints and self.action_codec.num_waypoints > 0:
-            start = self.action_codec.slices.waypoints.start
-            mask[start : start + 2] = 0.5
-        std = torch.exp(log_std) * mask
-        return torch.log(std + 1e-6)
+    def predict_action_noise(self, value_features: torch.Tensor) -> torch.Tensor:
+        return self.action_noise_head(value_features)
 
     def get_value(self, obs_dict, *_args, **_kwargs) -> torch.Tensor:
         with torch.amp.autocast(
@@ -254,9 +250,10 @@ class TFv6PPOPolicy(nn.Module):
 
         action_mean = self.action_codec.encode(route, waypoints, target_speed).float()
         value_features = self._build_value_features().float()
-        log_std = self.log_std_head(value_features)
-        log_std = self._apply_noise_ramp(log_std)
-        dist = self.action_dist.proba_distribution(action_mean, log_std)
+        noise_pred = self.predict_action_noise(value_features)
+        dist, noise_diag = self.action_noise_codec.proba_distribution(
+            action_mean, noise_pred
+        )
 
         if actions is None:
             actions = dist.get_actions(sample_type)
@@ -279,9 +276,9 @@ class TFv6PPOPolicy(nn.Module):
             values,
             exp_loss,
             action_mean.detach(),
-            log_std.detach(),
+            noise_diag.noise_pred.detach(),
             dist.distribution,
             None,
-            None,
+            noise_diag.diag_log_std.detach(),
             lstm_state,
         )

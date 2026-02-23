@@ -408,6 +408,11 @@ def parse_args(config):
                       type=float,
                       default=config.log_std_head_lr_mult,
                       help='Learning-rate multiplier for the log_std prediction head.')
+    parser.add_argument('--action_noise_dist',
+                      type=str,
+                      default=getattr(config, 'action_noise_dist', 'gaussian'),
+                      choices=['gaussian', 'beta'],
+                      help='Action noise distribution family for PPO exploration.')
     parser.add_argument('--use_rpo',
                       type=lambda x: bool(strtobool(x)),
                       default=config.use_rpo,
@@ -1024,12 +1029,12 @@ def main():
     log_std_named_params = [
         (name, param)
         for name, param in trainable_named_params
-        if "log_std_head." in name
+        if "action_noise_head." in name
     ]
     base_named_params = [
         (name, param)
         for name, param in trainable_named_params
-        if "log_std_head." not in name
+        if "action_noise_head." not in name
     ]
 
     optimizer_param_groups = []
@@ -1114,7 +1119,12 @@ def main():
         (local_bs_per_env, args.num_envs_per_proc) + env.single_action_space.shape,
         device=device,
     )
-    old_sigmas = torch.zeros(
+    noise_pred_dim = agent.module.action_noise_codec.noise_pred_dim
+    old_noise_preds = torch.zeros(
+        (local_bs_per_env, args.num_envs_per_proc, noise_pred_dim),
+        device=device,
+    )
+    old_diag_log_stds = torch.zeros(
         (local_bs_per_env, args.num_envs_per_proc) + env.single_action_space.shape,
         device=device,
     )
@@ -1316,9 +1326,19 @@ def main():
             # ALGO LOGIC: action logic
             with torch.no_grad():
                 t1.tic()
-                action, logprob, _, value, _, mu, sigma, _, _, _, next_lstm_state = (
-                    agent.forward(next_obs, lstm_state=next_lstm_state, done=next_done)
-                )
+                (
+                    action,
+                    logprob,
+                    _,
+                    value,
+                    _,
+                    mu,
+                    noise_pred,
+                    _,
+                    _,
+                    diag_log_std,
+                    next_lstm_state,
+                ) = agent.forward(next_obs, lstm_state=next_lstm_state, done=next_done)
                 if config.use_hl_gauss_value_loss:
                     value_pdf = F.softmax(value, dim=1)
                     value = torch.sum(value_pdf * hl_gauss_bins.unsqueeze(0), dim=1)
@@ -1327,7 +1347,8 @@ def main():
             actions[step] = action
             logprobs[step] = logprob
             old_mus[step] = mu
-            old_sigmas[step] = sigma
+            old_noise_preds[step] = noise_pred
+            old_diag_log_stds[step] = diag_log_std
 
             # TRY NOT TO MODIFY: execute the game and log data.
             t2.tic()
@@ -1366,7 +1387,7 @@ def main():
                         mean_action=np.clip(
                             mu[env_idx].detach().cpu().numpy(), -1.0, 1.0
                         ),
-                        log_std=sigma[env_idx].detach().cpu().numpy(),
+                        log_std=diag_log_std[env_idx].detach().cpu().numpy(),
                         value_estimate=float(value[env_idx].item()),
                     )
 
@@ -1506,7 +1527,10 @@ def main():
         b_old_mus = old_mus[:num_collected_steps].reshape(
             (-1,) + env.single_action_space.shape
         )
-        b_old_sigmas = old_sigmas[:num_collected_steps].reshape(
+        b_old_noise_preds = old_noise_preds[:num_collected_steps].reshape(
+            (-1, noise_pred_dim)
+        )
+        b_old_diag_log_stds = old_diag_log_stds[:num_collected_steps].reshape(
             (-1,) + env.single_action_space.shape
         )
         b_exploration_suggests = exploration_suggests[:num_collected_steps].reshape(-1)
@@ -1522,7 +1546,8 @@ def main():
             b_returns = b_returns.to(device)
             b_values = b_values.to(device)
             b_old_mus = b_old_mus.to(device)
-            b_old_sigmas = b_old_sigmas.to(device)
+            b_old_noise_preds = b_old_noise_preds.to(device)
+            b_old_diag_log_stds = b_old_diag_log_stds.to(device)
 
         # Synchronize all processes
         torch.distributed.barrier()
@@ -1659,7 +1684,7 @@ def main():
                     _,
                     distribution,
                     pred_sem,
-                    pred_measure,
+                    _diag_log_std,
                     _,
                 ) = agent.forward(
                     b_obs_sampled,
@@ -1766,15 +1791,17 @@ def main():
                     )
 
                 old_mu_sampled = b_old_mus[mb_inds]
-                old_sigmas_sampled = b_old_sigmas[mb_inds]
+                old_noise_preds_sampled = b_old_noise_preds[mb_inds]
                 with torch.no_grad():
                     # calculate approx_kl http://joschu.net/blog/kl-approx.html
                     old_approx_kl = (-logratio).mean()
                     # approx_kl = ((ratio - 1) - logratio).mean()
 
                     # We compute approx KL according to roach
-                    old_distribution = agent.module.action_dist.proba_distribution(
-                        old_mu_sampled, old_sigmas_sampled
+                    old_distribution, _ = (
+                        agent.module.action_noise_codec.proba_distribution(
+                            old_mu_sampled, old_noise_preds_sampled, from_head=False
+                        )
                     )
                     kl_div = torch.distributions.kl_divergence(
                         old_distribution.distribution, distribution
@@ -1914,7 +1941,7 @@ def main():
                 "charts/advantages", b_advantages.mean().item(), config.global_step
             )
             # Policy uncertainty diagnostics from rollout-time log_std samples.
-            rollout_log_std = b_old_sigmas
+            rollout_log_std = b_old_diag_log_stds
             rollout_std = torch.exp(rollout_log_std)
             writer.add_scalar(
                 "policy/log_std_mean", rollout_log_std.mean().item(), config.global_step
@@ -1956,6 +1983,61 @@ def main():
                     "policy/std_target_speed",
                     rollout_std[:, speed_slice].mean().item(),
                     config.global_step,
+                )
+            noise_codec = agent.module.action_noise_codec
+            for idx, group_name in enumerate(noise_codec.group_names):
+                writer.add_scalar(
+                    f"policy/noise_pred_{group_name}",
+                    b_old_noise_preds[:, idx].mean().item(),
+                    config.global_step,
+                )
+            if noise_codec.distribution_type == "beta":
+                # Beta-specific diagnostics: grouped concentration and implied alpha/beta.
+                grouped_conc = b_old_noise_preds
+                writer.add_scalar(
+                    "policy/beta/concentration_mean",
+                    grouped_conc.mean().item(),
+                    config.global_step,
+                )
+                writer.add_scalar(
+                    "policy/beta/concentration_min",
+                    grouped_conc.min().item(),
+                    config.global_step,
+                )
+                writer.add_scalar(
+                    "policy/beta/concentration_max",
+                    grouped_conc.max().item(),
+                    config.global_step,
+                )
+                for idx, group_name in enumerate(noise_codec.group_names):
+                    writer.add_scalar(
+                        f"policy/beta/concentration_{group_name}",
+                        grouped_conc[:, idx].mean().item(),
+                        config.global_step,
+                    )
+
+                diag_conc = noise_codec.expand_group_values(grouped_conc)
+                mu_clamped = torch.clamp(b_old_mus, -1.0 + 1e-4, 1.0 - 1e-4)
+                mu01 = torch.clamp((mu_clamped + 1.0) * 0.5, 1e-4, 1.0 - 1e-4)
+                alpha = mu01 * diag_conc
+                beta = (1.0 - mu01) * diag_conc
+                writer.add_scalar(
+                    "policy/beta/alpha_mean", alpha.mean().item(), config.global_step
+                )
+                writer.add_scalar(
+                    "policy/beta/alpha_min", alpha.min().item(), config.global_step
+                )
+                writer.add_scalar(
+                    "policy/beta/alpha_max", alpha.max().item(), config.global_step
+                )
+                writer.add_scalar(
+                    "policy/beta/beta_mean", beta.mean().item(), config.global_step
+                )
+                writer.add_scalar(
+                    "policy/beta/beta_min", beta.min().item(), config.global_step
+                )
+                writer.add_scalar(
+                    "policy/beta/beta_max", beta.max().item(), config.global_step
                 )
             # Always log a reward signal, even if no episode terminates.
             writer.add_scalar(

@@ -523,8 +523,8 @@ def main():
     action_codec = policy.action_codec
     if args.log_std_init is not None:
         with torch.no_grad():
-            policy.log_std_head.bias.fill_(float(args.log_std_init))
-            policy.log_std_head.weight.zero_()
+            policy.action_noise_head.bias.fill_(float(args.log_std_init))
+            policy.action_noise_head.weight.zero_()
 
     if args.data_root or args.route_dir:
         data_root = Path(args.data_root) if args.data_root else None
@@ -563,9 +563,8 @@ def main():
             predictions.pred_target_speed_scalar,
         ).float()
         value_features = policy._build_value_features().float()
-        log_std = policy.log_std_head(value_features)
-        log_std = policy._apply_noise_ramp(log_std)
-        dist = policy.action_dist.proba_distribution(action_mean, log_std)
+        noise_pred = policy.predict_action_noise(value_features)
+        dist, _ = policy.action_noise_codec.proba_distribution(action_mean, noise_pred)
 
         sampled_routes = []
         sample_speeds = []
@@ -604,9 +603,19 @@ def main():
     obs = build_dummy_obs(obs_codec, training_config, args.batch_size, device)
 
     with torch.no_grad():
-        actions, logprob, entropy, values, _, mu, sigma, _, _, _, _ = policy.forward(
-            obs, sample_type=args.sample_type
-        )
+        (
+            actions,
+            logprob,
+            entropy,
+            values,
+            _,
+            mu,
+            noise_pred,
+            _,
+            _,
+            diag_log_std,
+            _,
+        ) = policy.forward(obs, sample_type=args.sample_type)
 
     print("[dry_run] batch_size", args.batch_size)
     print("[dry_run] obs keys", list(obs.keys()))
@@ -622,6 +631,8 @@ def main():
         print("[dry_run] waypoints shape", waypoints.shape)
     if target_speed is not None:
         print("[dry_run] target_speed shape", target_speed.shape)
+    print("[dry_run] noise_pred shape", tuple(noise_pred.shape))
+    print("[dry_run] diag_log_std shape", tuple(diag_log_std.shape))
 
     print("[dry_run] OK")
 
