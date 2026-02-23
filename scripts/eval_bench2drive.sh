@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Checkpoints
-export CHECKPOINT_DIR=outputs/checkpoints/tfv6_resnet34/
-export ROUTES=data/benchmark_routes/bench2drive220routes/23687.xml
+export CHECKPOINT_DIR=outputs/checkpoints/tfv6_resnet34_rlfinetuned  # outputs/checkpoints/tfv6_resnet34/
+export ROUTES=data/benchmark_routes/bench2drive10routesexample.xml  # data/benchmark_routes/bench2drive220routes/23687.xml
 
 # Set environment variables
 export BENCHMARK_ROUTE_ID=$(basename $ROUTES .xml) # Last part of the route file name, e.g., 0 for 0.xml

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 from collections import deque
 from copy import deepcopy
@@ -63,7 +64,13 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
 
         # Load the config saved during training
         if self.config_closed_loop.is_bench2drive:
-            path_to_conf_file = path_to_conf_file.split("+")[0]
+            parts = path_to_conf_file.split("+", maxsplit=1)
+            path_to_conf_file = parts[0]
+            if len(parts) == 2:
+                save_name = parts[1]
+                match = re.search(r"RouteScenario_(\d+)", save_name)
+                if match:
+                    os.environ["LEAD_ROUTE_OUTPUT_ID"] = f"route{match.group(1)}"
         with open(
             os.path.join(path_to_conf_file, "config.json"), encoding="utf-8"
         ) as f:

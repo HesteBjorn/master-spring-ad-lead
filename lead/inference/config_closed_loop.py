@@ -211,7 +211,7 @@ class ClosedLoopConfig(OpenLoopConfig):
     @property
     def route_id(self):
         """Get the benchmark route ID from environment."""
-        return os.environ["BENCHMARK_ROUTE_ID"]
+        return os.environ.get("LEAD_ROUTE_OUTPUT_ID", os.environ["BENCHMARK_ROUTE_ID"])
 
     @property
     def debug_video_path(self):

@@ -165,6 +165,9 @@ class VideoRecorder:
         """
         self.step = step
 
+    def _route_frame_filename(self) -> str:
+        return f"{self.config.route_id}_{str(self.step).zfill(5)}.png"
+
     @beartype
     def move_demo_cameras_with_ego(self) -> None:
         """Update demo camera transforms to follow ego vehicle position and orientation."""
@@ -249,7 +252,7 @@ class VideoRecorder:
             save_path_demo = str(self.config.save_path / "demo_images")
             os.makedirs(save_path_demo, exist_ok=True)
             PIL.Image.fromarray(cv2.cvtColor(concatenated, cv2.COLOR_BGR2RGB)).save(
-                f"{save_path_demo}/{str(self.step).zfill(5)}.png",
+                f"{save_path_demo}/{self._route_frame_filename()}",
                 optimize=False,
                 compress_level=0,  # Really space expensive, do this local only.
             )
@@ -471,7 +474,7 @@ class VideoRecorder:
         os.makedirs(save_path_input, exist_ok=True)
         input_image_rgb = cv2.cvtColor(input_image, cv2.COLOR_BGR2RGB)
         PIL.Image.fromarray(input_image_rgb).save(
-            f"{save_path_input}/{str(self.step).zfill(5)}.png",
+            f"{save_path_input}/{self._route_frame_filename()}",
             optimize=True,
             compress_level=0,
         )
@@ -517,7 +520,7 @@ class VideoRecorder:
         save_dir = self.config.save_path / "debug_images"
         os.makedirs(save_dir, exist_ok=True)
         PIL.Image.fromarray(image).save(
-            f"{save_dir}/{str(self.step).zfill(5)}.png",
+            f"{save_dir}/{self._route_frame_filename()}",
             optimize=False,
             compress_level=0,
         )
@@ -689,7 +692,7 @@ class VideoRecorder:
             save_path_grid = str(self.config.save_path / "grid_images")
             os.makedirs(save_path_grid, exist_ok=True)
             PIL.Image.fromarray(cv2.cvtColor(grid_image, cv2.COLOR_BGR2RGB)).save(
-                f"{save_path_grid}/{str(self.step).zfill(5)}.png",
+                f"{save_path_grid}/{self._route_frame_filename()}",
                 optimize=False,
                 compress_level=0,
             )
