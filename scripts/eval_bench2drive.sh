@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # Checkpoints
-export CHECKPOINT_DIR=outputs/checkpoints/tfv6_resnet34_rlfinetuned  # outputs/checkpoints/tfv6_resnet34/
+export CHECKPOINT_DIR=outputs/checkpoints/tfv6_resnet34_rlfinetuned_modelbest  # outputs/checkpoints/tfv6_resnet34/
 export ROUTES=data/benchmark_routes/bench2drive10routesexample.xml  # data/benchmark_routes/bench2drive220routes/23687.xml
 
 # Set environment variables
 export BENCHMARK_ROUTE_ID=$(basename $ROUTES .xml) # Last part of the route file name, e.g., 0 for 0.xml
-export EVALUATION_OUTPUT_DIR=outputs/local_evaluation/$BENCHMARK_ROUTE_ID/
+export EVALUATION_OUTPUT_DIR=outputs/local_evaluation/$BENCHMARK_ROUTE_ID/$(basename $CHECKPOINT_DIR)
 export PYTHONPATH=3rd_party/Bench2Drive/leaderboard:$PYTHONPATH
 export PYTHONPATH=3rd_party/Bench2Drive/scenario_runner:$PYTHONPATH
 export SCENARIO_RUNNER_ROOT=3rd_party/Bench2Drive/scenario_runner

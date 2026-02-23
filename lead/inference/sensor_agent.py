@@ -64,10 +64,10 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
 
         # Load the config saved during training
         if self.config_closed_loop.is_bench2drive:
-            parts = path_to_conf_file.split("+", maxsplit=1)
-            path_to_conf_file = parts[0]
-            if len(parts) == 2:
-                save_name = parts[1]
+            base_and_first = path_to_conf_file.split("+", maxsplit=1)
+            path_to_conf_file = base_and_first[0]
+            if "+" in self.config_path:
+                save_name = self.config_path.rsplit("+", maxsplit=1)[1]
                 match = re.search(r"RouteScenario_(\d+)", save_name)
                 if match:
                     os.environ["LEAD_ROUTE_OUTPUT_ID"] = f"route{match.group(1)}"
