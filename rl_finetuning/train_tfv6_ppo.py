@@ -131,6 +131,26 @@ def _iter_episode_stats(info: dict):
         )
 
 
+def _grad_norm_from_term(
+    term: torch.Tensor, params: list[torch.nn.Parameter]
+) -> torch.Tensor:
+    if not params:
+        return term.detach().new_tensor(0.0)
+    grads = torch.autograd.grad(
+        term,
+        params,
+        retain_graph=True,
+        create_graph=False,
+        allow_unused=True,
+    )
+    sq_norm = term.detach().new_tensor(0.0)
+    for grad in grads:
+        if grad is None:
+            continue
+        sq_norm = sq_norm + grad.detach().float().pow(2).sum()
+    return torch.sqrt(sq_norm + 1e-30)
+
+
 def save(model, optimizer, config, folder, model_file, optimizer_file):
     model_file = os.path.join(folder, model_file)
     torch.save(model.module.state_dict(), model_file)
@@ -1629,6 +1649,11 @@ def main():
             rank, device, f"update={update}_train_start", args.debug_memory
         )
         latest_epoch = 0
+        grad_probe_noise_entropy = None
+        grad_probe_noise_policy = None
+        noise_head_params = [
+            p for p in agent.module.action_noise_head.parameters() if p.requires_grad
+        ]
         for epoch in range(args.update_epochs):
             latest_epoch = epoch
             approx_kl_divs = []
@@ -1770,6 +1795,15 @@ def main():
                 )
                 if config.use_exploration_suggest:
                     loss = loss + args.expl_coef * exploration_loss
+
+                if grad_probe_noise_entropy is None and len(noise_head_params) > 0:
+                    entropy_term = -config.ent_coef * entropy_loss
+                    grad_probe_noise_entropy = _grad_norm_from_term(
+                        entropy_term, noise_head_params
+                    )
+                    grad_probe_noise_policy = _grad_norm_from_term(
+                        pg_loss, noise_head_params
+                    )
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -1940,6 +1974,38 @@ def main():
             writer.add_scalar(
                 "charts/advantages", b_advantages.mean().item(), config.global_step
             )
+            if (
+                grad_probe_noise_entropy is not None
+                and grad_probe_noise_policy is not None
+            ):
+                grad_probe_noise_entropy_log = grad_probe_noise_entropy.detach().clone()
+                grad_probe_noise_policy_log = grad_probe_noise_policy.detach().clone()
+                torch.distributed.all_reduce(
+                    grad_probe_noise_entropy_log, op=torch.distributed.ReduceOp.SUM
+                )
+                torch.distributed.all_reduce(
+                    grad_probe_noise_policy_log, op=torch.distributed.ReduceOp.SUM
+                )
+                grad_probe_noise_entropy_log = grad_probe_noise_entropy_log / world_size
+                grad_probe_noise_policy_log = grad_probe_noise_policy_log / world_size
+                writer.add_scalar(
+                    "grads/noise_head_from_entropy_norm",
+                    grad_probe_noise_entropy_log.item(),
+                    config.global_step,
+                )
+                writer.add_scalar(
+                    "grads/noise_head_from_policy_norm",
+                    grad_probe_noise_policy_log.item(),
+                    config.global_step,
+                )
+                writer.add_scalar(
+                    "grads/noise_head_entropy_to_policy_ratio",
+                    (
+                        grad_probe_noise_entropy_log
+                        / (grad_probe_noise_policy_log + 1e-12)
+                    ).item(),
+                    config.global_step,
+                )
             # Policy uncertainty diagnostics from rollout-time log_std samples.
             rollout_log_std = b_old_diag_log_stds
             rollout_std = torch.exp(rollout_log_std)
