@@ -5,6 +5,10 @@ from dataclasses import dataclass
 import numpy as np
 
 from lead.training.config_training import TrainingConfig
+from rl_finetuning.tfv6_rl.privileged_measurements import (
+    privileged_measurement_dim,
+    validate_privileged_measurement_dim,
+)
 
 
 @dataclass(frozen=True)
@@ -17,8 +21,9 @@ class ObsSpec:
 class ObsCodec:
     """Defines observation schema and pack/unpack helpers for TFv6 RL."""
 
-    def __init__(self, config: TrainingConfig) -> None:
+    def __init__(self, config: TrainingConfig, rl_config=None) -> None:
         self.config = config
+        self.rl_config = rl_config
         self.specs: list[ObsSpec] = []
 
         # RGB image (C, H, W)
@@ -58,6 +63,18 @@ class ObsCodec:
                 ObsSpec("next_command", (6,), np.float32),
             ]
         )
+
+        if rl_config is not None and bool(
+            getattr(rl_config, "use_value_measurements", False)
+        ):
+            validate_privileged_measurement_dim(rl_config)
+            self.specs.append(
+                ObsSpec(
+                    "privileged_measurements",
+                    (privileged_measurement_dim(rl_config),),
+                    np.float32,
+                )
+            )
 
         self._spec_map = {spec.key: spec for spec in self.specs}
 

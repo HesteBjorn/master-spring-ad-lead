@@ -21,6 +21,7 @@ class CARLAEnvTFv6(gym.Env):
 
     def __init__(self, port, config, render_mode="rgb_array"):
         self.num_recv = 0
+        self._counter_resynced = False
         self.port = port
         self.initialized = False
         self.rl_config = config
@@ -33,7 +34,7 @@ class CARLAEnvTFv6(gym.Env):
         self.training_config = load_training_config(tfv6_checkpoint)
         self.closed_loop_config = ClosedLoopConfig(raise_error_on_missing_key=False)
 
-        self.obs_codec = ObsCodec(self.training_config)
+        self.obs_codec = ObsCodec(self.training_config, rl_config=self.rl_config)
         use_route, use_waypoints, use_target_speed = infer_action_head_usage(
             self.training_config,
             steer_modality=self.closed_loop_config.steer_modality,
@@ -73,6 +74,25 @@ class CARLAEnvTFv6(gym.Env):
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.PAIR)
 
+    def _check_or_resync_counter(self, num_sent: int) -> None:
+        if self.num_recv == num_sent:
+            return
+        # AsyncVectorEnv creates/closes a dummy env during startup. That can advance
+        # the leaderboard-side sender counter before the real worker consumes frames.
+        # Allow a single startup resync, then keep strict checks afterward.
+        if not self._counter_resynced and num_sent >= self.num_recv:
+            self.num_recv = int(num_sent)
+            self._counter_resynced = True
+            print(
+                f"[env_gym_tfv6] Counter resync on port {self.port}: num_recv -> {self.num_recv}",
+                flush=True,
+            )
+            return
+        raise ValueError(
+            "Communication breakdown, Leaderboard sent more frames than client consumed."
+            f" num_recv: {self.num_recv}, num_sent: {num_sent}"
+        )
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         if not self.initialized:
@@ -100,11 +120,7 @@ class CARLAEnvTFv6(gym.Env):
         }
         num_sent = np.frombuffer(data[idx + 5], dtype=np.uint64).item()
 
-        if self.num_recv != num_sent:
-            raise ValueError(
-                "Communication breakdown, Leaderboard sent more frames than client consumed."
-                f" num_recv: {self.num_recv}, num_sent: {num_sent}"
-            )
+        self._check_or_resync_counter(num_sent)
 
         return observation, info
 
@@ -134,11 +150,7 @@ class CARLAEnvTFv6(gym.Env):
             }
         num_sent = np.frombuffer(data[idx + 5], dtype=np.uint64).item()
 
-        if self.num_recv != num_sent:
-            raise ValueError(
-                "Communication breakdown, Leaderboard sent more frames than client consumed."
-                f" num_recv: {self.num_recv}, num_sent: {num_sent}"
-            )
+        self._check_or_resync_counter(num_sent)
 
         return observation, reward, termination, truncation, info
 

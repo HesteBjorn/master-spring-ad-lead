@@ -39,6 +39,10 @@ from lead.inference.config_closed_loop import ClosedLoopConfig
 from rl_finetuning.tfv6_rl.action_codec import ActionCodec, infer_action_head_usage
 from rl_finetuning.tfv6_rl.obs_codec import ObsCodec
 from rl_finetuning.tfv6_rl.policy_tfv6_ppo import load_training_config
+from rl_finetuning.tfv6_rl.privileged_measurements import (
+    privileged_measurement_dim,
+    validate_privileged_measurement_dim,
+)
 from rl_finetuning.tfv6_rl_config import GlobalConfig
 
 jsonpickle_numpy.register_handlers()
@@ -228,7 +232,9 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
             use_waypoints=use_waypoints,
             use_target_speed=use_target_speed,
         )
-        self.obs_codec = ObsCodec(self.training_config)
+        self.obs_codec = ObsCodec(self.training_config, rl_config=self.rl_config)
+        if bool(getattr(self.rl_config, "use_value_measurements", False)):
+            validate_privileged_measurement_dim(self.rl_config)
         self.controller = ClosedLoopController(
             self.config_closed_loop, self.config_expert, self.training_config
         )
@@ -497,6 +503,59 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
 
         return obs
 
+    def _build_privileged_measurements(
+        self, timestamp: float, waypoint_route
+    ) -> np.ndarray:
+        if not bool(getattr(self.rl_config, "use_value_measurements", False)):
+            return np.zeros((0,), dtype=np.float32)
+
+        eval_time = float(max(getattr(self.rl_config, "eval_time", 1.0), 1e-6))
+        remaining_time = (eval_time - float(timestamp)) / eval_time
+        remaining_time = float(np.clip(remaining_time, 0.0, 1.0))
+
+        block_detector = getattr(self.reward_handler, "block_detector", None)
+        time_till_blocked = float(
+            getattr(block_detector, "time_till_blocked", 1.0)
+            if block_detector is not None
+            else 1.0
+        )
+        time_till_blocked = float(np.clip(time_till_blocked, 0.0, 1.0))
+
+        perc_route_left = float(len(waypoint_route)) / 100.0
+
+        values: list[float] = [remaining_time, time_till_blocked, perc_route_left]
+
+        if bool(getattr(self.rl_config, "use_ttc", False)):
+            ttc_ticks = float(max(getattr(self.rl_config, "ttc_penalty_ticks", 1), 1))
+            remaining_ttc = float(
+                getattr(self.reward_handler, "remaining_ttc_penalty_ticks", 0.0)
+            )
+            values.append(float(np.clip(remaining_ttc / ttc_ticks, 0.0, 1.0)))
+
+        if bool(getattr(self.rl_config, "use_comfort_infraction", False)):
+            comfort_ticks = float(
+                max(getattr(self.rl_config, "comfort_penalty_ticks", 1), 1)
+            )
+            comfort_arr = getattr(
+                self.reward_handler, "remaining_comfort_penalty_ticks", None
+            )
+            if comfort_arr is None:
+                values.extend([0.0] * 6)
+            else:
+                comfort_arr = np.asarray(comfort_arr, dtype=np.float32).reshape(-1)
+                if comfort_arr.shape[0] != 6:
+                    raise ValueError(
+                        f"Expected 6 comfort penalty ticks, got {comfort_arr.shape[0]}"
+                    )
+                values.extend(np.clip(comfort_arr / comfort_ticks, 0.0, 1.0).tolist())
+
+        expected_dim = privileged_measurement_dim(self.rl_config)
+        if len(values) != expected_dim:
+            raise ValueError(
+                f"Privileged measurement length mismatch: built={len(values)} expected={expected_dim}"
+            )
+        return np.asarray(values, dtype=np.float32)
+
     def run_step(self, input_data, timestamp, sensors=None):
         self.step += 1
         self.last_timestamp = timestamp
@@ -542,6 +601,10 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
             (),
             0.0,
         )
+        if bool(getattr(self.rl_config, "use_value_measurements", False)):
+            obs["privileged_measurements"] = self._build_privileged_measurements(
+                timestamp, waypoint_route
+            )
 
         data = {
             "observation": obs,
@@ -636,6 +699,10 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
                 (),
                 0.0,
             )
+            if bool(getattr(self.rl_config, "use_value_measurements", False)):
+                obs["privileged_measurements"] = self._build_privileged_measurements(
+                    self.last_timestamp, waypoint_route
+                )
             term = False
             trunc = True
             if termination:

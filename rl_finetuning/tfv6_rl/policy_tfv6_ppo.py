@@ -98,6 +98,8 @@ class TFv6PPOPolicy(nn.Module):
         self.log_std_min = -5.0
         self.log_std_max = 1.0
         self.action_noise_dist = "gaussian"
+        self.use_privileged_measurements = True
+        self.num_privileged_measurements = 0
         if rl_config is not None:
             self.use_correlated_noise = bool(
                 getattr(rl_config, "use_correlated_noise", self.use_correlated_noise)
@@ -121,6 +123,20 @@ class TFv6PPOPolicy(nn.Module):
             self.action_noise_dist = str(
                 getattr(rl_config, "action_noise_dist", self.action_noise_dist)
             )
+            self.use_privileged_measurements = bool(
+                getattr(
+                    rl_config,
+                    "use_value_measurements",
+                    self.use_privileged_measurements,
+                )
+            )
+            self.num_privileged_measurements = int(
+                getattr(
+                    rl_config,
+                    "num_value_measurements",
+                    self.num_privileged_measurements,
+                )
+            )
             self.train_planning_decoder_only = bool(
                 getattr(
                     rl_config,
@@ -140,7 +156,11 @@ class TFv6PPOPolicy(nn.Module):
             log_std_max=self.log_std_max,
         )
         self.action_dist = self.action_noise_codec.action_dist
-        value_in_dim = self.training_config.transfuser_token_dim
+        self.privileged_obs_key = "privileged_measurements"
+        self.value_token_dim = self.training_config.transfuser_token_dim
+        value_in_dim = self.value_token_dim + (
+            self.num_privileged_measurements if self.use_privileged_measurements else 0
+        )
         # Predict grouped noise parameters with a small MLP head.
         # Hidden size matches the TFv6 planning token width for a minimal increase in capacity.
         self.action_noise_head = nn.Sequential(
@@ -211,6 +231,47 @@ class TFv6PPOPolicy(nn.Module):
             raise RuntimeError("Planning decoder context tokens not available.")
         return kv.mean(dim=1)
 
+    def _extract_tfv6_obs(self, obs_dict: dict) -> dict:
+        if self.privileged_obs_key not in obs_dict:
+            return obs_dict
+        return {k: v for k, v in obs_dict.items() if k != self.privileged_obs_key}
+
+    def _get_privileged_measurements(
+        self, obs_dict: dict, batch_size: int, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        if (
+            not self.use_privileged_measurements
+            or self.num_privileged_measurements <= 0
+        ):
+            return torch.zeros((batch_size, 0), device=device, dtype=dtype)
+        pm = obs_dict.get(self.privileged_obs_key, None)
+        if pm is None:
+            return torch.zeros(
+                (batch_size, self.num_privileged_measurements),
+                device=device,
+                dtype=dtype,
+            )
+        pm = pm.to(device=device, dtype=dtype)
+        if pm.ndim == 1:
+            pm = pm.unsqueeze(0)
+        if pm.shape[1] != self.num_privileged_measurements:
+            raise ValueError(
+                f"Expected {self.num_privileged_measurements} privileged measurements, got {pm.shape[1]}"
+            )
+        return pm
+
+    def _build_value_and_noise_features(self, obs_dict: dict) -> torch.Tensor:
+        value_features = self._build_value_features().float()
+        privileged = self._get_privileged_measurements(
+            obs_dict,
+            batch_size=value_features.shape[0],
+            device=value_features.device,
+            dtype=value_features.dtype,
+        )
+        if privileged.shape[1] == 0:
+            return value_features
+        return torch.cat((value_features, privileged), dim=1)
+
     def predict_action_noise(self, value_features: torch.Tensor) -> torch.Tensor:
         return self.action_noise_head(value_features)
 
@@ -220,8 +281,11 @@ class TFv6PPOPolicy(nn.Module):
             dtype=self.autocast_dtype,
             enabled=self.autocast_enabled,
         ):
-            _ = self.tfv6(obs_dict, skip_perception_heads=self.skip_perception_heads)
-        value_features = self._build_value_features().float()
+            _ = self.tfv6(
+                self._extract_tfv6_obs(obs_dict),
+                skip_perception_heads=self.skip_perception_heads,
+            )
+        value_features = self._build_value_and_noise_features(obs_dict)
         return self.value_head(value_features)
 
     def forward(
@@ -239,7 +303,8 @@ class TFv6PPOPolicy(nn.Module):
             enabled=self.autocast_enabled,
         ):
             predictions = self.tfv6(
-                obs_dict, skip_perception_heads=self.skip_perception_heads
+                self._extract_tfv6_obs(obs_dict),
+                skip_perception_heads=self.skip_perception_heads,
             )
 
         route = predictions.pred_route if self.action_codec.predict_route else None
@@ -255,7 +320,7 @@ class TFv6PPOPolicy(nn.Module):
         )
 
         action_mean = self.action_codec.encode(route, waypoints, target_speed).float()
-        value_features = self._build_value_features().float()
+        value_features = self._build_value_and_noise_features(obs_dict)
         noise_pred = self.predict_action_noise(value_features)
         dist, noise_diag = self.action_noise_codec.proba_distribution(
             action_mean, noise_pred
