@@ -433,6 +433,16 @@ def parse_args(config):
                       default=getattr(config, 'action_noise_dist', 'gaussian'),
                       choices=['gaussian', 'beta'],
                       help='Action noise distribution family for PPO exploration.')
+    parser.add_argument('--use_kl_to_reference',
+                      type=lambda x: bool(strtobool(x)),
+                      default=getattr(config, 'use_kl_to_reference', True),
+                      nargs='?',
+                      const=True,
+                      help='Apply KL regularization to a frozen TFv6 reference policy (base checkpoint outputs).')
+    parser.add_argument('--kl_to_reference_coef',
+                      type=float,
+                      default=getattr(config, 'kl_to_reference_coef', 1e-4),
+                      help='Coefficient for the KL-to-reference regularization term.')
     parser.add_argument('--use_rpo',
                       type=lambda x: bool(strtobool(x)),
                       default=config.use_rpo,
@@ -1139,6 +1149,10 @@ def main():
         (local_bs_per_env, args.num_envs_per_proc) + env.single_action_space.shape,
         device=device,
     )
+    old_ref_mus = torch.zeros(
+        (local_bs_per_env, args.num_envs_per_proc) + env.single_action_space.shape,
+        device=device,
+    )
     noise_pred_dim = agent.module.action_noise_codec.noise_pred_dim
     old_noise_preds = torch.zeros(
         (local_bs_per_env, args.num_envs_per_proc, noise_pred_dim),
@@ -1362,11 +1376,16 @@ def main():
                 if config.use_hl_gauss_value_loss:
                     value_pdf = F.softmax(value, dim=1)
                     value = torch.sum(value_pdf * hl_gauss_bins.unsqueeze(0), dim=1)
+                if getattr(config, "use_kl_to_reference", False):
+                    ref_mu = agent.module.get_reference_action_mean(next_obs)
+                else:
+                    ref_mu = mu
                 inference_times.append(t1.tocvalue())
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
             old_mus[step] = mu
+            old_ref_mus[step] = ref_mu
             old_noise_preds[step] = noise_pred
             old_diag_log_stds[step] = diag_log_std
 
@@ -1547,6 +1566,9 @@ def main():
         b_old_mus = old_mus[:num_collected_steps].reshape(
             (-1,) + env.single_action_space.shape
         )
+        b_old_ref_mus = old_ref_mus[:num_collected_steps].reshape(
+            (-1,) + env.single_action_space.shape
+        )
         b_old_noise_preds = old_noise_preds[:num_collected_steps].reshape(
             (-1, noise_pred_dim)
         )
@@ -1566,6 +1588,7 @@ def main():
             b_returns = b_returns.to(device)
             b_values = b_values.to(device)
             b_old_mus = b_old_mus.to(device)
+            b_old_ref_mus = b_old_ref_mus.to(device)
             b_old_noise_preds = b_old_noise_preds.to(device)
             b_old_diag_log_stds = b_old_diag_log_stds.to(device)
 
@@ -1651,6 +1674,7 @@ def main():
         latest_epoch = 0
         grad_probe_noise_entropy = None
         grad_probe_noise_policy = None
+        kl_to_reference_values = []
         noise_head_params = [
             p for p in agent.module.action_noise_head.parameters() if p.requires_grad
         ]
@@ -1706,7 +1730,7 @@ def main():
                     newvalue,
                     exploration_loss,
                     _,
-                    _,
+                    new_noise_pred,
                     distribution,
                     pred_sem,
                     _diag_log_std,
@@ -1790,9 +1814,30 @@ def main():
                         v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
+                kl_to_reference_loss = torch.zeros((), device=device)
+                if getattr(config, "use_kl_to_reference", False):
+                    ref_mu_sampled = b_old_ref_mus[mb_inds]
+                    # Keep the same dispersion and only anchor the action mean to the
+                    # frozen TFv6 reference policy.
+                    ref_distribution, _ = (
+                        agent.module.action_noise_codec.proba_distribution(
+                            ref_mu_sampled,
+                            new_noise_pred.detach(),
+                            from_head=False,
+                        )
+                    )
+                    kl_to_ref = torch.distributions.kl_divergence(
+                        distribution, ref_distribution.distribution
+                    )
+                    if kl_to_ref.ndim > 1:
+                        kl_to_ref = kl_to_ref.sum(dim=1)
+                    kl_to_reference_loss = kl_to_ref.mean()
+                    kl_to_reference_values.append(kl_to_reference_loss.detach())
                 loss = (
                     pg_loss - config.ent_coef * entropy_loss + v_loss * config.vf_coef
                 )
+                if getattr(config, "use_kl_to_reference", False):
+                    loss = loss + config.kl_to_reference_coef * kl_to_reference_loss
                 if config.use_exploration_suggest:
                     loss = loss + args.expl_coef * exploration_loss
 
@@ -1889,6 +1934,15 @@ def main():
         torch.distributed.all_reduce(approx_kl, op=torch.distributed.ReduceOp.SUM)
         approx_kl = approx_kl / world_size
 
+        if len(kl_to_reference_values) > 0:
+            kl_to_reference_log = torch.mean(torch.stack(kl_to_reference_values))
+        else:
+            kl_to_reference_log = torch.zeros((), device=device)
+        torch.distributed.all_reduce(
+            kl_to_reference_log, op=torch.distributed.ReduceOp.SUM
+        )
+        kl_to_reference_log = kl_to_reference_log / world_size
+
         b_values = b_values[b_inds_original]
         torch.distributed.all_reduce(b_values, op=torch.distributed.ReduceOp.SUM)
         b_values = b_values / world_size
@@ -1955,6 +2009,17 @@ def main():
             writer.add_scalar("losses/value_loss", v_loss.item(), config.global_step)
             writer.add_scalar("losses/policy_loss", pg_loss.item(), config.global_step)
             writer.add_scalar("losses/entropy", entropy_loss.item(), config.global_step)
+            if getattr(config, "use_kl_to_reference", False):
+                writer.add_scalar(
+                    "losses/kl_to_reference",
+                    kl_to_reference_log.item(),
+                    config.global_step,
+                )
+                writer.add_scalar(
+                    "losses/kl_to_reference_contrib",
+                    (config.kl_to_reference_coef * kl_to_reference_log).item(),
+                    config.global_step,
+                )
             if config.use_exploration_suggest:
                 writer.add_scalar(
                     "losses/exploration", exploration_loss.item(), config.global_step

@@ -100,6 +100,8 @@ class TFv6PPOPolicy(nn.Module):
         self.action_noise_dist = "gaussian"
         self.use_privileged_measurements = True
         self.num_privileged_measurements = 0
+        self.use_kl_to_reference = True
+        self.kl_to_reference_coef = 1e-4
         if rl_config is not None:
             self.use_correlated_noise = bool(
                 getattr(rl_config, "use_correlated_noise", self.use_correlated_noise)
@@ -137,6 +139,12 @@ class TFv6PPOPolicy(nn.Module):
                     self.num_privileged_measurements,
                 )
             )
+            self.use_kl_to_reference = bool(
+                getattr(rl_config, "use_kl_to_reference", self.use_kl_to_reference)
+            )
+            self.kl_to_reference_coef = float(
+                getattr(rl_config, "kl_to_reference_coef", self.kl_to_reference_coef)
+            )
             self.train_planning_decoder_only = bool(
                 getattr(
                     rl_config,
@@ -146,6 +154,17 @@ class TFv6PPOPolicy(nn.Module):
             )
 
         self._configure_trainable_tfv6_modules()
+        self.reference_tfv6 = None
+        if self.use_kl_to_reference:
+            self.reference_tfv6 = TFv6(self.device, self.training_config)
+            ref_state_dict = torch.load(
+                weights_path, map_location=self.device, weights_only=True
+            )
+            self.reference_tfv6.load_state_dict(ref_state_dict, strict=True)
+            self.reference_tfv6.to(self.device)
+            self.reference_tfv6.eval()
+            for param in self.reference_tfv6.parameters():
+                param.requires_grad_(False)
         self.action_noise_codec = ActionNoiseCodec(
             self.action_codec,
             distribution_type=self.action_noise_dist,
@@ -274,6 +293,36 @@ class TFv6PPOPolicy(nn.Module):
 
     def predict_action_noise(self, value_features: torch.Tensor) -> torch.Tensor:
         return self.action_noise_head(value_features)
+
+    @torch.no_grad()
+    def get_reference_action_mean(self, obs_dict) -> torch.Tensor:
+        if self.reference_tfv6 is None:
+            raise RuntimeError("Reference TFv6 is not enabled.")
+        with torch.amp.autocast(
+            device_type=self.device.type,
+            dtype=self.autocast_dtype,
+            enabled=self.autocast_enabled,
+        ):
+            ref_predictions = self.reference_tfv6(
+                self._extract_tfv6_obs(obs_dict),
+                skip_perception_heads=self.skip_perception_heads,
+            )
+        ref_route = (
+            ref_predictions.pred_route if self.action_codec.predict_route else None
+        )
+        ref_waypoints = (
+            ref_predictions.pred_future_waypoints
+            if self.action_codec.predict_waypoints
+            else None
+        )
+        ref_target_speed = (
+            ref_predictions.pred_target_speed_scalar
+            if self.action_codec.predict_target_speed
+            else None
+        )
+        return self.action_codec.encode(
+            ref_route, ref_waypoints, ref_target_speed
+        ).float()
 
     def get_value(self, obs_dict, *_args, **_kwargs) -> torch.Tensor:
         with torch.amp.autocast(

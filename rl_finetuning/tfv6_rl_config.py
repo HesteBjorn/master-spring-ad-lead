@@ -23,6 +23,9 @@ class GlobalConfig(CaRLGlobalConfig):
         self.skip_perception_heads = True
         self.train_planning_decoder_only = True
         self.action_noise_dist = "gaussian"
+        # Keep a lightweight trust region to the original TFv6 behavior during RL finetuning.
+        self.use_kl_to_reference = True
+        self.kl_to_reference_coef = 1e-4
         # TFv6 PPO policy noise defaults (state-dependent log_std head).
         self.log_std_init = -4.0
         self.log_std_min = -5.0
