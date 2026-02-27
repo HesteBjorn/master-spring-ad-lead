@@ -360,8 +360,8 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         pos = np.array([pos.x, pos.y])
         return self.route_planner.run_step(pos)
 
-    def set_target_points(self, input_data: dict) -> None:
-        planner = self.gps_waypoint_planners_dict[self.training_config.tp_pop_distance]
+    def set_target_points(self, input_data: dict, pop_distance: float) -> None:
+        planner = self.gps_waypoint_planners_dict[pop_distance]
 
         next_target_points = [tp[0].tolist() for tp in planner.route]
         next_commands = [int(planner.route[i][1]) for i in range(len(planner.route))]
@@ -380,17 +380,12 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         next_target_points = filtered_tp_list
         next_commands = filtered_command_list
 
-        if self.training_config.use_noisy_tp:
+        def transform(point):
             ego_position = (
                 self.filtered_state[:2]
-                if self.training_config.use_kalman_filter_for_gps
+                if self.config_closed_loop.use_kalman_filter
                 else input_data["noisy_state"][:2]
             )
-        else:
-            ego_pos = self.vehicle.get_transform().location
-            ego_position = np.array([ego_pos.x, ego_pos.y])
-
-        def transform(point):
             return common_utils.inverse_conversion_2d(
                 np.array(point), np.array(ego_position), self.compass
             )
@@ -400,17 +395,15 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
             input_data["target_point"] = transform(next_target_points[1][:2])
             input_data["target_point_previous"] = transform(next_target_points[0][:2])
         else:
+            assert len(next_target_points) == 2
             input_data["target_point_next"] = transform(next_target_points[1][:2])
             input_data["target_point"] = transform(next_target_points[1][:2])
             input_data["target_point_previous"] = transform(next_target_points[0][:2])
 
-        if self.training_config.use_discrete_command:
-            input_data["command"] = carla_dataset_utils.command_to_one_hot(
-                next_commands[0]
-            )
-            input_data["next_command"] = carla_dataset_utils.command_to_one_hot(
-                next_commands[1]
-            )
+        input_data["command"] = carla_dataset_utils.command_to_one_hot(next_commands[0])
+        input_data["next_command"] = carla_dataset_utils.command_to_one_hot(
+            next_commands[1]
+        )
 
     def preprocess_observation(self, input_data: dict) -> dict:
         # BaseAgent.tick mutates the dict in place; keep the caller-owned raw sensor dict untouched.
@@ -455,7 +448,34 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
                     rgb_slices.append(input_data["rgb"][:, :, s:e])
             input_data["rgb"] = np.concatenate(rgb_slices, axis=2)
 
-        self.set_target_points(input_data)
+        self.set_target_points(
+            input_data, pop_distance=self.config_closed_loop.route_planner_min_distance
+        )
+        if self.config_closed_loop.sensor_agent_pop_distance_adaptive:
+            dense_points = (
+                np.linalg.norm(
+                    input_data["target_point"] - input_data["target_point_next"]
+                )
+                < 10.0
+                and min(
+                    np.linalg.norm(input_data["target_point_previous"]),
+                    np.linalg.norm(input_data["target_point"]),
+                )
+                < 10.0
+            )
+            dense_points = dense_points or (
+                np.linalg.norm(
+                    input_data["target_point_previous"] - input_data["target_point"]
+                )
+                < 10.0
+                and min(
+                    np.linalg.norm(input_data["target_point_previous"]),
+                    np.linalg.norm(input_data["target_point"]),
+                )
+                < 10.0
+            )
+            if dense_points:
+                self.set_target_points(input_data, pop_distance=4.0)
 
         if (
             self.config_closed_loop.sensor_agent_skip_distant_target_point
