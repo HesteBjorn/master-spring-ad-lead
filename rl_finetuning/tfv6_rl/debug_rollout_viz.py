@@ -906,6 +906,8 @@ class PPORolloutVisualizer:
         )
 
         rgb = np.transpose(obs["rgb"], (1, 2, 0)).astype(np.uint8)
+        # obs["rgb"] is stored in RGB order; OpenCV rendering/writes expect BGR.
+        rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         bev, target_debug = self._build_bev(
             lidar=obs["rasterized_lidar"],
             target_point=obs["target_point"],
