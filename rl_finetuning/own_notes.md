@@ -1,4 +1,12 @@
 # Evaluation
+
+## Extract policy checkpoint to eval-compatible TFv6 checkpoint
+```bash
+python3 scripts/extract_trained_tfv6_model_from_policy.py \
+  outputs/rl_logs/TFV6_PPO_PARALLEL_LOCAL_MULTIENV_SINGLEGPU_33_NEWSTDHEAD/model_best.pth \
+  --output-dir outputs/checkpoints/tfv6_resnet34_rlfinetuned_modelbest
+```
+
 ## Bench2Drive Idun
 From repo root in idun run: `bash slurm/experiments/001_example/020_b2d_0.sh` to create many slurm jobs for B2D.
 
@@ -8,6 +16,9 @@ From repo root in idun run: `bash slurm/experiments/001_example/020_b2d_0.sh` to
 ```bash
 # Login to idun and port forward
 ssh -L 5000:localhost:5000 erikhbj@idun.hpc.ntnu.no
+module purge
+module load Anaconda3/2024.02-1
+conda activate lead
 ```
 ```bash
 # On idun
@@ -35,37 +46,24 @@ bash scripts/eval_bench2drive.sh
 ```
 
 # Training
+## Generate scenarios:
+```bash
+#Use the CaRL generator:
+cd 3rd_party/CaRL/CARLA/tools && \
+  python -u generate_long_routes_with_scenarios.py \
+    --save_folder /home/erikhbj/Documents/master/master-spring-ad-lead/3rd_party/CaRL/CARLA/custom_leaderboard/leaderboard/data/rl_finetuning_1000_meters_alltypes_dense80 \
+    --carla_root /home/erikhbj/Documents/master/master-spring-ad-lead/3rd_party/CARLA_0915 \
+    --scenario_runner_root /home/erikhbj/Documents/master/master-spring-ad-lead/3rd_party/CaRL/CARLA/custom_leaderboard/scenario_runner \
+    --start_repetition 0 \
+    --scenario_dilation 80 \
+    --generate_scenarios 1 \
+    --only_leaderboard_1 0 \
+    --route_length 1000
+```
 
 ## Visualize losses and rewards
 ```bash
 tensorboard --logdir outputs/rl_logs
-```
-
-## Long local run without watchdog (not reccommended)
-```bash
-# Assumes carla server running
-bash rl_finetuning/train_long_local.sh \
-  outputs/checkpoints/tfv6_resnet34 \
-  outputs/rl_logs \
-  TFV6_PPO_LONG_LOCAL \
-  # outputs/rl_logs/TFV6_PPO_LONG_LOCAL/model_latest_000000123.pth  # Optional resume argument, pointing to model .pth
-```
-
-## Weekend run with auto-carla restarts
-```bash
-RUN_CONFIG_FILE=rl_finetuning/configs/weekend_local_run_stable.env \
-bash rl_finetuning/run_tfv6_watchdog_overnight.sh \
-  outputs/checkpoints/tfv6_resnet34 \
-  outputs/rl_logs \
-  TFV6_PPO_WEEKEND_20260214_correlationrho095_logstd45 \
-  --debug-viz --debug-viz-every-n 1 --debug-viz-max-images 100  # Optional debug visualization
-```
-
-## Kill watchdog
-```bash
-pkill -f "rl_finetuning/run_tfv6_watchdog_overnight.sh|rl_finetuning/train_long_local.sh|rl_finetuning/train_tfv6_ppo.py|torchrun.*train_tfv6_ppo.py|custom_leaderboard/leaderboard/leaderboard/leaderboard_evaluator.py|CarlaUE4|CarlaUE4-Linux-Shipping|nvidia-smi  --query"
-sleep 2
-ps -ef | rg "run_tfv6_watchdog_overnight|train_long_local|train_tfv6_ppo|torchrun|leaderboard_evaluator|CarlaUE4|nvidia-smi --query" -i
 ```
 
 ## Parallell training
@@ -84,6 +82,15 @@ bash rl_finetuning/train_tfv6_ppo_parallell.sh \
 ```bash
 sbatch --export=ALL,RUN_CONFIG_FILE=rl_finetuning/configs/train_parallel_idun.env rl_finetuning/train_tfv6_ppo_parallell_slurm.slurm
 ```
+```bash
+# Idun check queue status
+scontrol show job -dd 24060485 | egrep "JobId=|Partition=|QOS=|A
+ccount=|UserId=|Priority=|Reason=|StartTime=|EligibleTime=|ReqTRES=|NumNodes=|NumCPUs=|Mi
+nMemory="
+
+# Check status for all in queue
+squeue -u erikhbj -h -t PD -o "%i" | xargs -r -n1 -I{} sh -c 'echo "===== JOB {} =====";scontrol show job -dd {} | egrep "JobId=|Partition=|QOS=|Account=|UserId=|Priority=|Reason=|StartTime=|EligibleTime=|ReqTRES=| NumNodes=|NumCPUs=|MinMemory="'
+```
 
 ### Kill all running processes
 ```bash
@@ -97,7 +104,6 @@ pkill -f "CarlaUE4-Linux-Shipping" || true
 pkill -f "CarlaUE4.sh" || true
 ps -ef | rg "CarlaUE4|leaderboard_evaluator|train_parallel_tfv6_ppo|train_tfv6_ppo.py|torchrun|tensorboard" || true
 ```
-
 
 # Analysis
 
@@ -126,6 +132,24 @@ Connect to eduroam network (or VPN)
 ssh erikhbj@100.92.150.98
 ```
 Or go to vscode: `Ctrl+Shift+P> Remote-SSH: Connect to Host...`
+
+## Git push logs from idun excluding .pth files
+```bash
+# From root, specify rundir
+RUN_DIR=outputs/rl_logs/TFV6_PPO_PARALLEL_SLURM_24056917
+git add -f "$RUN_DIR" \
+  ":(exclude)$RUN_DIR/model*.pth" \
+  ":(exclude)$RUN_DIR/optimizer*.pth"
+
+
+# Or: From rundir:
+git add -f . \
+  ':(exclude)model*.pth' \
+  ':(exclude)optimizer*.pth'
+
+# Confirm no model.pth are staged:
+git status --short
+```
 
 ## Tmux: Keep terminal alive across SSH
 ```bash
