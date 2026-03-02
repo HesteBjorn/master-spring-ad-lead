@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from lead.common.constants import LIDAR_COLOR
+from lead.common.constants import LIDAR_COLOR, TP_DEFAULT_COLOR
 from lead.common.pid_controller import (
     LateralPIDController,
     PIDController,
@@ -208,10 +208,12 @@ class PPORolloutVisualizer:
         self.ppm = self.training_config.pixels_per_meter * self.image_scale
         self.bev_h = self.size_width * self.image_scale
         self.bev_w = self.size_height * self.image_scale
-        # Keep exactly the same frame convention as rasterize_lidar:
-        # image row maps to y-bin, image column maps to x-bin.
-        self.origin_x = int(-self.training_config.min_x_meter * self.ppm)
-        self.origin_y = int(-self.training_config.min_y_meter * self.ppm)
+        # Match Visualizer origin convention exactly.
+        x_extent_m = self.training_config.max_x_meter - self.training_config.min_x_meter
+        self.origin_x = int(
+            self.bev_w // (x_extent_m / max((-self.training_config.min_x_meter), 1.0))
+        )
+        self.origin_y = self.bev_h // 2
 
     def _world_to_bev(self, x: float, y: float) -> tuple[int, int]:
         px = int(round(self.origin_x + x * self.ppm))
@@ -283,9 +285,39 @@ class PPORolloutVisualizer:
         )
         return False, (cx, cy)
 
+    def _draw_numbered_target_marker(
+        self,
+        bev_img: np.ndarray,
+        center_xy: tuple[int, int],
+        color: tuple[int, int, int],
+        radius: int,
+        number: int,
+    ) -> None:
+        """Draw a filled target circle with a centered numeric label."""
+        x, y = int(center_xy[0]), int(center_xy[1])
+        cv2.circle(bev_img, (x, y), radius, color, thickness=-1)
+        text = str(number)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.58 if number < 10 else 0.5
+        thickness = 2
+        (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        tx = x - tw // 2
+        ty = y + th // 2
+        cv2.putText(
+            bev_img,
+            text,
+            (tx, ty),
+            font,
+            font_scale,
+            (255, 255, 255),
+            thickness,
+            lineType=cv2.LINE_AA,
+        )
+
     def _build_bev(
         self,
         lidar: np.ndarray,
+        target_point_previous: np.ndarray,
         target_point: np.ndarray,
         target_point_next: np.ndarray,
         route_sample: np.ndarray | None,
@@ -337,12 +369,39 @@ class PPORolloutVisualizer:
             lineType=cv2.LINE_AA,
         )
 
+        tp_prev_in_view, tp_prev_drawn = self._draw_target_marker(
+            bev_img,
+            target_point_previous,
+            color=TP_DEFAULT_COLOR,
+            radius=9,
+            label="TP-1",
+        )
         tp_in_view, tp_drawn = self._draw_target_marker(
-            bev_img, target_point, color=(10, 10, 220), radius=7, label="TP"
+            bev_img,
+            target_point,
+            color=TP_DEFAULT_COLOR,
+            radius=11,
+            label="TP",
         )
         tpn_in_view, tpn_drawn = self._draw_target_marker(
-            bev_img, target_point_next, color=(30, 170, 240), radius=6, label="TP+1"
+            bev_img,
+            target_point_next,
+            color=TP_DEFAULT_COLOR,
+            radius=9,
+            label="TP+1",
         )
+        if tp_prev_in_view:
+            self._draw_numbered_target_marker(
+                bev_img, tp_prev_drawn, TP_DEFAULT_COLOR, 14, 0
+            )
+        if tp_in_view:
+            self._draw_numbered_target_marker(
+                bev_img, tp_drawn, TP_DEFAULT_COLOR, 18, 1
+            )
+        if tpn_in_view:
+            self._draw_numbered_target_marker(
+                bev_img, tpn_drawn, TP_DEFAULT_COLOR, 14, 2
+            )
 
         if self.steer_modality == "route":
             self._draw_polyline(
@@ -370,8 +429,10 @@ class PPORolloutVisualizer:
         self._overlay_legend_on_bev(bev_img)
 
         return bev_img, {
+            "tp_prev_in_view": tp_prev_in_view,
             "tp_in_view": tp_in_view,
             "tp_next_in_view": tpn_in_view,
+            "tp_prev_drawn_px": tp_prev_drawn,
             "tp_drawn_px": tp_drawn,
             "tp_next_drawn_px": tpn_drawn,
         }
@@ -910,6 +971,7 @@ class PPORolloutVisualizer:
         rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         bev, target_debug = self._build_bev(
             lidar=obs["rasterized_lidar"],
+            target_point_previous=obs["target_point_previous"],
             target_point=obs["target_point"],
             target_point_next=obs["target_point_next"],
             route_sample=route_sample,
@@ -979,6 +1041,17 @@ class PPORolloutVisualizer:
             ),
             "forward_discounted_return=pending",
             f"std[min/mean/max]={std.min():.4f}/{std.mean():.4f}/{std.max():.4f}",
+            (
+                "tp_dists "
+                f"prev-cur={float(np.linalg.norm(obs['target_point_previous'] - obs['target_point'])):.2f}m "
+                f"cur-next={float(np.linalg.norm(obs['target_point'] - obs['target_point_next'])):.2f}m "
+                f"prev-next={float(np.linalg.norm(obs['target_point_previous'] - obs['target_point_next'])):.2f}m"
+            ),
+            (
+                "target_point_previous "
+                f"xy=({float(obs['target_point_previous'][0]):+.2f},{float(obs['target_point_previous'][1]):+.2f}) "
+                f"in_view={int(target_debug['tp_prev_in_view'])}"
+            ),
             (
                 "target_point "
                 f"xy=({float(obs['target_point'][0]):+.2f},{float(obs['target_point'][1]):+.2f}) "
