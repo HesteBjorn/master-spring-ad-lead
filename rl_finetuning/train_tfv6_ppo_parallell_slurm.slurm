@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=256G
-#SBATCH --time=1-00:00:00
+#SBATCH --time=0-00:15:00
 #SBATCH --constraint=gpu80g
 #SBATCH --output=outputs/rl_logs/slurm_%j.out
 #SBATCH --error=outputs/rl_logs/slurm_%j.err
@@ -59,6 +59,8 @@ if [[ "${NUM_ENVS_PER_GPU:-}" == "" ]]; then
     NUM_ENVS_PER_GPU=1
   fi
 fi
+# TEMPORARY OVERRIDE TO TEST:
+NUM_ENVS_PER_GPU=2
 
 NUM_ENVS_PER_NODE="${NUM_ENVS_PER_NODE:-$((GPU_COUNT * NUM_ENVS_PER_GPU))}"
 
@@ -80,4 +82,4 @@ bash rl_finetuning/train_tfv6_ppo_parallell.sh \
   "${CHECKPOINT_DIR}" \
   "${LOGDIR}" \
   "${EXP_NAME}" \
-  --debug 0
+  --debug 1
