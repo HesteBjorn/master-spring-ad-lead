@@ -109,7 +109,7 @@ ps -ef | rg "CarlaUE4|leaderboard_evaluator|train_parallel_tfv6_ppo|train_tfv6_p
 
 ## Debug viz folder to mp4
 ```bash
-rl_finetuning/m4p_convert_folder.sh outputs/rl_logs/TFV6_PPO_WEEKEND_20260213/run_20260213_144404/debug_viz
+python3 rl_finetuning/mp4_convert_folder.py outputs/rl_logs/TFV6_PPO_PARALLEL_LOCAL_NEWROUTES1213_newTP_entropy0/latest/debug_viz
 ```
 
 ## Analyse action distribution shift from TFv6 to Fine tuned model:
