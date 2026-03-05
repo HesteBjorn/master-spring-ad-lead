@@ -434,6 +434,12 @@ def parse_args(config):
                       nargs='?',
                       const=True,
                       help='If true, freeze action_noise_head parameters and keep constant-noise behavior.')
+    parser.add_argument('--critic_updates_shared_features',
+                      type=lambda x: bool(strtobool(x)),
+                      default=getattr(config, 'critic_updates_shared_features', True),
+                      nargs='?',
+                      const=True,
+                      help='If false, detach critic input features so value loss does not update shared TFv6 features.')
     parser.add_argument('--action_noise_dist',
                       type=str,
                       default=getattr(config, 'action_noise_dist', 'gaussian'),

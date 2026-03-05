@@ -103,6 +103,7 @@ class TFv6PPOPolicy(nn.Module):
         self.heading_amplitude2_std_init = 0.03
         self.path_std_base_frac = 0.15
         self.disable_learned_noise_head = True
+        self.critic_updates_shared_features = True
         self.use_privileged_measurements = True
         self.num_privileged_measurements = 0
         self.use_kl_to_reference = True
@@ -159,6 +160,13 @@ class TFv6PPOPolicy(nn.Module):
                     rl_config,
                     "disable_learned_noise_head",
                     self.disable_learned_noise_head,
+                )
+            )
+            self.critic_updates_shared_features = bool(
+                getattr(
+                    rl_config,
+                    "critic_updates_shared_features",
+                    self.critic_updates_shared_features,
                 )
             )
             self.use_privileged_measurements = bool(
@@ -341,6 +349,11 @@ class TFv6PPOPolicy(nn.Module):
             return value_features
         return torch.cat((value_features, privileged), dim=1)
 
+    def _critic_input_features(self, value_features: torch.Tensor) -> torch.Tensor:
+        if self.critic_updates_shared_features:
+            return value_features
+        return value_features.detach()
+
     def predict_action_noise(self, value_features: torch.Tensor) -> torch.Tensor:
         return self.action_noise_head(value_features)
 
@@ -385,7 +398,7 @@ class TFv6PPOPolicy(nn.Module):
                 skip_perception_heads=self.skip_perception_heads,
             )
         value_features = self._build_value_and_noise_features(obs_dict)
-        return self.value_head(value_features)
+        return self.value_head(self._critic_input_features(value_features))
 
     def forward(
         self,
@@ -438,7 +451,7 @@ class TFv6PPOPolicy(nn.Module):
         if entropy.ndim > 1:
             entropy = entropy.sum(1)
 
-        values = self.value_head(value_features)
+        values = self.value_head(self._critic_input_features(value_features))
 
         exp_loss = None
         if exploration_suggests is not None:
