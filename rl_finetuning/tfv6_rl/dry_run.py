@@ -4,6 +4,7 @@ import argparse
 import lzma
 import pickle
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import laspy
@@ -504,6 +505,31 @@ def main():
         default=0.8,
         help="Correlation coefficient for correlated noise (default: 0.8).",
     )
+    parser.add_argument(
+        "--route_sampling_technique",
+        type=str,
+        default="spline_curvature_perturbation",
+        choices=["spline_curvature_perturbation", "legacy_noise_sampling"],
+        help="Route stochastic sampling technique.",
+    )
+    parser.add_argument(
+        "--heading_amplitude1_std_init",
+        type=float,
+        default=0.07,
+        help="Initial std for first heading perturbation amplitude.",
+    )
+    parser.add_argument(
+        "--heading_amplitude2_std_init",
+        type=float,
+        default=0.03,
+        help="Initial std for second heading perturbation amplitude.",
+    )
+    parser.add_argument(
+        "--path_std_base_frac",
+        type=float,
+        default=0.15,
+        help="Base perturbation strength on the first points.",
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -517,6 +543,12 @@ def main():
         tfv6_checkpoint=args.checkpoint,
         tfv6_prefix="model",
         device=device,
+        rl_config=SimpleNamespace(
+            route_sampling_technique=args.route_sampling_technique,
+            heading_amplitude1_std_init=args.heading_amplitude1_std_init,
+            heading_amplitude2_std_init=args.heading_amplitude2_std_init,
+            path_std_base_frac=args.path_std_base_frac,
+        ),
         use_correlated_noise=args.use_correlated_noise,
         correlated_noise_rho=args.correlated_noise_rho,
     ).to(device)
@@ -524,9 +556,11 @@ def main():
     if args.log_std_init is not None:
         with torch.no_grad():
             final_noise_layer = policy.action_noise_head[-1]
-            final_noise_layer.bias.fill_(
-                policy.action_noise_codec.default_head_bias_from_log_std_init(
-                    float(args.log_std_init)
+            final_noise_layer.bias.copy_(
+                policy.action_noise_codec.default_head_bias_vector(
+                    log_std_init=float(args.log_std_init),
+                    device=final_noise_layer.bias.device,
+                    dtype=final_noise_layer.bias.dtype,
                 )
             )
             final_noise_layer.weight.zero_()
@@ -569,12 +603,20 @@ def main():
         ).float()
         value_features = policy._build_value_features().float()
         noise_pred = policy.predict_action_noise(value_features)
-        dist, _ = policy.action_noise_codec.proba_distribution(action_mean, noise_pred)
+        dist, noise_diag = policy.action_noise_codec.proba_distribution(
+            action_mean, noise_pred
+        )
 
         sampled_routes = []
         sample_speeds = []
         for _ in range(args.num_samples):
-            act = torch.clamp(dist.sample(), -1.0, 1.0)
+            act = policy.action_noise_codec.sample_actions(
+                action_mean,
+                noise_diag,
+                dist,
+                sample_type="sample",
+            )
+            act = torch.clamp(act, -1.0, 1.0)
             r, w, s = action_codec.decode(act.cpu())
             if r is not None:
                 if isinstance(r, torch.Tensor):

@@ -236,32 +236,45 @@ class NoiseDiagnostics:
     noise_pred: torch.Tensor
     diag_std: torch.Tensor
     diag_log_std: torch.Tensor
+    path_amp1_std: torch.Tensor | None = None
+    path_amp2_std: torch.Tensor | None = None
 
 
 class ActionNoiseCodec:
     """Owns noise-head parameterization (grouped) and distribution construction."""
+
+    SAMPLER_SPLINE_CURVATURE = "spline_curvature_perturbation"
+    SAMPLER_LEGACY = "legacy_noise_sampling"
 
     def __init__(
         self,
         action_codec: ActionCodec,
         *,
         distribution_type: str = "gaussian",
+        sampling_technique: str = SAMPLER_SPLINE_CURVATURE,
         use_correlated_gaussian: bool = True,
         correlated_noise_rho: float = 0.8,
         noise_ramp: bool = True,
         log_std_min: float = -5.0,
         log_std_max: float = 1.0,
+        heading_amplitude1_std_init: float = 0.07,
+        heading_amplitude2_std_init: float = 0.03,
+        path_std_base_frac: float = 0.15,
         beta_eps: float = 1e-4,
         beta_concentration_min: float = 2.0,
         beta_concentration_max: float = 200.0,
     ) -> None:
         self.action_codec = action_codec
         self.distribution_type = str(distribution_type)
+        self.sampling_technique = str(sampling_technique)
         self.use_correlated_gaussian = bool(use_correlated_gaussian)
         self.correlated_noise_rho = float(correlated_noise_rho)
         self.noise_ramp = bool(noise_ramp)
         self.log_std_min = float(log_std_min)
         self.log_std_max = float(log_std_max)
+        self.heading_amplitude1_std_init = float(heading_amplitude1_std_init)
+        self.heading_amplitude2_std_init = float(heading_amplitude2_std_init)
+        self.path_std_base_frac = float(path_std_base_frac)
         self.beta_eps = float(beta_eps)
         self.beta_concentration_min = float(beta_concentration_min)
         self.beta_concentration_max = float(beta_concentration_max)
@@ -280,8 +293,40 @@ class ActionNoiseCodec:
         if not self.group_names:
             raise RuntimeError("No active action heads found for ActionNoiseCodec.")
 
+        if self.sampling_technique not in (
+            self.SAMPLER_SPLINE_CURVATURE,
+            self.SAMPLER_LEGACY,
+        ):
+            raise ValueError(
+                f"Unsupported sampling technique: {self.sampling_technique}"
+            )
+        if not (0.0 <= self.path_std_base_frac <= 1.0):
+            raise ValueError(
+                f"path_std_base_frac must be in [0,1], got {self.path_std_base_frac}"
+            )
+        if self.heading_amplitude1_std_init < 0.0:
+            raise ValueError(
+                f"heading_amplitude1_std_init must be >= 0, got {self.heading_amplitude1_std_init}"
+            )
+        if self.heading_amplitude2_std_init < 0.0:
+            raise ValueError(
+                f"heading_amplitude2_std_init must be >= 0, got {self.heading_amplitude2_std_init}"
+            )
+
+        self.base_noise_pred_dim = len(self.group_names)
+        self.route_group_index = (
+            self.group_names.index("route") if "route" in self.group_names else None
+        )
+        self.use_spline_curvature_sampler = (
+            self.distribution_type == "gaussian"
+            and self.sampling_technique == self.SAMPLER_SPLINE_CURVATURE
+            and self.route_group_index is not None
+        )
+
         if self.distribution_type == "gaussian":
-            self.noise_pred_dim = len(self.group_names)
+            self.noise_pred_dim = self.base_noise_pred_dim + (
+                2 if self.use_spline_curvature_sampler else 0
+            )
             if self.use_correlated_gaussian:
                 self.action_dist: nn.Module = CorrelatedGaussianDistribution(
                     self.action_codec, rho=self.correlated_noise_rho
@@ -289,6 +334,10 @@ class ActionNoiseCodec:
             else:
                 self.action_dist = DiagGaussianDistribution()
         elif self.distribution_type == "beta":
+            if self.sampling_technique != self.SAMPLER_LEGACY:
+                raise ValueError(
+                    "spline_curvature_perturbation currently supports only gaussian action noise."
+                )
             self.noise_pred_dim = len(
                 self.group_names
             )  # one concentration per active head type
@@ -300,6 +349,11 @@ class ActionNoiseCodec:
         else:
             raise ValueError(
                 f"Unsupported action noise distribution: {self.distribution_type}"
+            )
+        self.noise_pred_names = list(self.group_names)
+        if self.use_spline_curvature_sampler:
+            self.noise_pred_names.extend(
+                ("heading_amplitude1_log_std", "heading_amplitude2_log_std")
             )
 
     def expand_group_values(self, grouped_values: torch.Tensor) -> torch.Tensor:
@@ -330,27 +384,87 @@ class ActionNoiseCodec:
                 scaled[:, idx] = scaled[:, idx] * 0.5
         return torch.log(scaled + 1e-6)
 
+    def _split_noise_pred(
+        self, noise_pred: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        if noise_pred.ndim != 2:
+            raise ValueError(
+                f"Expected noise_pred [B,D], got {tuple(noise_pred.shape)}"
+            )
+        if noise_pred.shape[1] != self.noise_pred_dim:
+            raise ValueError(
+                f"Expected noise_pred dim {self.noise_pred_dim}, got {noise_pred.shape[1]}"
+            )
+        base_pred = noise_pred[:, : self.base_noise_pred_dim]
+        if not self.use_spline_curvature_sampler:
+            return base_pred, None, None
+        amp1 = torch.clamp(
+            noise_pred[:, self.base_noise_pred_dim], self.log_std_min, self.log_std_max
+        )
+        amp2 = torch.clamp(
+            noise_pred[:, self.base_noise_pred_dim + 1],
+            self.log_std_min,
+            self.log_std_max,
+        )
+        return base_pred, amp1, amp2
+
+    def _join_noise_pred(
+        self,
+        base_pred: torch.Tensor,
+        amp1_log_std: torch.Tensor | None,
+        amp2_log_std: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if not self.use_spline_curvature_sampler:
+            return base_pred
+        if amp1_log_std is None or amp2_log_std is None:
+            raise ValueError(
+                "Spline curvature sampling expects heading amplitude log-std values."
+            )
+        return torch.cat(
+            (base_pred, amp1_log_std.unsqueeze(1), amp2_log_std.unsqueeze(1)), dim=1
+        )
+
     def gaussian_diagnostics_from_head(
         self, head_pred: torch.Tensor
     ) -> NoiseDiagnostics:
-        grouped_log_std = self._apply_group_noise_ramp(head_pred)
+        base_pred, amp1_log_std, amp2_log_std = self._split_noise_pred(head_pred)
+        grouped_log_std = self._apply_group_noise_ramp(base_pred)
         diag_log_std = self.expand_group_values(grouped_log_std)
         diag_std = torch.exp(diag_log_std)
+        combined_noise_pred = self._join_noise_pred(
+            grouped_log_std, amp1_log_std, amp2_log_std
+        )
         return NoiseDiagnostics(
-            noise_pred=grouped_log_std,
+            noise_pred=combined_noise_pred,
             diag_std=diag_std,
             diag_log_std=diag_log_std,
+            path_amp1_std=None
+            if amp1_log_std is None
+            else torch.exp(amp1_log_std).to(diag_std.dtype),
+            path_amp2_std=None
+            if amp2_log_std is None
+            else torch.exp(amp2_log_std).to(diag_std.dtype),
         )
 
     def gaussian_diagnostics_from_noise_pred(
         self, noise_pred: torch.Tensor
     ) -> NoiseDiagnostics:
-        diag_log_std = self.expand_group_values(noise_pred)
+        base_pred, amp1_log_std, amp2_log_std = self._split_noise_pred(noise_pred)
+        diag_log_std = self.expand_group_values(base_pred)
         diag_std = torch.exp(diag_log_std)
+        combined_noise_pred = self._join_noise_pred(
+            base_pred, amp1_log_std, amp2_log_std
+        )
         return NoiseDiagnostics(
-            noise_pred=noise_pred,
+            noise_pred=combined_noise_pred,
             diag_std=diag_std,
             diag_log_std=diag_log_std,
+            path_amp1_std=None
+            if amp1_log_std is None
+            else torch.exp(amp1_log_std).to(diag_std.dtype),
+            path_amp2_std=None
+            if amp2_log_std is None
+            else torch.exp(amp2_log_std).to(diag_std.dtype),
         )
 
     def beta_diagnostics_from_head(
@@ -408,6 +522,34 @@ class ActionNoiseCodec:
             target_concentration - self.beta_concentration_min
         )
 
+    def default_head_bias_vector(
+        self,
+        *,
+        log_std_init: float,
+        heading_amplitude1_std_init: float | None = None,
+        heading_amplitude2_std_init: float | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        if heading_amplitude1_std_init is None:
+            heading_amplitude1_std_init = self.heading_amplitude1_std_init
+        if heading_amplitude2_std_init is None:
+            heading_amplitude2_std_init = self.heading_amplitude2_std_init
+
+        base_bias = self.default_head_bias_from_log_std_init(log_std_init)
+        bias = torch.full(
+            (self.noise_pred_dim,),
+            float(base_bias),
+            device=device,
+            dtype=dtype if dtype is not None else torch.float32,
+        )
+        if self.use_spline_curvature_sampler:
+            amp1 = max(float(heading_amplitude1_std_init), 1e-8)
+            amp2 = max(float(heading_amplitude2_std_init), 1e-8)
+            bias[self.base_noise_pred_dim] = math.log(amp1)
+            bias[self.base_noise_pred_dim + 1] = math.log(amp2)
+        return bias
+
     def diagnostics_from_head(
         self, mean_actions: torch.Tensor, head_pred: torch.Tensor
     ) -> NoiseDiagnostics:
@@ -444,3 +586,105 @@ class ActionNoiseCodec:
                 mean_actions, self.expand_group_values(diag.noise_pred)
             )
         return dist, diag
+
+    def _sample_spline_curvature_routes(
+        self,
+        route_norm: torch.Tensor,
+        amp1_std: torch.Tensor,
+        amp2_std: torch.Tensor,
+    ) -> torch.Tensor:
+        # route_norm shape: [B, N, 2]
+        batch_size, num_points, _ = route_norm.shape
+        if num_points < 2:
+            return route_norm
+
+        route_scale = self.action_codec.route_scale.to(
+            device=route_norm.device, dtype=route_norm.dtype
+        )
+        route_m = route_norm * route_scale
+        deltas = route_m[:, 1:, :] - route_m[:, :-1, :]
+        ds = torch.linalg.norm(deltas, dim=-1)
+        s_nodes = torch.cat(
+            (
+                torch.zeros(
+                    (batch_size, 1), device=route_norm.device, dtype=route_norm.dtype
+                ),
+                torch.cumsum(ds, dim=1),
+            ),
+            dim=1,
+        )
+        total_len = torch.clamp(s_nodes[:, -1:], min=1e-6)
+        u = s_nodes / total_len
+
+        ramp_idx = min(2, num_points - 1)
+        s_ramp_end = torch.clamp(s_nodes[:, ramp_idx : ramp_idx + 1], min=1e-6)
+        z = torch.clamp(s_nodes / s_ramp_end, 0.0, 1.0)
+        smooth = z * z * (3.0 - 2.0 * z)
+        env = self.path_std_base_frac + (1.0 - self.path_std_base_frac) * smooth
+
+        a1 = torch.randn(
+            (batch_size, 1), device=route_norm.device, dtype=route_norm.dtype
+        ) * amp1_std.view(batch_size, 1).to(route_norm.dtype)
+        a2 = torch.randn(
+            (batch_size, 1), device=route_norm.device, dtype=route_norm.dtype
+        ) * amp2_std.view(batch_size, 1).to(route_norm.dtype)
+        heading_perturb = env * (
+            a1 * torch.sin(math.pi * u) + a2 * torch.sin(2.0 * math.pi * u)
+        )
+
+        seg_theta = torch.atan2(deltas[..., 1], deltas[..., 0])
+        if num_points > 2:
+            dtheta = seg_theta[:, 1:] - seg_theta[:, :-1]
+            dtheta = torch.atan2(torch.sin(dtheta), torch.cos(dtheta))
+            theta_unwrapped = torch.cat(
+                (seg_theta[:, :1], seg_theta[:, :1] + torch.cumsum(dtheta, dim=1)),
+                dim=1,
+            )
+        else:
+            theta_unwrapped = seg_theta
+        theta_nodes = torch.cat((theta_unwrapped[:, :1], theta_unwrapped), dim=1)
+        theta_new = theta_nodes + heading_perturb
+
+        x_new = torch.zeros_like(route_m[..., 0])
+        y_new = torch.zeros_like(route_m[..., 1])
+        x_new[:, 0] = route_m[:, 0, 0]
+        y_new[:, 0] = route_m[:, 0, 1]
+        for idx in range(1, num_points):
+            ds_i = ds[:, idx - 1]
+            theta_mid = 0.5 * (theta_new[:, idx - 1] + theta_new[:, idx])
+            x_new[:, idx] = x_new[:, idx - 1] + torch.cos(theta_mid) * ds_i
+            y_new[:, idx] = y_new[:, idx - 1] + torch.sin(theta_mid) * ds_i
+
+        route_new_m = torch.stack((x_new, y_new), dim=-1)
+        return route_new_m / route_scale
+
+    def sample_actions(
+        self,
+        mean_actions: torch.Tensor,
+        noise_diag: NoiseDiagnostics,
+        dist: nn.Module,
+        *,
+        sample_type: str = "sample",
+    ) -> torch.Tensor:
+        if sample_type in ("mean", "mode", "deterministic"):
+            return dist.mode()
+
+        sampled = dist.sample()
+        if not self.use_spline_curvature_sampler:
+            return sampled
+        if self.action_codec.slices.route is None:
+            return sampled
+        if noise_diag.path_amp1_std is None or noise_diag.path_amp2_std is None:
+            return sampled
+
+        route_slice = self.action_codec.slices.route
+        route_mean = mean_actions[:, route_slice].view(
+            -1, self.action_codec.num_route_points, 2
+        )
+        route_sampled = self._sample_spline_curvature_routes(
+            route_mean,
+            noise_diag.path_amp1_std,
+            noise_diag.path_amp2_std,
+        )
+        sampled[:, route_slice] = route_sampled.reshape(sampled.shape[0], -1)
+        return sampled

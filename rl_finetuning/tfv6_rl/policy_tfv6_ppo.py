@@ -98,6 +98,11 @@ class TFv6PPOPolicy(nn.Module):
         self.log_std_min = -5.0
         self.log_std_max = 1.0
         self.action_noise_dist = "gaussian"
+        self.route_sampling_technique = "spline_curvature_perturbation"
+        self.heading_amplitude1_std_init = 0.07
+        self.heading_amplitude2_std_init = 0.03
+        self.path_std_base_frac = 0.15
+        self.disable_learned_noise_head = True
         self.use_privileged_measurements = True
         self.num_privileged_measurements = 0
         self.use_kl_to_reference = True
@@ -124,6 +129,37 @@ class TFv6PPOPolicy(nn.Module):
             )
             self.action_noise_dist = str(
                 getattr(rl_config, "action_noise_dist", self.action_noise_dist)
+            )
+            self.route_sampling_technique = str(
+                getattr(
+                    rl_config,
+                    "route_sampling_technique",
+                    self.route_sampling_technique,
+                )
+            )
+            self.heading_amplitude1_std_init = float(
+                getattr(
+                    rl_config,
+                    "heading_amplitude1_std_init",
+                    self.heading_amplitude1_std_init,
+                )
+            )
+            self.heading_amplitude2_std_init = float(
+                getattr(
+                    rl_config,
+                    "heading_amplitude2_std_init",
+                    self.heading_amplitude2_std_init,
+                )
+            )
+            self.path_std_base_frac = float(
+                getattr(rl_config, "path_std_base_frac", self.path_std_base_frac)
+            )
+            self.disable_learned_noise_head = bool(
+                getattr(
+                    rl_config,
+                    "disable_learned_noise_head",
+                    self.disable_learned_noise_head,
+                )
             )
             self.use_privileged_measurements = bool(
                 getattr(
@@ -168,11 +204,15 @@ class TFv6PPOPolicy(nn.Module):
         self.action_noise_codec = ActionNoiseCodec(
             self.action_codec,
             distribution_type=self.action_noise_dist,
+            sampling_technique=self.route_sampling_technique,
             use_correlated_gaussian=self.use_correlated_noise,
             correlated_noise_rho=self.correlated_noise_rho,
             noise_ramp=self.noise_ramp,
             log_std_min=self.log_std_min,
             log_std_max=self.log_std_max,
+            heading_amplitude1_std_init=self.heading_amplitude1_std_init,
+            heading_amplitude2_std_init=self.heading_amplitude2_std_init,
+            path_std_base_frac=self.path_std_base_frac,
         )
         self.action_dist = self.action_noise_codec.action_dist
         self.privileged_obs_key = "privileged_measurements"
@@ -191,10 +231,20 @@ class TFv6PPOPolicy(nn.Module):
         nn.init.zeros_(
             final_noise_layer.weight
         )  # Exact constant initialization; bias sets the initial exploration level.
-        init_noise_bias = self.action_noise_codec.default_head_bias_from_log_std_init(
-            self.log_std_init
+        init_noise_bias = self.action_noise_codec.default_head_bias_vector(
+            log_std_init=self.log_std_init,
+            heading_amplitude1_std_init=self.heading_amplitude1_std_init,
+            heading_amplitude2_std_init=self.heading_amplitude2_std_init,
+            device=final_noise_layer.bias.device,
+            dtype=final_noise_layer.bias.dtype,
         )
-        nn.init.constant_(final_noise_layer.bias, init_noise_bias)
+        with torch.no_grad():
+            final_noise_layer.bias.copy_(init_noise_bias)
+
+        # Constant-noise mode: keep std/head at initialized values.
+        if self.disable_learned_noise_head:
+            for param in self.action_noise_head.parameters():
+                param.requires_grad_(False)
 
         self.value_head = nn.Sequential(
             nn.Linear(value_in_dim, 256),
@@ -376,7 +426,12 @@ class TFv6PPOPolicy(nn.Module):
         )
 
         if actions is None:
-            actions = dist.get_actions(sample_type)
+            actions = self.action_noise_codec.sample_actions(
+                action_mean,
+                noise_diag,
+                dist,
+                sample_type=sample_type,
+            )
 
         log_prob = dist.log_prob(actions)
         entropy = dist.entropy()

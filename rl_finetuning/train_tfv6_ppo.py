@@ -428,11 +428,34 @@ def parse_args(config):
                       type=float,
                       default=config.log_std_head_lr_mult,
                       help='Learning-rate multiplier for the log_std prediction head.')
+    parser.add_argument('--disable_learned_noise_head',
+                      type=lambda x: bool(strtobool(x)),
+                      default=getattr(config, 'disable_learned_noise_head', True),
+                      nargs='?',
+                      const=True,
+                      help='If true, freeze action_noise_head parameters and keep constant-noise behavior.')
     parser.add_argument('--action_noise_dist',
                       type=str,
                       default=getattr(config, 'action_noise_dist', 'gaussian'),
                       choices=['gaussian', 'beta'],
                       help='Action noise distribution family for PPO exploration.')
+    parser.add_argument('--route_sampling_technique',
+                      type=str,
+                      default=getattr(config, 'route_sampling_technique', 'spline_curvature_perturbation'),
+                      choices=['spline_curvature_perturbation', 'legacy_noise_sampling'],
+                      help='Route stochastic sampling technique. Defaults to spline curvature perturbation.')
+    parser.add_argument('--heading_amplitude1_std_init',
+                      type=float,
+                      default=getattr(config, 'heading_amplitude1_std_init', 0.07),
+                      help='Initial std for first heading perturbation amplitude in spline curvature sampling.')
+    parser.add_argument('--heading_amplitude2_std_init',
+                      type=float,
+                      default=getattr(config, 'heading_amplitude2_std_init', 0.03),
+                      help='Initial std for second heading perturbation amplitude in spline curvature sampling.')
+    parser.add_argument('--path_std_base_frac',
+                      type=float,
+                      default=getattr(config, 'path_std_base_frac', 0.15),
+                      help='Base perturbation strength on the first points for spline curvature sampling.')
     parser.add_argument('--use_kl_to_reference',
                       type=lambda x: bool(strtobool(x)),
                       default=getattr(config, 'use_kl_to_reference', True),
@@ -2116,7 +2139,7 @@ def main():
                     config.global_step,
                 )
             noise_codec = agent.module.action_noise_codec
-            for idx, group_name in enumerate(noise_codec.group_names):
+            for idx, group_name in enumerate(noise_codec.noise_pred_names):
                 writer.add_scalar(
                     f"policy/noise_pred_{group_name}",
                     b_old_noise_preds[:, idx].mean().item(),

@@ -248,9 +248,10 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
             use_waypoints=use_waypoints,
             use_target_speed=use_target_speed,
         )
+        # Build a provisional schema immediately so route restarts never observe
+        # a None codec; it is rebuilt from synced trainer config in
+        # agent_global_init() before the first packed rollout frame.
         self.obs_codec = ObsCodec(self.training_config, rl_config=self.rl_config)
-        if bool(getattr(self.rl_config, "use_value_measurements", False)):
-            validate_privileged_measurement_dim(self.rl_config)
         self.controller = ClosedLoopController(
             self.config_closed_loop, self.config_expert, self.training_config
         )
@@ -326,6 +327,9 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         json_config = conf_socket.recv_string()
         loaded_config = jsonpickle.decode(json_config)
         self.rl_config.__dict__.update(loaded_config.__dict__)
+        self.obs_codec = ObsCodec(self.training_config, rl_config=self.rl_config)
+        if bool(getattr(self.rl_config, "use_value_measurements", False)):
+            validate_privileged_measurement_dim(self.rl_config)
         conf_socket.send_string(f"Config received port: {self.port}")
 
         # Connect to env gym to send observations
