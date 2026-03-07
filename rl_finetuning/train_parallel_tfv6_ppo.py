@@ -482,6 +482,7 @@ if __name__ == "__main__":
 
             for i in range(args.num_envs_per_node):
                 print(f"Start server {i}")
+                graphics_adapter = args.gpu_ids[i % len(args.gpu_ids)]
                 if args.carla_singularity:
                     if not args.carla_singularity_path:
                         raise ValueError(
@@ -493,7 +494,7 @@ if __name__ == "__main__":
                             f"{args.carla_singularity_path} "
                             f"bash {args.carla_root}/CarlaUE4.sh -carla-rpc-port={client_ports[i]} -nosound "
                             f"-carla-primary-port={carla_primary_ports[i]} -carla-streaming-port={sensor_ports[i]} "
-                            f"-RenderOffScreen -graphicsadapter=0 -RPCThreads={tfv6_rpc_threads} "
+                            f"-RenderOffScreen -graphicsadapter={graphics_adapter} -RPCThreads={tfv6_rpc_threads} "
                             f"-StreamingThreads={tfv6_streaming_threads} "
                             f"-SecondaryThreads={tfv6_secondary_threads}",
                             shell=True,
@@ -508,7 +509,7 @@ if __name__ == "__main__":
                             f"env -u LD_LIBRARY_PATH "
                             f"bash {args.carla_root}/CarlaUE4.sh -carla-rpc-port={client_ports[i]} -nosound "
                             f"-carla-primary-port={carla_primary_ports[i]} -carla-streaming-port={sensor_ports[i]} "
-                            f"-RenderOffScreen -graphicsadapter=0 -RPCThreads={tfv6_rpc_threads} "
+                            f"-RenderOffScreen -graphicsadapter={graphics_adapter} -RPCThreads={tfv6_rpc_threads} "
                             f"-StreamingThreads={tfv6_streaming_threads} "
                             f"-SecondaryThreads={tfv6_secondary_threads}",
                             shell=True,
