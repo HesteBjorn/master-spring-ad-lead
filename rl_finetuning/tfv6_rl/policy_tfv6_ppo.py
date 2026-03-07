@@ -95,6 +95,8 @@ class TFv6PPOPolicy(nn.Module):
         self.noise_ramp = noise_ramp
         self.skip_perception_heads = True
         self.log_std_init = -4.0
+        self.log_std_init_route = None
+        self.log_std_init_speed = None
         self.log_std_min = -5.0
         self.log_std_max = 1.0
         self.action_noise_dist = "gaussian"
@@ -102,6 +104,8 @@ class TFv6PPOPolicy(nn.Module):
         self.heading_amplitude1_std_init = 0.07
         self.heading_amplitude2_std_init = 0.03
         self.path_std_base_frac = 0.15
+        self.lowrank_route_rank = 6
+        self.lowrank_route_std_init = 0.015
         self.disable_learned_noise_head = True
         self.critic_updates_shared_features = True
         self.use_privileged_measurements = True
@@ -122,6 +126,16 @@ class TFv6PPOPolicy(nn.Module):
             self.log_std_init = float(
                 getattr(rl_config, "log_std_init", self.log_std_init)
             )
+            self.log_std_init_route = getattr(
+                rl_config, "log_std_init_route", self.log_std_init_route
+            )
+            if self.log_std_init_route is not None:
+                self.log_std_init_route = float(self.log_std_init_route)
+            self.log_std_init_speed = getattr(
+                rl_config, "log_std_init_speed", self.log_std_init_speed
+            )
+            if self.log_std_init_speed is not None:
+                self.log_std_init_speed = float(self.log_std_init_speed)
             self.log_std_min = float(
                 getattr(rl_config, "log_std_min", self.log_std_min)
             )
@@ -154,6 +168,16 @@ class TFv6PPOPolicy(nn.Module):
             )
             self.path_std_base_frac = float(
                 getattr(rl_config, "path_std_base_frac", self.path_std_base_frac)
+            )
+            self.lowrank_route_rank = int(
+                getattr(rl_config, "lowrank_route_rank", self.lowrank_route_rank)
+            )
+            self.lowrank_route_std_init = float(
+                getattr(
+                    rl_config,
+                    "lowrank_route_std_init",
+                    self.lowrank_route_std_init,
+                )
             )
             self.disable_learned_noise_head = bool(
                 getattr(
@@ -221,6 +245,8 @@ class TFv6PPOPolicy(nn.Module):
             heading_amplitude1_std_init=self.heading_amplitude1_std_init,
             heading_amplitude2_std_init=self.heading_amplitude2_std_init,
             path_std_base_frac=self.path_std_base_frac,
+            lowrank_route_rank=self.lowrank_route_rank,
+            lowrank_route_std_init=self.lowrank_route_std_init,
         )
         self.action_dist = self.action_noise_codec.action_dist
         self.privileged_obs_key = "privileged_measurements"
@@ -241,6 +267,8 @@ class TFv6PPOPolicy(nn.Module):
         )  # Exact constant initialization; bias sets the initial exploration level.
         init_noise_bias = self.action_noise_codec.default_head_bias_vector(
             log_std_init=self.log_std_init,
+            log_std_init_route=self.log_std_init_route,
+            log_std_init_speed=self.log_std_init_speed,
             heading_amplitude1_std_init=self.heading_amplitude1_std_init,
             heading_amplitude2_std_init=self.heading_amplitude2_std_init,
             device=final_noise_layer.bias.device,

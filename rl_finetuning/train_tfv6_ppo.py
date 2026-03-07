@@ -416,6 +416,14 @@ def parse_args(config):
                       type=float,
                       default=config.log_std_init,
                       help='Initial bias value for the state-dependent log_std head.')
+    parser.add_argument('--log_std_init_route', '--log-std-init-route',
+                      type=float,
+                      default=getattr(config, 'log_std_init_route', None),
+                      help='Optional route-specific log_std_init bias (overrides log_std_init for route group).')
+    parser.add_argument('--log_std_init_speed', '--log-std-init-speed',
+                      type=float,
+                      default=getattr(config, 'log_std_init_speed', None),
+                      help='Optional target-speed-specific log_std_init bias (overrides log_std_init for target_speed group).')
     parser.add_argument('--log_std_min', '--log-std-min',
                       type=float,
                       default=config.log_std_min,
@@ -448,7 +456,7 @@ def parse_args(config):
     parser.add_argument('--route_sampling_technique',
                       type=str,
                       default=getattr(config, 'route_sampling_technique', 'spline_curvature_perturbation'),
-                      choices=['spline_curvature_perturbation', 'legacy_noise_sampling'],
+                      choices=['spline_curvature_perturbation', 'legacy_noise_sampling', 'lowrank_diag_route_sampling'],
                       help='Route stochastic sampling technique. Defaults to spline curvature perturbation.')
     parser.add_argument('--heading_amplitude1_std_init',
                       type=float,
@@ -462,6 +470,14 @@ def parse_args(config):
                       type=float,
                       default=getattr(config, 'path_std_base_frac', 0.15),
                       help='Base perturbation strength on the first points for spline curvature sampling.')
+    parser.add_argument('--lowrank_route_rank',
+                      type=int,
+                      default=getattr(config, 'lowrank_route_rank', 6),
+                      help='Rank k for lowrank_diag_route_sampling route covariance.')
+    parser.add_argument('--lowrank_route_std_init',
+                      type=float,
+                      default=getattr(config, 'lowrank_route_std_init', 0.015),
+                      help='Low-rank mode scale for lowrank_diag_route_sampling.')
     parser.add_argument('--use_kl_to_reference',
                       type=lambda x: bool(strtobool(x)),
                       default=getattr(config, 'use_kl_to_reference', True),

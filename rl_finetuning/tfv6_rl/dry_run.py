@@ -489,9 +489,38 @@ def main():
     )
     parser.add_argument(
         "--log-std-init",
+        "--log_std_init",
         type=float,
         default=None,
         help="Override PPO log_std head bias initialization for visualization (e.g. -4.0).",
+    )
+    parser.add_argument(
+        "--log-std-init-route",
+        "--log_std_init_route",
+        type=float,
+        default=None,
+        help="Optional route-specific log_std_init bias override.",
+    )
+    parser.add_argument(
+        "--log-std-init-speed",
+        "--log_std_init_speed",
+        type=float,
+        default=None,
+        help="Optional target-speed-specific log_std_init bias override.",
+    )
+    parser.add_argument(
+        "--log-std-min",
+        "--log_std_min",
+        type=float,
+        default=None,
+        help="Override minimum log-std clamp used by action sampling.",
+    )
+    parser.add_argument(
+        "--log-std-max",
+        "--log_std_max",
+        type=float,
+        default=None,
+        help="Override maximum log-std clamp used by action sampling.",
     )
     parser.add_argument(
         "--use_correlated_noise",
@@ -509,7 +538,11 @@ def main():
         "--route_sampling_technique",
         type=str,
         default="spline_curvature_perturbation",
-        choices=["spline_curvature_perturbation", "legacy_noise_sampling"],
+        choices=[
+            "spline_curvature_perturbation",
+            "legacy_noise_sampling",
+            "lowrank_diag_route_sampling",
+        ],
         help="Route stochastic sampling technique.",
     )
     parser.add_argument(
@@ -530,6 +563,18 @@ def main():
         default=0.15,
         help="Base perturbation strength on the first points.",
     )
+    parser.add_argument(
+        "--lowrank_route_rank",
+        type=int,
+        default=6,
+        help="Rank k for lowrank_diag_route_sampling route covariance.",
+    )
+    parser.add_argument(
+        "--lowrank_route_std_init",
+        type=float,
+        default=0.015,
+        help="Low-rank mode scale for lowrank_diag_route_sampling.",
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -537,18 +582,30 @@ def main():
     training_config = load_training_config(args.checkpoint)
     obs_codec = ObsCodec(training_config)
 
+    rl_config_kwargs = dict(
+        route_sampling_technique=args.route_sampling_technique,
+        heading_amplitude1_std_init=args.heading_amplitude1_std_init,
+        heading_amplitude2_std_init=args.heading_amplitude2_std_init,
+        path_std_base_frac=args.path_std_base_frac,
+        lowrank_route_rank=args.lowrank_route_rank,
+        lowrank_route_std_init=args.lowrank_route_std_init,
+    )
+    if args.log_std_min is not None:
+        rl_config_kwargs["log_std_min"] = float(args.log_std_min)
+    if args.log_std_max is not None:
+        rl_config_kwargs["log_std_max"] = float(args.log_std_max)
+    if args.log_std_init_route is not None:
+        rl_config_kwargs["log_std_init_route"] = float(args.log_std_init_route)
+    if args.log_std_init_speed is not None:
+        rl_config_kwargs["log_std_init_speed"] = float(args.log_std_init_speed)
+
     policy = TFv6PPOPolicy(
         observation_space=None,
         action_space=None,
         tfv6_checkpoint=args.checkpoint,
         tfv6_prefix="model",
         device=device,
-        rl_config=SimpleNamespace(
-            route_sampling_technique=args.route_sampling_technique,
-            heading_amplitude1_std_init=args.heading_amplitude1_std_init,
-            heading_amplitude2_std_init=args.heading_amplitude2_std_init,
-            path_std_base_frac=args.path_std_base_frac,
-        ),
+        rl_config=SimpleNamespace(**rl_config_kwargs),
         use_correlated_noise=args.use_correlated_noise,
         correlated_noise_rho=args.correlated_noise_rho,
     ).to(device)
@@ -559,6 +616,8 @@ def main():
             final_noise_layer.bias.copy_(
                 policy.action_noise_codec.default_head_bias_vector(
                     log_std_init=float(args.log_std_init),
+                    log_std_init_route=args.log_std_init_route,
+                    log_std_init_speed=args.log_std_init_speed,
                     device=final_noise_layer.bias.device,
                     dtype=final_noise_layer.bias.dtype,
                 )

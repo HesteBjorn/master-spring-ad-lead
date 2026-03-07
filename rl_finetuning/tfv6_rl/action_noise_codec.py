@@ -158,6 +158,153 @@ class CorrelatedGaussianDistribution(nn.Module):
         return torch.zeros((), device=self.distribution.mean.device)
 
 
+class LowRankDiagRouteGaussianDistribution(nn.Module):
+    """Gaussian with route block covariance = low-rank smooth modes + diagonal."""
+
+    def __init__(
+        self,
+        action_codec: ActionCodec,
+        route_lowrank_rank: int = 6,
+        route_lowrank_std: float = 0.015,
+        jitter: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        self.action_codec = action_codec
+        self.route_lowrank_rank = max(1, int(route_lowrank_rank))
+        self.route_lowrank_std = float(route_lowrank_std)
+        self.jitter = float(jitter)
+        self.distribution: MultivariateNormal | None = None
+
+        if (
+            not self.action_codec.predict_route
+            or self.action_codec.slices.route is None
+        ):
+            raise ValueError(
+                "lowrank_diag_route_sampling requires route predictions to be enabled."
+            )
+        route_dim = int(self.action_codec.route_dim)
+        if route_dim <= 0:
+            raise ValueError("Route action dimension must be positive.")
+        self.route_lowrank_rank = min(self.route_lowrank_rank, route_dim)
+        basis = self._build_route_basis(
+            num_route_points=self.action_codec.num_route_points,
+            route_dim=route_dim,
+            rank=self.route_lowrank_rank,
+        )
+        self.register_buffer("route_basis", basis, persistent=False)
+
+    def _build_route_basis(
+        self, *, num_route_points: int, route_dim: int, rank: int
+    ) -> torch.Tensor:
+        # Smooth low-rank route modes over normalized path coordinate u in [0, 1].
+        # We prioritize two interpretable lateral modes:
+        # 1) u*sin(pi*u/2): broad turn-like bending with movable tail
+        # 2) u*(1-u): lane-change-like mid-route bulge.
+        u = torch.linspace(0.0, 1.0, steps=max(num_route_points, 2))[:num_route_points]
+        cols: list[torch.Tensor] = []
+
+        def _add_axis_mode(mode_values: torch.Tensor, axis: int) -> None:
+            if len(cols) >= rank:
+                return
+            col = torch.zeros(route_dim, dtype=torch.float32)
+            col[axis::2] = mode_values
+            col = col / (torch.linalg.norm(col) + 1e-8)
+            cols.append(col)
+
+        turn_mode = u * torch.sin(0.5 * math.pi * u)
+        lane_change_mode = u * (1.0 - u)
+
+        # Keep first two modes as requested and lateral first for controller relevance.
+        _add_axis_mode(turn_mode, axis=1)  # y
+        _add_axis_mode(lane_change_mode, axis=1)  # y
+
+        # If more rank is requested, add longitudinal counterparts.
+        _add_axis_mode(turn_mode, axis=0)  # x
+        _add_axis_mode(lane_change_mode, axis=0)  # x
+
+        # Extra fallback modes if rank > 4.
+        mode = 1
+        while len(cols) < rank:
+            extra = u * torch.sin((mode + 0.5) * math.pi * u)
+            _add_axis_mode(extra, axis=1)  # y
+            _add_axis_mode(extra, axis=0)  # x
+            mode += 1
+
+        return torch.stack(cols, dim=1)  # [route_dim, rank]
+
+    def _route_covariance(
+        self, route_std: torch.Tensor, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        cov = torch.diag(route_std.pow(2))
+        if self.route_lowrank_std > 0.0:
+            basis = self.route_basis.to(device=device, dtype=dtype)
+            lowrank = basis * self.route_lowrank_std
+            cov = cov + lowrank @ lowrank.transpose(0, 1)
+        cov = cov + torch.eye(cov.shape[0], device=device, dtype=dtype) * self.jitter
+        return cov
+
+    def proba_distribution(
+        self, mean_actions: torch.Tensor, log_std: torch.Tensor
+    ) -> LowRankDiagRouteGaussianDistribution:
+        std = torch.exp(log_std)
+        device = mean_actions.device
+        dtype = mean_actions.dtype
+        batch_size = mean_actions.shape[0]
+        route_slice = self.action_codec.slices.route
+
+        scale_trils = []
+        for i in range(batch_size):
+            std_row = std[i]
+            blocks = []
+            if route_slice is not None:
+                route_std = std_row[route_slice]
+                blocks.append(self._route_covariance(route_std, device, dtype))
+            if self.action_codec.predict_waypoints:
+                wp_std = std_row[self.action_codec.slices.waypoints]
+                wp_dim = wp_std.shape[0]
+                blocks.append(
+                    torch.diag(wp_std.pow(2))
+                    + torch.eye(wp_dim, device=device, dtype=dtype) * self.jitter
+                )
+            if self.action_codec.predict_target_speed:
+                speed_std = std_row[self.action_codec.slices.target_speed]
+                blocks.append(
+                    speed_std.pow(2).reshape(1, 1)
+                    + torch.eye(1, device=device, dtype=dtype) * self.jitter
+                )
+            cov = blocks[0] if len(blocks) == 1 else torch.block_diag(*blocks)
+            scale_trils.append(torch.linalg.cholesky(cov))
+        self.distribution = MultivariateNormal(
+            loc=mean_actions, scale_tril=torch.stack(scale_trils, dim=0)
+        )
+        return self
+
+    def log_prob(self, actions: torch.Tensor) -> torch.Tensor:
+        assert self.distribution is not None
+        return self.distribution.log_prob(actions)
+
+    def entropy(self) -> torch.Tensor:
+        assert self.distribution is not None
+        return self.distribution.entropy()
+
+    def sample(self) -> torch.Tensor:
+        assert self.distribution is not None
+        return self.distribution.rsample()
+
+    def mode(self) -> torch.Tensor:
+        assert self.distribution is not None
+        return self.distribution.mean
+
+    def get_actions(self, sample_type: str = "sample") -> torch.Tensor:
+        if sample_type in ("mean", "mode", "deterministic"):
+            return self.mode()
+        return self.sample()
+
+    def exploration_loss(self, *_args, **_kwargs) -> torch.Tensor:
+        assert self.distribution is not None
+        return torch.zeros((), device=self.distribution.mean.device)
+
+
 class DiagBetaDistribution(nn.Module):
     """Independent Beta per action dimension on [-1, 1], parameterized via mean + concentration."""
 
@@ -245,6 +392,7 @@ class ActionNoiseCodec:
 
     SAMPLER_SPLINE_CURVATURE = "spline_curvature_perturbation"
     SAMPLER_LEGACY = "legacy_noise_sampling"
+    SAMPLER_LOWRANK_DIAG_ROUTE = "lowrank_diag_route_sampling"
 
     def __init__(
         self,
@@ -260,6 +408,8 @@ class ActionNoiseCodec:
         heading_amplitude1_std_init: float = 0.07,
         heading_amplitude2_std_init: float = 0.03,
         path_std_base_frac: float = 0.15,
+        lowrank_route_rank: int = 6,
+        lowrank_route_std_init: float = 0.015,
         beta_eps: float = 1e-4,
         beta_concentration_min: float = 2.0,
         beta_concentration_max: float = 200.0,
@@ -275,6 +425,8 @@ class ActionNoiseCodec:
         self.heading_amplitude1_std_init = float(heading_amplitude1_std_init)
         self.heading_amplitude2_std_init = float(heading_amplitude2_std_init)
         self.path_std_base_frac = float(path_std_base_frac)
+        self.lowrank_route_rank = int(lowrank_route_rank)
+        self.lowrank_route_std_init = float(lowrank_route_std_init)
         self.beta_eps = float(beta_eps)
         self.beta_concentration_min = float(beta_concentration_min)
         self.beta_concentration_max = float(beta_concentration_max)
@@ -296,6 +448,7 @@ class ActionNoiseCodec:
         if self.sampling_technique not in (
             self.SAMPLER_SPLINE_CURVATURE,
             self.SAMPLER_LEGACY,
+            self.SAMPLER_LOWRANK_DIAG_ROUTE,
         ):
             raise ValueError(
                 f"Unsupported sampling technique: {self.sampling_technique}"
@@ -312,6 +465,14 @@ class ActionNoiseCodec:
             raise ValueError(
                 f"heading_amplitude2_std_init must be >= 0, got {self.heading_amplitude2_std_init}"
             )
+        if self.lowrank_route_rank < 1:
+            raise ValueError(
+                f"lowrank_route_rank must be >= 1, got {self.lowrank_route_rank}"
+            )
+        if self.lowrank_route_std_init < 0.0:
+            raise ValueError(
+                f"lowrank_route_std_init must be >= 0, got {self.lowrank_route_std_init}"
+            )
 
         self.base_noise_pred_dim = len(self.group_names)
         self.route_group_index = (
@@ -322,12 +483,23 @@ class ActionNoiseCodec:
             and self.sampling_technique == self.SAMPLER_SPLINE_CURVATURE
             and self.route_group_index is not None
         )
+        self.use_lowrank_diag_route_sampler = (
+            self.distribution_type == "gaussian"
+            and self.sampling_technique == self.SAMPLER_LOWRANK_DIAG_ROUTE
+            and self.route_group_index is not None
+        )
 
         if self.distribution_type == "gaussian":
             self.noise_pred_dim = self.base_noise_pred_dim + (
                 2 if self.use_spline_curvature_sampler else 0
             )
-            if self.use_correlated_gaussian:
+            if self.use_lowrank_diag_route_sampler:
+                self.action_dist = LowRankDiagRouteGaussianDistribution(
+                    self.action_codec,
+                    route_lowrank_rank=self.lowrank_route_rank,
+                    route_lowrank_std=self.lowrank_route_std_init,
+                )
+            elif self.use_correlated_gaussian:
                 self.action_dist: nn.Module = CorrelatedGaussianDistribution(
                     self.action_codec, rho=self.correlated_noise_rho
                 )
@@ -336,7 +508,7 @@ class ActionNoiseCodec:
         elif self.distribution_type == "beta":
             if self.sampling_technique != self.SAMPLER_LEGACY:
                 raise ValueError(
-                    "spline_curvature_perturbation currently supports only gaussian action noise."
+                    "Beta action noise currently supports only legacy_noise_sampling."
                 )
             self.noise_pred_dim = len(
                 self.group_names
@@ -526,6 +698,8 @@ class ActionNoiseCodec:
         self,
         *,
         log_std_init: float,
+        log_std_init_route: float | None = None,
+        log_std_init_speed: float | None = None,
         heading_amplitude1_std_init: float | None = None,
         heading_amplitude2_std_init: float | None = None,
         device: torch.device | None = None,
@@ -543,6 +717,16 @@ class ActionNoiseCodec:
             device=device,
             dtype=dtype if dtype is not None else torch.float32,
         )
+        for idx, group_name in enumerate(self.group_names):
+            group_log_std_init = None
+            if group_name == "route":
+                group_log_std_init = log_std_init_route
+            elif group_name == "target_speed":
+                group_log_std_init = log_std_init_speed
+            if group_log_std_init is not None:
+                bias[idx] = self.default_head_bias_from_log_std_init(
+                    float(group_log_std_init)
+                )
         if self.use_spline_curvature_sampler:
             amp1 = max(float(heading_amplitude1_std_init), 1e-8)
             amp2 = max(float(heading_amplitude2_std_init), 1e-8)

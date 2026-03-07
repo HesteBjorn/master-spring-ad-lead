@@ -29,11 +29,15 @@ class GlobalConfig(CaRLGlobalConfig):
         self.heading_amplitude1_std_init = 0.07
         self.heading_amplitude2_std_init = 0.03
         self.path_std_base_frac = 0.15
+        self.lowrank_route_rank = 6
+        self.lowrank_route_std_init = 0.015
         # Keep a lightweight trust region to the original TFv6 behavior during RL finetuning.
         self.use_kl_to_reference = True
         self.kl_to_reference_coef = 1e-4
         # TFv6 PPO policy noise defaults (state-dependent log_std head).
         self.log_std_init = -4.0
+        self.log_std_init_route = None
+        self.log_std_init_speed = None
         self.log_std_min = -5.0
         self.log_std_max = 1.0
         # Keep constant-noise behavior by default unless explicitly overridden.
