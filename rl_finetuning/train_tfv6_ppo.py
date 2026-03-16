@@ -164,6 +164,72 @@ def save(model, optimizer, config, folder, model_file, optimizer_file):
         f2.write(json_config)
 
 
+def _resolve_checkpoint_state_dict(checkpoint_obj):
+    if not isinstance(checkpoint_obj, dict):
+        raise ValueError(
+            f"Unsupported checkpoint type for value head init: {type(checkpoint_obj)}"
+        )
+
+    for key in ("model_state_dict", "state_dict", "model"):
+        candidate = checkpoint_obj.get(key)
+        if isinstance(candidate, dict):
+            return candidate
+
+    return checkpoint_obj
+
+
+def _load_value_head_from_checkpoint(
+    policy: nn.Module,
+    checkpoint_path: str,
+    device: torch.device | str,
+    rank: int,
+) -> None:
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    source_state_dict = _resolve_checkpoint_state_dict(checkpoint)
+    target_state_dict = policy.state_dict()
+
+    value_head_state_dict = {}
+    num_source_value_head = 0
+    num_missing_target = 0
+    num_shape_mismatch = 0
+
+    for source_key, source_value in source_state_dict.items():
+        normalized_key = (
+            source_key[7:] if source_key.startswith("module.") else source_key
+        )
+        if not normalized_key.startswith("value_head."):
+            continue
+
+        num_source_value_head += 1
+        target_tensor = target_state_dict.get(normalized_key)
+        if target_tensor is None:
+            num_missing_target += 1
+            continue
+        if tuple(target_tensor.shape) != tuple(source_value.shape):
+            num_shape_mismatch += 1
+            continue
+
+        value_head_state_dict[normalized_key] = source_value
+
+    if not value_head_state_dict:
+        raise ValueError(
+            f"No compatible value_head parameters found in checkpoint: {checkpoint_path}"
+        )
+
+    policy.load_state_dict(value_head_state_dict, strict=False)
+
+    if rank == 0:
+        print(
+            "[value_head_init] "
+            f"source={checkpoint_path} "
+            f"loaded={len(value_head_state_dict)} "
+            f"source_value_head_keys={num_source_value_head} "
+            f"missing_target={num_missing_target} "
+            f"shape_mismatch={num_shape_mismatch}",
+            flush=True,
+        )
+
+
 def parse_args(config):
     # fmt: off
     parser = argparse.ArgumentParser(allow_abbrev=False)
@@ -348,6 +414,11 @@ def parse_args(config):
                       nargs='?',
                       default=config.load_file,
                       help='model weights for initialization')
+    parser.add_argument('--value_head_init_file',
+                      type=none_or_str,
+                      nargs='?',
+                      default=getattr(config, 'value_head_init_file', None),
+                      help='Optional RL checkpoint file used to initialize only value_head.* parameters.')
     parser.add_argument('--ports',
                       nargs='+',
                       default=config.ports,
@@ -1066,6 +1137,20 @@ def main():
 
     if config.compile_model:
         agent = torch.compile(agent)
+
+    if args.value_head_init_file is not None:
+        if args.load_file is None:
+            _load_value_head_from_checkpoint(
+                policy=agent,
+                checkpoint_path=args.value_head_init_file,
+                device=device,
+                rank=rank,
+            )
+        elif rank == 0:
+            print(
+                "[value_head_init] ignoring --value_head_init_file because --load_file is set.",
+                flush=True,
+            )
 
     start_step = 0
     if args.load_file is not None:
