@@ -449,6 +449,12 @@ def parse_args(config):
                       nargs='?',
                       const=True,
                       help='If true than the agent will be run on the cpu during data collection. Can be faster.')
+    parser.add_argument('--stream_obs_minibatches_from_cpu_to_save_gpu_memory',
+                      type=lambda x: bool(strtobool(x)),
+                      default=getattr(config, 'stream_obs_minibatches_from_cpu_to_save_gpu_memory', False),
+                      nargs='?',
+                      const=True,
+                      help='If true, keep rollout observations on CPU and move only active PPO observation minibatches to GPU during training.')
     parser.add_argument('--use_exploration_suggest',
                       type=lambda x: bool(strtobool(x)),
                       default=config.use_exploration_suggest,
@@ -1020,11 +1026,12 @@ def main():
     if device_id < 0:
         print("ERROR! Device id must be positive.")
 
-    device = (
+    train_device = (
         torch.device(f"cuda:{args.gpu_ids[rank]}")
         if torch.cuda.is_available() and args.cuda
         else torch.device("cpu")
     )
+    device = train_device
 
     if torch.cuda.is_available() and args.cuda:
         torch.cuda.device(device)
@@ -1260,16 +1267,32 @@ def main():
             )  # Log that a restart happened
 
     if config.cpu_collect:
-        device = "cpu"
+        device = torch.device("cpu")
+
+    obs_storage_on_cpu = bool(
+        getattr(
+            config,
+            "stream_obs_minibatches_from_cpu_to_save_gpu_memory",
+            False,
+        )
+    )
+    obs_storage_device = torch.device("cpu") if obs_storage_on_cpu else device
+    obs_storage_pin_memory = (
+        obs_storage_device.type == "cpu" and train_device.type == "cuda"
+    )
 
     # ALGO Logic: Storage setup
     obs = {}
     for key, space in env.single_observation_space.spaces.items():
         dtype = torch.uint8 if space.dtype == np.uint8 else torch.float32
+        obs_kwargs = {}
+        if obs_storage_pin_memory:
+            obs_kwargs["pin_memory"] = True
         obs[key] = torch.zeros(
             (local_bs_per_env, args.num_envs_per_proc) + space.shape,
-            device=device,
+            device=obs_storage_device,
             dtype=dtype,
+            **obs_kwargs,
         )
     actions = torch.zeros(
         (local_bs_per_env, args.num_envs_per_proc) + env.single_action_space.shape,
@@ -1484,7 +1507,9 @@ def main():
                 )
 
             for key in obs.keys():
-                obs[key][step] = next_obs[key]
+                obs[key][step] = next_obs[key].to(
+                    device=obs[key].device, non_blocking=obs_storage_pin_memory
+                )
             dones[step] = next_done
 
             # ALGO LOGIC: action logic
@@ -1662,11 +1687,7 @@ def main():
             )
 
         if config.cpu_collect:
-            device = (
-                torch.device(f"cuda:{args.gpu_ids[rank]}")
-                if torch.cuda.is_available() and args.cuda
-                else torch.device("cpu")
-            )
+            device = train_device
             agent.to(device)
 
         exploration_suggests = np.zeros(
@@ -1709,8 +1730,6 @@ def main():
 
         # When the data was collected on the CPU, move it to GPU before training
         if config.cpu_collect:
-            for key in b_obs.keys():
-                b_obs[key] = b_obs[key].to(device)
             b_logprobs = b_logprobs.to(device)
             b_actions = b_actions.to(device)
             b_dones = b_dones.to(device)
@@ -1843,7 +1862,15 @@ def main():
                     b_exploration_suggests_sampled = b_exploration_suggests[mb_inds]
                 else:
                     b_exploration_suggests_sampled = None
-                b_obs_sampled = {key: b_obs[key][mb_inds] for key in b_obs.keys()}
+                b_obs_sampled = {}
+                for key in b_obs.keys():
+                    sampled_obs = b_obs[key][mb_inds]
+                    if sampled_obs.device != device:
+                        sampled_obs = sampled_obs.to(
+                            device,
+                            non_blocking=obs_storage_pin_memory,
+                        )
+                    b_obs_sampled[key] = sampled_obs
                 should_log_memory = args.debug_memory and start == 0
                 if should_log_memory:
                     _log_cuda_memory_snapshot(

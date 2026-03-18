@@ -44,3 +44,6 @@ class GlobalConfig(CaRLGlobalConfig):
         self.disable_learned_noise_head = True
         # Use a higher LR for std head so state-dependent uncertainty adapts faster.
         self.log_std_head_lr_mult = 5.0
+        # Optional memory-saving path: keep rollout observations on CPU and
+        # transfer only active PPO minibatch observation slices to GPU.
+        self.stream_obs_minibatches_from_cpu_to_save_gpu_memory = False
