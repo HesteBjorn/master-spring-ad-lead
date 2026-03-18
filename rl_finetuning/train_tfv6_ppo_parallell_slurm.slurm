@@ -6,11 +6,11 @@
 #SBATCH --partition=GPUQ
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:6
+#SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=48
-#SBATCH --constraint=a100|h100|h200
+#SBATCH --constraint=h100|h200
 #SBATCH --mem=256G
-#SBATCH --time=0-00:15:00
+#SBATCH --time=1-00:00:00
 #SBATCH --output=outputs/rl_logs/slurm_%j.out
 #SBATCH --error=outputs/rl_logs/slurm_%j.err
 
@@ -60,7 +60,7 @@ if [[ "${NUM_ENVS_PER_GPU:-}" == "" ]]; then
   fi
 fi
 # TEMPORARY OVERRIDE TO TEST:
-NUM_ENVS_PER_GPU=1
+NUM_ENVS_PER_GPU=3
 
 NUM_ENVS_PER_NODE="${NUM_ENVS_PER_NODE:-$((GPU_COUNT * NUM_ENVS_PER_GPU))}"
 
