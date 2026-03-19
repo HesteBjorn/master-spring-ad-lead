@@ -369,6 +369,29 @@ class PPORolloutVisualizer:
             lineType=cv2.LINE_AA,
         )
 
+        if self.steer_modality == "route":
+            self._draw_polyline(
+                bev_img, route_mean, color=(230, 110, 0), radius=6, line_thickness=2
+            )
+            self._draw_polyline(
+                bev_img, route_sample, color=(20, 80, 230), radius=5, line_thickness=2
+            )
+        if self.waypoints_active_for_control:
+            self._draw_polyline(
+                bev_img,
+                waypoints_mean,
+                color=(170, 100, 200),
+                radius=4,
+                line_thickness=2,
+            )
+            self._draw_polyline(
+                bev_img,
+                waypoints_sample,
+                color=(50, 190, 60),
+                radius=4,
+                line_thickness=2,
+            )
+
         tp_prev_in_view, tp_prev_drawn = self._draw_target_marker(
             bev_img,
             target_point_previous,
@@ -401,29 +424,6 @@ class PPORolloutVisualizer:
         if tpn_in_view:
             self._draw_numbered_target_marker(
                 bev_img, tpn_drawn, TP_DEFAULT_COLOR, 14, 2
-            )
-
-        if self.steer_modality == "route":
-            self._draw_polyline(
-                bev_img, route_mean, color=(230, 110, 0), radius=6, line_thickness=2
-            )
-            self._draw_polyline(
-                bev_img, route_sample, color=(20, 80, 230), radius=5, line_thickness=2
-            )
-        if self.waypoints_active_for_control:
-            self._draw_polyline(
-                bev_img,
-                waypoints_mean,
-                color=(170, 100, 200),
-                radius=4,
-                line_thickness=2,
-            )
-            self._draw_polyline(
-                bev_img,
-                waypoints_sample,
-                color=(50, 190, 60),
-                radius=4,
-                line_thickness=2,
             )
 
         self._overlay_legend_on_bev(bev_img)
@@ -496,17 +496,33 @@ class PPORolloutVisualizer:
         y0: int,
         w: int,
         h: int,
+        speed_probs: np.ndarray,
+        speed_bins: np.ndarray,
         mean_speed: float,
-        std_speed: float,
-        selected_speed: float,
+        sampled_speed: float | None,
         current_speed: float,
     ) -> None:
-        if w < 120 or h < 120:
+        if w < 220 or h < 140:
             return
+
+        speed_probs = np.asarray(speed_probs, dtype=np.float32).reshape(-1)
+        speed_bins = np.asarray(speed_bins, dtype=np.float32).reshape(-1)
+        if speed_probs.size == 0 or speed_bins.size == 0:
+            return
+        if speed_probs.size != speed_bins.size:
+            count = min(speed_probs.size, speed_bins.size)
+            speed_probs = speed_probs[:count]
+            speed_bins = speed_bins[:count]
+
+        prob_sum = float(speed_probs.sum())
+        if prob_sum <= 0.0:
+            return
+        speed_probs = speed_probs / prob_sum
+
         cv2.rectangle(panel, (x0, y0), (x0 + w, y0 + h), (210, 210, 210), 1)
         cv2.putText(
             panel,
-            "Target-Speed Distribution",
+            "Base Policy Speed Histogram",
             (x0 + 8, y0 + 18),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
@@ -515,11 +531,10 @@ class PPORolloutVisualizer:
             lineType=cv2.LINE_AA,
         )
 
-        # Keep plot high in the corner and reserve a larger bottom margin for ticks/x-label.
         plot_left = x0 + 12
         plot_right = x0 + w - 10
         plot_top = y0 + 64
-        plot_bottom = y0 + h - 44
+        plot_bottom = y0 + h - 42
         cv2.rectangle(
             panel, (plot_left, plot_top), (plot_right, plot_bottom), (235, 235, 235), -1
         )
@@ -528,38 +543,166 @@ class PPORolloutVisualizer:
         )
 
         max_speed = max(
-            float(self.training_config.max_speed), mean_speed + 4.0 * std_speed
+            float(self.training_config.max_speed),
+            (float(np.max(speed_bins)) + 1.0) if speed_bins.size > 0 else 1.0,
+            mean_speed + 1.0,
+            current_speed + 1.0,
+            1.0,
         )
-        max_speed = max(max_speed, selected_speed + 2.0, current_speed + 2.0, 1.0)
-        xs = np.linspace(0.0, max_speed, 220)
-        sigma = max(1e-3, std_speed)
-        ys = np.exp(-0.5 * ((xs - mean_speed) / sigma) ** 2)
-        ys = ys / (ys.max() + 1e-8)
+        max_prob = max(
+            0.20,
+            (float(np.max(speed_probs)) * 1.18) if speed_probs.size > 0 else 0.20,
+        )
 
         def speed_to_px(v: float) -> int:
             alpha = float(np.clip(v / max_speed, 0.0, 1.0))
             return int(round(plot_left + alpha * (plot_right - plot_left)))
 
-        def dens_to_py(v: float) -> int:
-            alpha = float(np.clip(v, 0.0, 1.0))
+        def prob_to_py(v: float) -> int:
+            alpha = float(np.clip(v / max_prob, 0.0, 1.0))
             return int(round(plot_bottom - alpha * (plot_bottom - plot_top)))
 
-        pts = np.stack(
-            [
-                np.array([speed_to_px(x), dens_to_py(y)])
-                for x, y in zip(xs, ys, strict=False)
-            ]
-        )
-        cv2.polylines(
+        cv2.putText(
             panel,
-            [pts.astype(np.int32)],
-            isClosed=False,
-            color=(30, 120, 220),
-            thickness=2,
+            (
+                f"base_mean={mean_speed:.2f} m/s   "
+                f"sampled={sampled_speed:.2f} m/s   ego={current_speed:.2f} m/s"
+                if sampled_speed is not None
+                else f"base_mean={mean_speed:.2f} m/s   ego={current_speed:.2f} m/s"
+            ),
+            (x0 + 8, y0 + 36),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            (30, 30, 30),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.line(
+            panel,
+            (x0 + 10, y0 + 50),
+            (x0 + 28, y0 + 50),
+            (240, 130, 0),
+            2,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.putText(
+            panel,
+            "base mean",
+            (x0 + 34, y0 + 54),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            (30, 30, 30),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+        legend_x = x0 + 112
+        if sampled_speed is not None:
+            cv2.line(
+                panel,
+                (legend_x, y0 + 50),
+                (legend_x + 18, y0 + 50),
+                (200, 50, 50),
+                2,
+                lineType=cv2.LINE_AA,
+            )
+            cv2.putText(
+                panel,
+                "sampled",
+                (legend_x + 24, y0 + 54),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                (30, 30, 30),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+            legend_x += 86
+        cv2.line(
+            panel,
+            (legend_x, y0 + 50),
+            (legend_x + 18, y0 + 50),
+            (40, 150, 60),
+            2,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.putText(
+            panel,
+            "ego speed",
+            (legend_x + 24, y0 + 54),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            (30, 30, 30),
+            1,
+            lineType=cv2.LINE_AA,
         )
 
+        y_ticks = np.linspace(0.0, max_prob, 4)
+        for prob in y_ticks:
+            ty = prob_to_py(float(prob))
+            cv2.line(
+                panel,
+                (plot_left, ty),
+                (plot_right, ty),
+                (220, 220, 220),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+            cv2.putText(
+                panel,
+                f"{prob:.2f}",
+                (plot_left - 34, ty + 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.31,
+                (70, 70, 70),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+
+        if speed_bins.size == 1:
+            step = max(1.0, max_speed * 0.1)
+            bin_edges = np.array(
+                [
+                    max(0.0, float(speed_bins[0]) - 0.5 * step),
+                    min(max_speed, float(speed_bins[0]) + 0.5 * step),
+                ],
+                dtype=np.float32,
+            )
+        else:
+            mids = 0.5 * (speed_bins[:-1] + speed_bins[1:])
+            left_edge = max(0.0, float(speed_bins[0]) - float(mids[0] - speed_bins[0]))
+            right_edge = min(
+                max_speed, float(speed_bins[-1]) + float(speed_bins[-1] - mids[-1])
+            )
+            bin_edges = np.concatenate(
+                (
+                    np.array([left_edge], dtype=np.float32),
+                    mids.astype(np.float32),
+                    np.array([right_edge], dtype=np.float32),
+                )
+            )
+
+        for idx, prob in enumerate(speed_probs):
+            left = speed_to_px(float(bin_edges[idx]))
+            right = speed_to_px(float(bin_edges[idx + 1]))
+            top = prob_to_py(float(prob))
+            if right <= left:
+                right = left + 1
+            cv2.rectangle(
+                panel,
+                (left + 1, top),
+                (right - 1, plot_bottom - 1),
+                (30, 120, 220),
+                -1,
+            )
+            cv2.rectangle(
+                panel,
+                (left + 1, top),
+                (right - 1, plot_bottom - 1),
+                (20, 80, 150),
+                1,
+            )
+
         mean_x = speed_to_px(mean_speed)
-        selected_x = speed_to_px(selected_speed)
+        sampled_x = None if sampled_speed is None else speed_to_px(sampled_speed)
         current_x = speed_to_px(current_speed)
         cv2.line(
             panel,
@@ -569,82 +712,41 @@ class PPORolloutVisualizer:
             2,
             lineType=cv2.LINE_AA,
         )
-        cv2.line(
-            panel,
-            (selected_x, plot_top),
-            (selected_x, plot_bottom),
-            (30, 30, 210),
-            2,
-            lineType=cv2.LINE_AA,
-        )
+        if sampled_x is not None:
+            cv2.line(
+                panel,
+                (sampled_x, plot_top),
+                (sampled_x, plot_bottom),
+                (200, 50, 50),
+                2,
+                lineType=cv2.LINE_AA,
+            )
         cv2.line(
             panel,
             (current_x, plot_top),
             (current_x, plot_bottom),
             (40, 150, 60),
-            1,
+            2,
             lineType=cv2.LINE_AA,
         )
 
-        # Compact summary at the top so it does not collide with x-axis text.
-        cv2.putText(
-            panel,
-            f"mean={mean_speed:.2f}  selected={selected_speed:.2f}  ego={current_speed:.2f}",
-            (x0 + 8, y0 + 36),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.38,
-            (30, 30, 30),
-            1,
-            lineType=cv2.LINE_AA,
-        )
-        cv2.putText(
-            panel,
-            f"std={std_speed:.2f}",
-            (x0 + 8, y0 + 52),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.38,
-            (30, 30, 30),
-            1,
-            lineType=cv2.LINE_AA,
-        )
-
-        low_x = speed_to_px(max(0.0, mean_speed - std_speed))
-        high_x = speed_to_px(mean_speed + std_speed)
-        cv2.line(
-            panel,
-            (low_x, plot_top),
-            (low_x, plot_bottom),
-            (180, 180, 60),
-            1,
-            lineType=cv2.LINE_AA,
-        )
-        cv2.line(
-            panel,
-            (high_x, plot_top),
-            (high_x, plot_bottom),
-            (180, 180, 60),
-            1,
-            lineType=cv2.LINE_AA,
-        )
-
-        ticks = np.linspace(0.0, max_speed, 5)
-        for t in ticks:
-            tx = speed_to_px(float(t))
+        for speed in speed_bins:
+            tx = speed_to_px(float(speed))
             cv2.line(panel, (tx, plot_bottom), (tx, plot_bottom + 4), (80, 80, 80), 1)
             cv2.putText(
                 panel,
-                f"{t:.1f}",
+                f"{speed:.1f}",
                 (tx - 10, plot_bottom + 16),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.36,
+                0.31,
                 (40, 40, 40),
                 1,
                 lineType=cv2.LINE_AA,
             )
         cv2.putText(
             panel,
-            "speed [m/s]",
-            (plot_left + max(30, (plot_right - plot_left) // 3), plot_bottom + 30),
+            "speed bin [m/s]",
+            (plot_left + max(28, (plot_right - plot_left) // 3), plot_bottom + 30),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.42,
             (40, 40, 40),
@@ -901,6 +1003,7 @@ class PPORolloutVisualizer:
         truncated: bool,
         sampled_action: np.ndarray,
         mean_action: np.ndarray,
+        target_speed_logits: np.ndarray | None,
         log_std: np.ndarray,
         value_estimate: float,
     ) -> None:
@@ -969,7 +1072,7 @@ class PPORolloutVisualizer:
         rgb = np.transpose(obs["rgb"], (1, 2, 0)).astype(np.uint8)
         # obs["rgb"] is stored in RGB order; OpenCV rendering/writes expect BGR.
         rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        bev, target_debug = self._build_bev(
+        bev, _ = self._build_bev(
             lidar=obs["rasterized_lidar"],
             target_point_previous=obs["target_point_previous"],
             target_point=obs["target_point"],
@@ -1010,9 +1113,9 @@ class PPORolloutVisualizer:
         graphs_panel = np.full((top_h, graph_w, 3), 248, dtype=np.uint8)
 
         std = np.exp(log_std.astype(np.float32))
-        target_speed_std = None
         route_point_std = None
         waypoint_point_std = None
+        base_speed_probs = None
 
         if self.action_codec.slices.route is not None:
             route_slice = self.action_codec.slices.route
@@ -1026,9 +1129,14 @@ class PPORolloutVisualizer:
             wp_std_xy = wp_std_flat.reshape(-1, 2)
             waypoint_point_std = np.sqrt(np.mean(np.square(wp_std_xy), axis=1))
 
-        if self.action_codec.slices.target_speed is not None:
-            speed_idx = self.action_codec.slices.target_speed.start
-            target_speed_std = float(std[speed_idx] * self.action_codec.speed_scale)
+        if target_speed_logits is not None:
+            logits = np.asarray(target_speed_logits, dtype=np.float32).reshape(-1)
+            if logits.size > 0:
+                logits = logits - float(np.max(logits))
+                exp_logits = np.exp(logits)
+                denom = float(exp_logits.sum())
+                if denom > 0.0:
+                    base_speed_probs = exp_logits / denom
 
         self.episode_returns[env_slot] += reward
         episode_return = float(self.episode_returns[env_slot])
@@ -1041,72 +1149,45 @@ class PPORolloutVisualizer:
             ),
             "forward_discounted_return=pending",
             f"std[min/mean/max]={std.min():.4f}/{std.mean():.4f}/{std.max():.4f}",
-            (
-                "tp_dists "
-                f"prev-cur={float(np.linalg.norm(obs['target_point_previous'] - obs['target_point'])):.2f}m "
-                f"cur-next={float(np.linalg.norm(obs['target_point'] - obs['target_point_next'])):.2f}m "
-                f"prev-next={float(np.linalg.norm(obs['target_point_previous'] - obs['target_point_next'])):.2f}m"
-            ),
-            (
-                "target_point_previous "
-                f"xy=({float(obs['target_point_previous'][0]):+.2f},{float(obs['target_point_previous'][1]):+.2f}) "
-                f"in_view={int(target_debug['tp_prev_in_view'])}"
-            ),
-            (
-                "target_point "
-                f"xy=({float(obs['target_point'][0]):+.2f},{float(obs['target_point'][1]):+.2f}) "
-                f"in_view={int(target_debug['tp_in_view'])}"
-            ),
-            (
-                "target_point_next "
-                f"xy=({float(obs['target_point_next'][0]):+.2f},{float(obs['target_point_next'][1]):+.2f}) "
-                f"in_view={int(target_debug['tp_next_in_view'])}"
-            ),
         ]
-        text_start_y = 244
         line_h = 24
-        if text_start_y + line_h * len(text_lines) > top_h - 10:
-            text_start_y = max(24, top_h - 10 - line_h * len(text_lines))
+        text_bottom_margin = 16
+        text_start_y = max(
+            24,
+            top_h - text_bottom_margin - line_h * (len(text_lines) - 1),
+        )
         self._put_text_lines(scalar_panel, text_lines, start_y=text_start_y)
 
         if (
             self.target_speed_active_for_control
             and target_speed_mean is not None
-            and target_speed_sample is not None
-            and target_speed_std is not None
+            and base_speed_probs is not None
         ):
-            graph_top_h = int(round(top_h * 0.54))
-            graph_bottom_h = top_h - gap - graph_top_h
+            speed_panel_h = max(0, text_start_y - 18)
             self._draw_speed_distribution(
-                graphs_panel,
+                scalar_panel,
                 x0=0,
                 y0=0,
-                w=graph_w,
-                h=graph_top_h,
+                w=scalar_w,
+                h=speed_panel_h,
+                speed_probs=base_speed_probs,
+                speed_bins=np.asarray(
+                    self.training_config.target_speed_classes, dtype=np.float32
+                ),
                 mean_speed=target_speed_mean,
-                std_speed=target_speed_std,
-                selected_speed=target_speed_sample,
+                sampled_speed=target_speed_sample,
                 current_speed=speed,
             )
-            self._draw_spatial_std_profile(
-                graphs_panel,
-                x0=0,
-                y0=graph_top_h + gap,
-                w=graph_w,
-                h=graph_bottom_h,
-                route_point_std=route_point_std,
-                waypoint_point_std=waypoint_point_std,
-            )
-        else:
-            self._draw_spatial_std_profile(
-                graphs_panel,
-                x0=0,
-                y0=0,
-                w=graph_w,
-                h=top_h,
-                route_point_std=route_point_std,
-                waypoint_point_std=waypoint_point_std,
-            )
+
+        self._draw_spatial_std_profile(
+            graphs_panel,
+            x0=0,
+            y0=0,
+            w=graph_w,
+            h=top_h,
+            route_point_std=route_point_std,
+            waypoint_point_std=waypoint_point_std,
+        )
 
         if done or truncated:
             self.episode_returns[env_slot] = 0.0
