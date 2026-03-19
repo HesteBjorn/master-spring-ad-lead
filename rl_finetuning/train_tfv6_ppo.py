@@ -530,6 +530,12 @@ def parse_args(config):
                       default=getattr(config, 'action_noise_dist', 'gaussian'),
                       choices=['gaussian', 'beta'],
                       help='Action noise distribution family for PPO exploration.')
+    parser.add_argument('--speed_samping_style', '--speed_sampling_style',
+                      dest='speed_sampling_style',
+                      type=str,
+                      default=getattr(config, 'speed_sampling_style', 'native_categorical'),
+                      choices=['mean_gaussian', 'mean_gassian', 'native_categorical'],
+                      help='How to sample target speed during PPO. native_categorical samples TFv6 speed bins directly; mean_gaussian keeps the old scalar-mean + noise path.')
     parser.add_argument('--route_sampling_technique',
                       type=str,
                       default=getattr(config, 'route_sampling_technique', 'spline_curvature_perturbation'),
@@ -1315,6 +1321,26 @@ def main():
         (local_bs_per_env, args.num_envs_per_proc) + env.single_action_space.shape,
         device=device,
     )
+    use_native_categorical_speed = bool(
+        agent.module.action_noise_codec.use_native_categorical_speed
+    )
+    target_speed_logits_dim = (
+        len(agent.module.training_config.target_speed_classes)
+        if use_native_categorical_speed
+        else 0
+    )
+    old_target_speed_logits = None
+    if use_native_categorical_speed:
+        old_target_speed_logits = torch.zeros(
+            (local_bs_per_env, args.num_envs_per_proc, target_speed_logits_dim),
+            device=device,
+        )
+    old_ref_target_speed_logits = None
+    if use_native_categorical_speed and getattr(config, "use_kl_to_reference", False):
+        old_ref_target_speed_logits = torch.zeros(
+            (local_bs_per_env, args.num_envs_per_proc, target_speed_logits_dim),
+            device=device,
+        )
     logprobs = torch.zeros((local_bs_per_env, args.num_envs_per_proc), device=device)
     rewards = torch.zeros((local_bs_per_env, args.num_envs_per_proc), device=device)
     dones = torch.zeros((local_bs_per_env, args.num_envs_per_proc), device=device)
@@ -1524,7 +1550,7 @@ def main():
                     mu,
                     noise_pred,
                     _,
-                    _,
+                    base_target_speed_logits,
                     diag_log_std,
                     next_lstm_state,
                 ) = agent.forward(next_obs, lstm_state=next_lstm_state, done=next_done)
@@ -1532,9 +1558,12 @@ def main():
                     value_pdf = F.softmax(value, dim=1)
                     value = torch.sum(value_pdf * hl_gauss_bins.unsqueeze(0), dim=1)
                 if getattr(config, "use_kl_to_reference", False):
-                    ref_mu = agent.module.get_reference_action_mean(next_obs)
+                    ref_mu, ref_target_speed_logits = (
+                        agent.module.get_reference_policy_outputs(next_obs)
+                    )
                 else:
                     ref_mu = mu
+                    ref_target_speed_logits = base_target_speed_logits
                 inference_times.append(t1.tocvalue())
                 values[step] = value.flatten()
             actions[step] = action
@@ -1543,6 +1572,19 @@ def main():
             old_ref_mus[step] = ref_mu
             old_noise_preds[step] = noise_pred
             old_diag_log_stds[step] = diag_log_std
+            if old_target_speed_logits is not None:
+                if base_target_speed_logits is None:
+                    raise RuntimeError(
+                        "native_categorical speed sampling expects target-speed logits."
+                    )
+                old_target_speed_logits[step] = base_target_speed_logits
+            if old_ref_target_speed_logits is not None:
+                if ref_target_speed_logits is None:
+                    raise RuntimeError(
+                        "Reference TFv6 must provide target-speed logits when "
+                        "native_categorical speed sampling is enabled."
+                    )
+                old_ref_target_speed_logits[step] = ref_target_speed_logits
 
             # TRY NOT TO MODIFY: execute the game and log data.
             t2.tic()
@@ -1580,6 +1622,14 @@ def main():
                         ),
                         mean_action=np.clip(
                             mu[env_idx].detach().cpu().numpy(), -1.0, 1.0
+                        ),
+                        target_speed_logits=(
+                            None
+                            if base_target_speed_logits is None
+                            else base_target_speed_logits[env_idx]
+                            .detach()
+                            .cpu()
+                            .numpy()
                         ),
                         log_std=diag_log_std[env_idx].detach().cpu().numpy(),
                         value_estimate=float(value[env_idx].item()),
@@ -1726,6 +1776,16 @@ def main():
         b_old_diag_log_stds = old_diag_log_stds[:num_collected_steps].reshape(
             (-1,) + env.single_action_space.shape
         )
+        b_old_target_speed_logits = None
+        if old_target_speed_logits is not None:
+            b_old_target_speed_logits = old_target_speed_logits[
+                :num_collected_steps
+            ].reshape((-1, target_speed_logits_dim))
+        b_old_ref_target_speed_logits = None
+        if old_ref_target_speed_logits is not None:
+            b_old_ref_target_speed_logits = old_ref_target_speed_logits[
+                :num_collected_steps
+            ].reshape((-1, target_speed_logits_dim))
         b_exploration_suggests = exploration_suggests[:num_collected_steps].reshape(-1)
 
         # When the data was collected on the CPU, move it to GPU before training
@@ -1740,6 +1800,10 @@ def main():
             b_old_ref_mus = b_old_ref_mus.to(device)
             b_old_noise_preds = b_old_noise_preds.to(device)
             b_old_diag_log_stds = b_old_diag_log_stds.to(device)
+            if b_old_target_speed_logits is not None:
+                b_old_target_speed_logits = b_old_target_speed_logits.to(device)
+            if b_old_ref_target_speed_logits is not None:
+                b_old_ref_target_speed_logits = b_old_ref_target_speed_logits.to(device)
 
         # Synchronize all processes
         torch.distributed.barrier()
@@ -1889,7 +1953,7 @@ def main():
                     _,
                     new_noise_pred,
                     distribution,
-                    pred_sem,
+                    new_target_speed_logits,
                     _diag_log_std,
                     _,
                 ) = agent.forward(
@@ -1981,13 +2045,16 @@ def main():
                             ref_mu_sampled,
                             new_noise_pred.detach(),
                             from_head=False,
+                            speed_logits=(
+                                None
+                                if b_old_ref_target_speed_logits is None
+                                else b_old_ref_target_speed_logits[mb_inds]
+                            ),
                         )
                     )
-                    kl_to_ref = torch.distributions.kl_divergence(
-                        distribution, ref_distribution.distribution
+                    kl_to_ref = agent.module.action_noise_codec.kl_divergence(
+                        distribution, ref_distribution
                     )
-                    if kl_to_ref.ndim > 1:
-                        kl_to_ref = kl_to_ref.sum(dim=1)
                     kl_to_reference_loss = kl_to_ref.mean()
                     kl_to_reference_values.append(kl_to_reference_loss.detach())
                 loss = (
@@ -2036,11 +2103,18 @@ def main():
                     # We compute approx KL according to roach
                     old_distribution, _ = (
                         agent.module.action_noise_codec.proba_distribution(
-                            old_mu_sampled, old_noise_preds_sampled, from_head=False
+                            old_mu_sampled,
+                            old_noise_preds_sampled,
+                            from_head=False,
+                            speed_logits=(
+                                None
+                                if b_old_target_speed_logits is None
+                                else b_old_target_speed_logits[mb_inds]
+                            ),
                         )
                     )
-                    kl_div = torch.distributions.kl_divergence(
-                        old_distribution.distribution, distribution
+                    kl_div = agent.module.action_noise_codec.kl_divergence(
+                        old_distribution, distribution
                     )
                     approx_kl_divs.append(kl_div.mean())
 
@@ -2229,26 +2303,36 @@ def main():
                     config.global_step,
                 )
             # Policy uncertainty diagnostics from rollout-time log_std samples.
-            rollout_log_std = b_old_diag_log_stds
+            noise_codec = agent.module.action_noise_codec
+            rollout_log_std = b_old_diag_log_stds[
+                :, : noise_codec.continuous_action_dim
+            ]
             rollout_std = torch.exp(rollout_log_std)
-            writer.add_scalar(
-                "policy/log_std_mean", rollout_log_std.mean().item(), config.global_step
-            )
-            writer.add_scalar(
-                "policy/log_std_min", rollout_log_std.min().item(), config.global_step
-            )
-            writer.add_scalar(
-                "policy/log_std_max", rollout_log_std.max().item(), config.global_step
-            )
-            writer.add_scalar(
-                "policy/std_mean", rollout_std.mean().item(), config.global_step
-            )
-            writer.add_scalar(
-                "policy/std_min", rollout_std.min().item(), config.global_step
-            )
-            writer.add_scalar(
-                "policy/std_max", rollout_std.max().item(), config.global_step
-            )
+            if rollout_log_std.numel() > 0:
+                writer.add_scalar(
+                    "policy/log_std_mean",
+                    rollout_log_std.mean().item(),
+                    config.global_step,
+                )
+                writer.add_scalar(
+                    "policy/log_std_min",
+                    rollout_log_std.min().item(),
+                    config.global_step,
+                )
+                writer.add_scalar(
+                    "policy/log_std_max",
+                    rollout_log_std.max().item(),
+                    config.global_step,
+                )
+                writer.add_scalar(
+                    "policy/std_mean", rollout_std.mean().item(), config.global_step
+                )
+                writer.add_scalar(
+                    "policy/std_min", rollout_std.min().item(), config.global_step
+                )
+                writer.add_scalar(
+                    "policy/std_max", rollout_std.max().item(), config.global_step
+                )
 
             action_codec = agent.module.action_codec
             if action_codec.predict_route:
@@ -2266,13 +2350,40 @@ def main():
                     config.global_step,
                 )
             if action_codec.predict_target_speed:
-                speed_slice = action_codec.slices.target_speed
-                writer.add_scalar(
-                    "policy/std_target_speed",
-                    rollout_std[:, speed_slice].mean().item(),
-                    config.global_step,
-                )
-            noise_codec = agent.module.action_noise_codec
+                if noise_codec.use_native_categorical_speed:
+                    if b_old_target_speed_logits is None:
+                        raise RuntimeError(
+                            "Missing target-speed logits for native_categorical policy "
+                            "logging."
+                        )
+                    speed_categorical = torch.distributions.Categorical(
+                        logits=b_old_target_speed_logits
+                    )
+                    writer.add_scalar(
+                        "policy/target_speed_cat_entropy",
+                        speed_categorical.entropy().mean().item(),
+                        config.global_step,
+                    )
+                    speed_values = noise_codec.speed_values.to(
+                        device=b_old_target_speed_logits.device,
+                        dtype=b_old_target_speed_logits.dtype,
+                    )
+                    speed_probs = speed_categorical.probs
+                    expected_speed = (speed_probs * speed_values.unsqueeze(0)).sum(
+                        dim=1
+                    ) * action_codec.speed_scale
+                    writer.add_scalar(
+                        "policy/target_speed_expected",
+                        expected_speed.mean().item(),
+                        config.global_step,
+                    )
+                else:
+                    speed_slice = action_codec.slices.target_speed
+                    writer.add_scalar(
+                        "policy/std_target_speed",
+                        rollout_std[:, speed_slice].mean().item(),
+                        config.global_step,
+                    )
             for idx, group_name in enumerate(noise_codec.noise_pred_names):
                 writer.add_scalar(
                     f"policy/noise_pred_{group_name}",

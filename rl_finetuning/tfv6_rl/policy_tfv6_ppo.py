@@ -99,6 +99,7 @@ class TFv6PPOPolicy(nn.Module):
         self.log_std_init_speed = None
         self.log_std_min = -5.0
         self.log_std_max = 1.0
+        self.speed_sampling_style = "native_categorical"
         self.action_noise_dist = "gaussian"
         self.route_sampling_technique = "spline_curvature_perturbation"
         self.heading_amplitude1_std_init = 0.07
@@ -141,6 +142,17 @@ class TFv6PPOPolicy(nn.Module):
             )
             self.log_std_max = float(
                 getattr(rl_config, "log_std_max", self.log_std_max)
+            )
+            self.speed_sampling_style = str(
+                getattr(
+                    rl_config,
+                    "speed_sampling_style",
+                    getattr(
+                        rl_config,
+                        "speed_samping_style",
+                        self.speed_sampling_style,
+                    ),
+                )
             )
             self.action_noise_dist = str(
                 getattr(rl_config, "action_noise_dist", self.action_noise_dist)
@@ -220,6 +232,13 @@ class TFv6PPOPolicy(nn.Module):
                     self.train_planning_decoder_only,
                 )
             )
+        if self.speed_sampling_style == "mean_gassian":
+            self.speed_sampling_style = "mean_gaussian"
+        if self.speed_sampling_style not in ("mean_gaussian", "native_categorical"):
+            raise ValueError(
+                "speed_sampling_style must be one of "
+                "{'mean_gaussian', 'native_categorical'}"
+            )
 
         self._configure_trainable_tfv6_modules()
         self.reference_tfv6 = None
@@ -247,6 +266,7 @@ class TFv6PPOPolicy(nn.Module):
             path_std_base_frac=self.path_std_base_frac,
             lowrank_route_rank=self.lowrank_route_rank,
             lowrank_route_std_init=self.lowrank_route_std_init,
+            speed_sampling_style=self.speed_sampling_style,
         )
         self.action_dist = self.action_noise_codec.action_dist
         self.privileged_obs_key = "privileged_measurements"
@@ -386,7 +406,9 @@ class TFv6PPOPolicy(nn.Module):
         return self.action_noise_head(value_features)
 
     @torch.no_grad()
-    def get_reference_action_mean(self, obs_dict) -> torch.Tensor:
+    def get_reference_policy_outputs(
+        self, obs_dict
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.reference_tfv6 is None:
             raise RuntimeError("Reference TFv6 is not enabled.")
         with torch.amp.autocast(
@@ -411,9 +433,20 @@ class TFv6PPOPolicy(nn.Module):
             if self.action_codec.predict_target_speed
             else None
         )
-        return self.action_codec.encode(
+        ref_action_mean = self.action_codec.encode(
             ref_route, ref_waypoints, ref_target_speed
         ).float()
+        ref_target_speed_logits = (
+            ref_predictions.pred_target_speed_distribution.float().detach()
+            if ref_predictions.pred_target_speed_distribution is not None
+            else None
+        )
+        return ref_action_mean, ref_target_speed_logits
+
+    @torch.no_grad()
+    def get_reference_action_mean(self, obs_dict) -> torch.Tensor:
+        ref_action_mean, _ = self.get_reference_policy_outputs(obs_dict)
+        return ref_action_mean
 
     def get_value(self, obs_dict, *_args, **_kwargs) -> torch.Tensor:
         with torch.amp.autocast(
@@ -458,12 +491,19 @@ class TFv6PPOPolicy(nn.Module):
             if self.action_codec.predict_target_speed
             else None
         )
+        target_speed_logits = (
+            predictions.pred_target_speed_distribution.float()
+            if predictions.pred_target_speed_distribution is not None
+            else None
+        )
 
         action_mean = self.action_codec.encode(route, waypoints, target_speed).float()
         value_features = self._build_value_and_noise_features(obs_dict)
         noise_pred = self.predict_action_noise(value_features)
         dist, noise_diag = self.action_noise_codec.proba_distribution(
-            action_mean, noise_pred
+            action_mean,
+            noise_pred,
+            speed_logits=target_speed_logits,
         )
 
         if actions is None:
@@ -493,8 +533,8 @@ class TFv6PPOPolicy(nn.Module):
             exp_loss,
             action_mean.detach(),
             noise_diag.noise_pred.detach(),
-            dist.distribution,
-            None,
+            dist,
+            None if target_speed_logits is None else target_speed_logits.detach(),
             noise_diag.diag_log_std.detach(),
             lstm_state,
         )

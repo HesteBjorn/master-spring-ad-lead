@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
-from torch.distributions import Beta, MultivariateNormal, Normal
+from torch.distributions import Beta, Categorical, MultivariateNormal, Normal
 
 from rl_finetuning.tfv6_rl.action_codec import ActionCodec
 
@@ -387,6 +387,118 @@ class NoiseDiagnostics:
     path_amp2_std: torch.Tensor | None = None
 
 
+class HybridActionDistribution:
+    """Continuous route/waypoint distribution plus native categorical speed bins."""
+
+    def __init__(
+        self,
+        continuous_dist: nn.Module | None,
+        speed_logits: torch.Tensor,
+        speed_values: torch.Tensor,
+        continuous_action_dim: int,
+    ) -> None:
+        self.continuous_dist = continuous_dist
+        self.speed_categorical = Categorical(logits=speed_logits.float())
+        self.speed_values = speed_values.to(
+            device=speed_logits.device, dtype=speed_logits.dtype
+        )
+        self.continuous_action_dim = int(continuous_action_dim)
+        self.distribution = self
+
+    def _split_actions(
+        self, actions: torch.Tensor
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        if actions.ndim == 1:
+            actions = actions.unsqueeze(0)
+        continuous_actions = None
+        if self.continuous_action_dim > 0:
+            continuous_actions = actions[:, : self.continuous_action_dim]
+        speed_actions = actions[:, self.continuous_action_dim]
+        return continuous_actions, speed_actions
+
+    def _compose_actions(
+        self, continuous_actions: torch.Tensor | None, speed_actions: torch.Tensor
+    ) -> torch.Tensor:
+        if continuous_actions is None:
+            return speed_actions.unsqueeze(1)
+        return torch.cat((continuous_actions, speed_actions.unsqueeze(1)), dim=1)
+
+    def _speed_indices(self, speed_actions: torch.Tensor) -> torch.Tensor:
+        if speed_actions.ndim == 2:
+            speed_actions = speed_actions.squeeze(1)
+        diffs = (speed_actions.unsqueeze(1) - self.speed_values.unsqueeze(0)).abs()
+        return diffs.argmin(dim=1)
+
+    def log_prob(self, actions: torch.Tensor) -> torch.Tensor:
+        continuous_actions, speed_actions = self._split_actions(actions)
+        log_prob = torch.zeros(
+            speed_actions.shape[0],
+            device=speed_actions.device,
+            dtype=speed_actions.dtype,
+        )
+        if continuous_actions is not None and self.continuous_dist is not None:
+            log_prob = log_prob + self.continuous_dist.log_prob(continuous_actions).to(
+                log_prob.dtype
+            )
+        speed_indices = self._speed_indices(speed_actions)
+        log_prob = log_prob + self.speed_categorical.log_prob(speed_indices).to(
+            log_prob.dtype
+        )
+        return log_prob
+
+    def entropy(self) -> torch.Tensor:
+        entropy = self.speed_categorical.entropy()
+        if self.continuous_dist is not None:
+            continuous_entropy = self.continuous_dist.entropy()
+            if continuous_entropy.ndim > 1:
+                continuous_entropy = continuous_entropy.sum(dim=1)
+            entropy = entropy.to(continuous_entropy.dtype) + continuous_entropy
+        return entropy
+
+    def sample(self) -> torch.Tensor:
+        continuous_actions = None
+        if self.continuous_dist is not None:
+            continuous_actions = self.continuous_dist.sample()
+        speed_indices = self.speed_categorical.sample()
+        speed_actions = self.speed_values[speed_indices]
+        return self._compose_actions(continuous_actions, speed_actions)
+
+    def mode(self) -> torch.Tensor:
+        continuous_actions = None
+        if self.continuous_dist is not None:
+            continuous_actions = self.continuous_dist.mode()
+        speed_probs = self.speed_categorical.probs.to(self.speed_values.dtype)
+        speed_actions = (speed_probs * self.speed_values.unsqueeze(0)).sum(dim=1)
+        return self._compose_actions(continuous_actions, speed_actions)
+
+    def get_actions(self, sample_type: str = "sample") -> torch.Tensor:
+        if sample_type in ("mean", "mode", "deterministic"):
+            return self.mode()
+        return self.sample()
+
+    def exploration_loss(self, *_args, **_kwargs) -> torch.Tensor:
+        return torch.zeros(
+            (),
+            device=self.speed_categorical.logits.device,
+            dtype=self.speed_values.dtype,
+        )
+
+    def kl_divergence(self, other: HybridActionDistribution) -> torch.Tensor:
+        kl_terms = []
+        if self.continuous_dist is not None and other.continuous_dist is not None:
+            continuous_kl = torch.distributions.kl_divergence(
+                self.continuous_dist.distribution, other.continuous_dist.distribution
+            )
+            if continuous_kl.ndim > 1:
+                continuous_kl = continuous_kl.sum(dim=1)
+            kl_terms.append(continuous_kl)
+        categorical_kl = torch.distributions.kl_divergence(
+            self.speed_categorical, other.speed_categorical
+        )
+        kl_terms.append(categorical_kl)
+        return torch.stack(kl_terms, dim=0).sum(dim=0)
+
+
 class ActionNoiseCodec:
     """Owns noise-head parameterization (grouped) and distribution construction."""
 
@@ -413,8 +525,9 @@ class ActionNoiseCodec:
         beta_eps: float = 1e-4,
         beta_concentration_min: float = 2.0,
         beta_concentration_max: float = 200.0,
+        speed_sampling_style: str = "native_categorical",
     ) -> None:
-        self.action_codec = action_codec
+        self.full_action_codec = action_codec
         self.distribution_type = str(distribution_type)
         self.sampling_technique = str(sampling_technique)
         self.use_correlated_gaussian = bool(use_correlated_gaussian)
@@ -430,6 +543,34 @@ class ActionNoiseCodec:
         self.beta_eps = float(beta_eps)
         self.beta_concentration_min = float(beta_concentration_min)
         self.beta_concentration_max = float(beta_concentration_max)
+        self.speed_sampling_style = str(speed_sampling_style)
+        if self.speed_sampling_style == "mean_gassian":
+            self.speed_sampling_style = "mean_gaussian"
+        if self.speed_sampling_style not in ("mean_gaussian", "native_categorical"):
+            raise ValueError(
+                "speed_sampling_style must be one of "
+                "{'mean_gaussian', 'native_categorical'}"
+            )
+        self.use_native_categorical_speed = bool(
+            self.speed_sampling_style == "native_categorical"
+            and self.full_action_codec.predict_target_speed
+        )
+        self.action_codec = self.full_action_codec
+        if self.use_native_categorical_speed:
+            self.action_codec = ActionCodec(
+                self.full_action_codec.config,
+                use_route=self.full_action_codec.predict_route,
+                use_waypoints=self.full_action_codec.predict_waypoints,
+                use_target_speed=False,
+            )
+            self.speed_values = torch.tensor(
+                self.full_action_codec.config.target_speed_classes,
+                dtype=torch.float32,
+            ) / float(self.full_action_codec.config.max_speed)
+        else:
+            self.speed_values = None
+        self.continuous_action_dim = int(self.action_codec.action_dim)
+        self.full_action_dim = int(self.full_action_codec.action_dim)
 
         self.group_names: list[str] = []
         self.group_slices: list[slice] = []
@@ -442,7 +583,7 @@ class ActionNoiseCodec:
         if self.action_codec.predict_target_speed:
             self.group_names.append("target_speed")
             self.group_slices.append(self.action_codec.slices.target_speed)
-        if not self.group_names:
+        if not self.group_names and not self.use_native_categorical_speed:
             raise RuntimeError("No active action heads found for ActionNoiseCodec.")
 
         if self.sampling_technique not in (
@@ -493,14 +634,16 @@ class ActionNoiseCodec:
             self.noise_pred_dim = self.base_noise_pred_dim + (
                 2 if self.use_spline_curvature_sampler else 0
             )
-            if self.use_lowrank_diag_route_sampler:
+            if self.base_noise_pred_dim == 0:
+                self.action_dist = None
+            elif self.use_lowrank_diag_route_sampler:
                 self.action_dist = LowRankDiagRouteGaussianDistribution(
                     self.action_codec,
                     route_lowrank_rank=self.lowrank_route_rank,
                     route_lowrank_std=self.lowrank_route_std_init,
                 )
             elif self.use_correlated_gaussian:
-                self.action_dist: nn.Module = CorrelatedGaussianDistribution(
+                self.action_dist = CorrelatedGaussianDistribution(
                     self.action_codec, rho=self.correlated_noise_rho
                 )
             else:
@@ -513,11 +656,14 @@ class ActionNoiseCodec:
             self.noise_pred_dim = len(
                 self.group_names
             )  # one concentration per active head type
-            self.action_dist = DiagBetaDistribution(
-                eps=self.beta_eps,
-                concentration_min=self.beta_concentration_min,
-                concentration_max=self.beta_concentration_max,
-            )
+            if self.base_noise_pred_dim == 0:
+                self.action_dist = None
+            else:
+                self.action_dist = DiagBetaDistribution(
+                    eps=self.beta_eps,
+                    concentration_min=self.beta_concentration_min,
+                    concentration_max=self.beta_concentration_max,
+                )
         else:
             raise ValueError(
                 f"Unsupported action noise distribution: {self.distribution_type}"
@@ -527,6 +673,24 @@ class ActionNoiseCodec:
             self.noise_pred_names.extend(
                 ("heading_amplitude1_log_std", "heading_amplitude2_log_std")
             )
+
+    def _pad_speed_diagnostics(self, diag: NoiseDiagnostics) -> NoiseDiagnostics:
+        if not self.use_native_categorical_speed:
+            return diag
+        batch_size = diag.diag_log_std.shape[0]
+        speed_log_std = torch.zeros(
+            (batch_size, 1),
+            device=diag.diag_log_std.device,
+            dtype=diag.diag_log_std.dtype,
+        )
+        speed_std = torch.ones_like(speed_log_std)
+        return NoiseDiagnostics(
+            noise_pred=diag.noise_pred,
+            diag_std=torch.cat((diag.diag_std, speed_std), dim=1),
+            diag_log_std=torch.cat((diag.diag_log_std, speed_log_std), dim=1),
+            path_amp1_std=diag.path_amp1_std,
+            path_amp2_std=diag.path_amp2_std,
+        )
 
     def expand_group_values(self, grouped_values: torch.Tensor) -> torch.Tensor:
         if grouped_values.ndim != 2 or grouped_values.shape[1] != len(self.group_names):
@@ -754,22 +918,56 @@ class ActionNoiseCodec:
         noise_pred: torch.Tensor,
         *,
         from_head: bool = True,
-    ) -> tuple[nn.Module, NoiseDiagnostics]:
+        speed_logits: torch.Tensor | None = None,
+    ) -> tuple[nn.Module | HybridActionDistribution, NoiseDiagnostics]:
         if mean_actions.ndim == 1:
             mean_actions = mean_actions.unsqueeze(0)
         if noise_pred.ndim == 1:
             noise_pred = noise_pred.unsqueeze(0)
+        continuous_mean_actions = mean_actions[:, : self.continuous_action_dim]
         if from_head:
-            diag = self.diagnostics_from_head(mean_actions, noise_pred)
+            diag = self.diagnostics_from_head(continuous_mean_actions, noise_pred)
         else:
-            diag = self.diagnostics_from_noise_pred(mean_actions, noise_pred)
-        if self.distribution_type == "gaussian":
-            dist = self.action_dist.proba_distribution(mean_actions, diag.diag_log_std)
-        else:
+            diag = self.diagnostics_from_noise_pred(continuous_mean_actions, noise_pred)
+        dist: nn.Module | HybridActionDistribution | None = None
+        if self.action_dist is not None and self.distribution_type == "gaussian":
             dist = self.action_dist.proba_distribution(
-                mean_actions, self.expand_group_values(diag.noise_pred)
+                continuous_mean_actions, diag.diag_log_std
             )
-        return dist, diag
+        elif self.action_dist is not None:
+            dist = self.action_dist.proba_distribution(
+                continuous_mean_actions, self.expand_group_values(diag.noise_pred)
+            )
+        if self.use_native_categorical_speed:
+            if speed_logits is None:
+                raise ValueError(
+                    "native_categorical speed sampling requires target-speed logits."
+                )
+            dist = HybridActionDistribution(
+                continuous_dist=dist,
+                speed_logits=speed_logits,
+                speed_values=self.speed_values,
+                continuous_action_dim=self.continuous_action_dim,
+            )
+        if dist is None:
+            raise RuntimeError("No action distribution constructed.")
+        return dist, self._pad_speed_diagnostics(diag)
+
+    def kl_divergence(
+        self,
+        old_dist: nn.Module | HybridActionDistribution,
+        new_dist: nn.Module | HybridActionDistribution,
+    ) -> torch.Tensor:
+        if self.use_native_categorical_speed:
+            assert isinstance(old_dist, HybridActionDistribution)
+            assert isinstance(new_dist, HybridActionDistribution)
+            return old_dist.kl_divergence(new_dist)
+        kl_div = torch.distributions.kl_divergence(
+            old_dist.distribution, new_dist.distribution
+        )
+        if kl_div.ndim > 1:
+            kl_div = kl_div.sum(dim=1)
+        return kl_div
 
     def _sample_spline_curvature_routes(
         self,

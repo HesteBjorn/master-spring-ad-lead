@@ -663,7 +663,11 @@ def main():
         value_features = policy._build_value_features().float()
         noise_pred = policy.predict_action_noise(value_features)
         dist, noise_diag = policy.action_noise_codec.proba_distribution(
-            action_mean, noise_pred
+            action_mean,
+            noise_pred,
+            speed_logits=predictions.pred_target_speed_distribution.float()
+            if predictions.pred_target_speed_distribution is not None
+            else None,
         )
 
         sampled_routes = []
