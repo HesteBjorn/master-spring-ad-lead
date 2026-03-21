@@ -187,6 +187,10 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         self.num_send = 0
         self.last_input_data = None
         self.debug = int(os.environ.get("TFV6_RL_DEBUG", "0")) == 1
+        self.standstill_speed_hold_remaining = 0
+        self.standstill_speed_hold_reward_accumulator = 0.0
+        self.pending_speed_hold_frames = 0
+        self.pending_speed_hold_target_speed = None
 
     def set_global_plan(self, global_plan_world_coord):
         self.dense_global_plan_world_coord = global_plan_world_coord
@@ -215,6 +219,10 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         self.data = None
         self.last_timestamp = 0.0
         self.last_control = None
+        self.standstill_speed_hold_remaining = 0
+        self.standstill_speed_hold_reward_accumulator = 0.0
+        self.pending_speed_hold_frames = 0
+        self.pending_speed_hold_target_speed = None
         # Route-local state must be reset each route. The leaderboard reuses the
         # same agent instance across route repetitions.
         self.initialized_route = False
@@ -361,6 +369,8 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         self.route_planner = CarlaRoutePlanner()
         self.route_planner.set_route(self.dense_global_plan_world_coord)
 
+        self.pending_speed_hold_frames = 0
+        self.pending_speed_hold_target_speed = None
         self.initialized_route = True
 
     def get_waypoint_route(self):
@@ -600,6 +610,12 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         info = dict(base_info)
         info["route_completion"] = self._get_route_completion_percent()
         info["infraction_type"] = str(info.get("infraction_type", "") or "")
+        info["speed_hold_frames"] = int(self.pending_speed_hold_frames)
+        info["speed_hold_target_speed"] = (
+            float(self.pending_speed_hold_target_speed)
+            if self.pending_speed_hold_target_speed is not None
+            else float("nan")
+        )
         if truncation and info["infraction_type"] in ("", "finished_route"):
             info["route_completion"] = 100.0
         return info
@@ -617,11 +633,81 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
                 np.array(info["n_steps"], dtype=np.int32),
                 np.array(info["suggest"], dtype=np.int32),
                 np.array(info["route_completion"], dtype=np.float32),
+                np.array(info["speed_hold_frames"], dtype=np.int32),
+                np.array(info["speed_hold_target_speed"], dtype=np.float32),
                 info["infraction_type"].encode("utf-8"),
                 np.array(self.num_send, dtype=np.uint64),
             ),
             copy=False,
         )
+        self.pending_speed_hold_frames = 0
+        self.pending_speed_hold_target_speed = None
+
+    def _reset_standstill_speed_hold(self) -> None:
+        self.standstill_speed_hold_remaining = 0
+        self.standstill_speed_hold_reward_accumulator = 0.0
+
+    def _should_start_standstill_speed_hold(
+        self, *, speed: float, target_speed: float | None
+    ) -> bool:
+        if not bool(getattr(self.rl_config, "standstill_speed_hold_enabled", False)):
+            return False
+        hold_frames = int(getattr(self.rl_config, "standstill_speed_hold_frames", 1))
+        if hold_frames <= 1 or target_speed is None:
+            return False
+
+        ego_speed_threshold = float(
+            max(
+                getattr(
+                    self.rl_config, "standstill_speed_hold_ego_speed_threshold", 0.1
+                ),
+                0.0,
+            )
+        )
+        target_speed_threshold = float(
+            max(
+                getattr(
+                    self.rl_config,
+                    "standstill_speed_hold_target_speed_threshold",
+                    1.0 / 3.6,
+                ),
+                0.0,
+            )
+        )
+        return (
+            float(speed) <= ego_speed_threshold
+            and float(target_speed) > target_speed_threshold
+        )
+
+    def _build_step_data(self, input_data, timestamp: float, waypoint_route) -> dict:
+        obs = self.preprocess_observation(input_data)
+        if self.debug and self.step == 0:
+            obs_shapes = {k: v.shape for k, v in obs.items()}
+            print(
+                f"[TFv6RL] obs_shapes={obs_shapes}, action_dim={self.action_codec.action_dim}"
+            )
+
+        reward, termination, truncation, exploration_suggest = self.reward_handler.get(
+            timestamp,
+            waypoint_route,
+            False,
+            (),
+            (),
+            (),
+            0.0,
+        )
+        if bool(getattr(self.rl_config, "use_value_measurements", False)):
+            obs["privileged_measurements"] = self._build_privileged_measurements(
+                timestamp, waypoint_route
+            )
+
+        return {
+            "observation": obs,
+            "reward": float(reward),
+            "termination": termination,
+            "truncation": truncation,
+            "info": self._build_env_info(exploration_suggest, truncation=truncation),
+        }
 
     def run_step(self, input_data, timestamp, sensors=None):
         self.step += 1
@@ -652,38 +738,30 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
             return self.last_control
 
         waypoint_route = self.get_waypoint_route()
-        obs = self.preprocess_observation(input_data)
-        if self.debug and self.step == 0:
-            obs_shapes = {k: v.shape for k, v in obs.items()}
-            print(
-                f"[TFv6RL] obs_shapes={obs_shapes}, action_dim={self.action_codec.action_dim}"
-            )
+        data = self._build_step_data(input_data, timestamp, waypoint_route)
 
-        reward, termination, truncation, exploration_suggest = self.reward_handler.get(
-            timestamp,
-            waypoint_route,
-            False,
-            (),
-            (),
-            (),
-            0.0,
-        )
-        if bool(getattr(self.rl_config, "use_value_measurements", False)):
-            obs["privileged_measurements"] = self._build_privileged_measurements(
-                timestamp, waypoint_route
-            )
+        if self.standstill_speed_hold_remaining > 0:
+            self.standstill_speed_hold_reward_accumulator += data["reward"]
+            if data["termination"] or data["truncation"]:
+                data["reward"] = self.standstill_speed_hold_reward_accumulator
+                self._reset_standstill_speed_hold()
+                self.termination = data["termination"]
+                self.truncation = data["truncation"]
+                self.data = data
+                raise NextRoute("Episode ended by reward.")
 
-        data = {
-            "observation": obs,
-            "reward": reward,
-            "termination": termination,
-            "truncation": truncation,
-            "info": self._build_env_info(exploration_suggest, truncation=truncation),
-        }
+            self.standstill_speed_hold_remaining -= 1
+            self.control = self.last_control
+            return self.last_control
 
-        if termination or truncation:
-            self.termination = termination
-            self.truncation = truncation
+        if self.standstill_speed_hold_reward_accumulator > 0.0:
+            data["reward"] += self.standstill_speed_hold_reward_accumulator
+            self.standstill_speed_hold_reward_accumulator = 0.0
+
+        if data["termination"] or data["truncation"]:
+            self._reset_standstill_speed_hold()
+            self.termination = data["termination"]
+            self.truncation = data["truncation"]
             self.data = data
             raise NextRoute("Episode ended by reward.")
 
@@ -694,7 +772,7 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         action = np.frombuffer(self.socket.recv(copy=False), dtype=np.float32)
         route, waypoints, target_speed = self.action_codec.decode(action)
 
-        speed = obs["speed"][0]
+        speed = data["observation"]["speed"][0]
         control = carla.VehicleControl(steer=0.0, throttle=0.0, brake=1.0)
 
         if route is not None and target_speed is not None:
@@ -723,6 +801,20 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
 
         self.last_control = control
         self.control = control
+        sampled_target_speed = (
+            None
+            if target_speed is None
+            else float(np.asarray(target_speed).reshape(-1)[0])
+        )
+        if self._should_start_standstill_speed_hold(
+            speed=float(speed), target_speed=sampled_target_speed
+        ):
+            hold_frames = int(
+                max(getattr(self.rl_config, "standstill_speed_hold_frames", 1), 1)
+            )
+            self.standstill_speed_hold_remaining = max(hold_frames - 1, 0)
+            self.pending_speed_hold_frames = hold_frames
+            self.pending_speed_hold_target_speed = sampled_target_speed
         return control
 
     def destroy(self, results=None):
@@ -743,34 +835,22 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
             waypoint_route = self.get_waypoint_route()
             if self.last_input_data is None:
                 return
-            obs = self.preprocess_observation(self.last_input_data)
-            reward, termination, _, exploration_suggest = self.reward_handler.get(
-                self.last_timestamp,
-                waypoint_route,
-                False,
-                (),
-                (),
-                (),
-                0.0,
+            data = self._build_step_data(
+                self.last_input_data, self.last_timestamp, waypoint_route
             )
-            if bool(getattr(self.rl_config, "use_value_measurements", False)):
-                obs["privileged_measurements"] = self._build_privileged_measurements(
-                    self.last_timestamp, waypoint_route
-                )
+            if self.standstill_speed_hold_reward_accumulator > 0.0:
+                data["reward"] += self.standstill_speed_hold_reward_accumulator
+            self._reset_standstill_speed_hold()
             term = False
             trunc = True
-            if termination:
+            if data["termination"]:
                 term = True
                 trunc = False
-            data = {
-                "observation": obs,
-                "reward": reward,
-                "termination": term,
-                "truncation": trunc,
-                "info": self._build_env_info(exploration_suggest, truncation=trunc),
-            }
+            data["termination"] = term
+            data["truncation"] = trunc
 
         self._send_env_data(data)
+        self._reset_standstill_speed_hold()
         if hasattr(self, "reward_handler"):
             try:
                 self.reward_handler.destroy()

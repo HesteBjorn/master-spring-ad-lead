@@ -167,6 +167,10 @@ class PPORolloutVisualizer:
         every_n: int = 1,
         max_images: int = 0,
         image_scale: int = 3,
+        standstill_speed_hold_enabled: bool = False,
+        standstill_speed_hold_frames: int = 1,
+        standstill_speed_hold_ego_speed_threshold: float = 0.1,
+        standstill_speed_hold_target_speed_threshold: float = 1.0 / 3.6,
     ) -> None:
         self.training_config = training_config
         self.action_codec = action_codec
@@ -175,6 +179,14 @@ class PPORolloutVisualizer:
         self.every_n = max(1, int(every_n))
         self.max_images = max(0, int(max_images))
         self.image_scale = max(1, int(image_scale))
+        self.standstill_speed_hold_enabled = bool(standstill_speed_hold_enabled)
+        self.standstill_speed_hold_frames = max(1, int(standstill_speed_hold_frames))
+        self.standstill_speed_hold_ego_speed_threshold = float(
+            standstill_speed_hold_ego_speed_threshold
+        )
+        self.standstill_speed_hold_target_speed_threshold = float(
+            standstill_speed_hold_target_speed_threshold
+        )
         os.makedirs(self.output_dir, exist_ok=True)
         self.images_written = 0
         self.episode_returns = [0.0 for _ in range(max(1, num_envs))]
@@ -520,6 +532,7 @@ class PPORolloutVisualizer:
         mean_speed: float,
         sampled_speed: float | None,
         current_speed: float,
+        hold_indicator_text: str | None,
     ) -> None:
         if w < 220 or h < 140:
             return
@@ -654,6 +667,17 @@ class PPORolloutVisualizer:
             1,
             lineType=cv2.LINE_AA,
         )
+        if hold_indicator_text is not None:
+            cv2.putText(
+                panel,
+                hold_indicator_text,
+                (legend_x + 98, y0 + 54),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                (30, 30, 30),
+                1,
+                lineType=cv2.LINE_AA,
+            )
 
         y_ticks = np.linspace(0.0, max_prob, 4)
         for prob in y_ticks:
@@ -1086,6 +1110,15 @@ class PPORolloutVisualizer:
             return "None"
         return normalized.replace("_", " ")
 
+    def _standstill_hold_indicator_text(
+        self, *, speed_hold_frames: int, speed_hold_target_speed: float | None
+    ) -> str | None:
+        if not self.standstill_speed_hold_enabled or speed_hold_frames <= 1:
+            return None
+        if speed_hold_target_speed is None or not np.isfinite(speed_hold_target_speed):
+            return None
+        return f"[Holding {speed_hold_target_speed:.1f} m/s x{speed_hold_frames}]"
+
     def maybe_write(
         self,
         *,
@@ -1103,6 +1136,8 @@ class PPORolloutVisualizer:
         log_std: np.ndarray,
         value_estimate: float,
         route_completion: float | None,
+        speed_hold_frames: int,
+        speed_hold_target_speed: float | None,
     ) -> None:
         env_slot = env_idx % len(self.episode_returns)
         if reward < 0.0:
@@ -1164,6 +1199,10 @@ class PPORolloutVisualizer:
         )
         target_speed_mean = (
             None if target_speed_mean is None else float(target_speed_mean[0])
+        )
+        hold_indicator_text = self._standstill_hold_indicator_text(
+            speed_hold_frames=speed_hold_frames,
+            speed_hold_target_speed=speed_hold_target_speed,
         )
 
         rgb = np.transpose(obs["rgb"], (1, 2, 0)).astype(np.uint8)
@@ -1278,6 +1317,7 @@ class PPORolloutVisualizer:
                 mean_speed=target_speed_mean,
                 sampled_speed=target_speed_sample,
                 current_speed=speed,
+                hold_indicator_text=hold_indicator_text,
             )
 
         self._draw_spatial_std_profile(
@@ -1327,7 +1367,10 @@ class PPORolloutVisualizer:
             lineType=cv2.LINE_AA,
         )
 
-        filename = f"u{update_idx:06d}_gs{global_step:012d}_step{rollout_step:04d}_env{env_idx}.jpg"
+        filename = (
+            f"u{update_idx:06d}_gs{global_step:012d}_"
+            f"step{rollout_step:04d}_env{env_idx}.jpg"
+        )
         os.makedirs(self.output_dir, exist_ok=True)
         image_path = os.path.join(self.output_dir, filename)
         cv2.imwrite(

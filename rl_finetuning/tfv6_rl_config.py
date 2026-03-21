@@ -41,6 +41,11 @@ class GlobalConfig(CaRLGlobalConfig):
         self.log_std_min = -5.0
         self.log_std_max = 1.0
         self.speed_sampling_style = "native_categorical"
+
+        self.standstill_speed_hold_enabled = True
+        self.standstill_speed_hold_frames = 3
+        self.standstill_speed_hold_ego_speed_threshold = 0.1
+        self.standstill_speed_hold_target_speed_threshold = 1.0 / 3.6
         # Keep constant-noise behavior by default unless explicitly overridden.
         self.disable_learned_noise_head = True
         # Use a higher LR for std head so state-dependent uncertainty adapts faster.

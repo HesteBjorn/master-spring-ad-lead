@@ -118,9 +118,11 @@ class CARLAEnvTFv6(gym.Env):
             "n_steps": np.frombuffer(data[idx + 3], dtype=np.int32),
             "suggest": np.frombuffer(data[idx + 4], dtype=np.int32),
             "route_completion": np.frombuffer(data[idx + 5], dtype=np.float32),
-            "infraction_type": bytes(data[idx + 6]).decode("utf-8"),
+            "speed_hold_frames": np.frombuffer(data[idx + 6], dtype=np.int32),
+            "speed_hold_target_speed": np.frombuffer(data[idx + 7], dtype=np.float32),
+            "infraction_type": bytes(data[idx + 8]).decode("utf-8"),
         }
-        num_sent = np.frombuffer(data[idx + 7], dtype=np.uint64).item()
+        num_sent = np.frombuffer(data[idx + 9], dtype=np.uint64).item()
 
         self._check_or_resync_counter(num_sent)
 
@@ -143,7 +145,11 @@ class CARLAEnvTFv6(gym.Env):
             "n_steps": np.frombuffer(data[idx + 3], dtype=np.int32).item(),
             "suggest": np.frombuffer(data[idx + 4], dtype=np.int32).item(),
             "route_completion": np.frombuffer(data[idx + 5], dtype=np.float32).item(),
-            "infraction_type": bytes(data[idx + 6]).decode("utf-8"),
+            "speed_hold_frames": np.frombuffer(data[idx + 6], dtype=np.int32).item(),
+            "speed_hold_target_speed": np.frombuffer(
+                data[idx + 7], dtype=np.float32
+            ).item(),
+            "infraction_type": bytes(data[idx + 8]).decode("utf-8"),
         }
         self.episode_return += float(reward)
         self.episode_length += 1

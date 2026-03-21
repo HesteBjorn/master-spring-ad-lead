@@ -536,6 +536,24 @@ def parse_args(config):
                       default=getattr(config, 'speed_sampling_style', 'native_categorical'),
                       choices=['mean_gaussian', 'mean_gassian', 'native_categorical'],
                       help='How to sample target speed during PPO. native_categorical samples TFv6 speed bins directly; mean_gaussian keeps the old scalar-mean + noise path.')
+    parser.add_argument('--standstill_speed_hold_enabled',
+                      type=lambda x: bool(strtobool(x)),
+                      default=getattr(config, 'standstill_speed_hold_enabled', True),
+                      nargs='?',
+                      const=True,
+                      help='Repeat a just-sampled target-speed action for a few extra frames when starting from standstill.')
+    parser.add_argument('--standstill_speed_hold_frames',
+                      type=int,
+                      default=getattr(config, 'standstill_speed_hold_frames', 3),
+                      help='Number of consecutive control frames to apply the standstill speed hold for, including the initial sampled frame.')
+    parser.add_argument('--standstill_speed_hold_ego_speed_threshold',
+                      type=float,
+                      default=getattr(config, 'standstill_speed_hold_ego_speed_threshold', 0.1),
+                      help='Apply standstill speed hold only when ego speed is at or below this threshold in m/s.')
+    parser.add_argument('--standstill_speed_hold_target_speed_threshold',
+                      type=float,
+                      default=getattr(config, 'standstill_speed_hold_target_speed_threshold', 1.0 / 3.6),
+                      help='Require sampled target speed to exceed this threshold in m/s before starting the standstill speed hold.')
     parser.add_argument('--route_sampling_technique',
                       type=str,
                       default=getattr(config, 'route_sampling_technique', 'spline_curvature_perturbation'),
@@ -1433,6 +1451,18 @@ def main():
             every_n=args.debug_viz_every_n,
             max_images=args.debug_viz_max_images,
             image_scale=args.debug_viz_image_scale,
+            standstill_speed_hold_enabled=getattr(
+                config, "standstill_speed_hold_enabled", False
+            ),
+            standstill_speed_hold_frames=getattr(
+                config, "standstill_speed_hold_frames", 1
+            ),
+            standstill_speed_hold_ego_speed_threshold=getattr(
+                config, "standstill_speed_hold_ego_speed_threshold", 0.1
+            ),
+            standstill_speed_hold_target_speed_threshold=getattr(
+                config, "standstill_speed_hold_target_speed_threshold", 1.0 / 3.6
+            ),
         )
         print(
             f"[debug_viz] enabled path={debug_dir} "
@@ -1605,6 +1635,10 @@ def main():
             route_completion_by_env = np.full(
                 args.num_envs_per_proc, np.nan, dtype=np.float32
             )
+            speed_hold_frames_by_env = np.zeros(args.num_envs_per_proc, dtype=np.int32)
+            speed_hold_target_speed_by_env = np.full(
+                args.num_envs_per_proc, np.nan, dtype=np.float32
+            )
             terminal_infraction_by_env = [""] * args.num_envs_per_proc
             if "route_completion" in info:
                 route_completion_info = np.asarray(
@@ -1616,6 +1650,26 @@ def main():
                 route_completion_by_env[:num_route_values] = route_completion_info[
                     :num_route_values
                 ]
+            if "speed_hold_frames" in info:
+                speed_hold_frames_info = np.asarray(
+                    info["speed_hold_frames"], dtype=np.int32
+                ).reshape(-1)
+                num_hold_frame_values = min(
+                    speed_hold_frames_info.shape[0], args.num_envs_per_proc
+                )
+                speed_hold_frames_by_env[:num_hold_frame_values] = (
+                    speed_hold_frames_info[:num_hold_frame_values]
+                )
+            if "speed_hold_target_speed" in info:
+                speed_hold_target_speed_info = np.asarray(
+                    info["speed_hold_target_speed"], dtype=np.float32
+                ).reshape(-1)
+                num_hold_target_values = min(
+                    speed_hold_target_speed_info.shape[0], args.num_envs_per_proc
+                )
+                speed_hold_target_speed_by_env[:num_hold_target_values] = (
+                    speed_hold_target_speed_info[:num_hold_target_values]
+                )
             if "infraction_type" in info:
                 infraction_info = np.asarray(
                     info["infraction_type"], dtype=object
@@ -1634,6 +1688,14 @@ def main():
                 if "route_completion" in single_info:
                     route_completion_by_env[idx] = float(
                         single_info["route_completion"]
+                    )
+                if "speed_hold_frames" in single_info:
+                    speed_hold_frames_by_env[idx] = int(
+                        single_info["speed_hold_frames"]
+                    )
+                if "speed_hold_target_speed" in single_info:
+                    speed_hold_target_speed_by_env[idx] = float(
+                        single_info["speed_hold_target_speed"]
                     )
                 terminal_infraction_by_env[idx] = str(
                     single_info.get("infraction_type", "") or ""
@@ -1671,6 +1733,10 @@ def main():
                         log_std=diag_log_std[env_idx].detach().cpu().numpy(),
                         value_estimate=float(value[env_idx].item()),
                         route_completion=float(route_completion_by_env[env_idx]),
+                        speed_hold_frames=int(speed_hold_frames_by_env[env_idx]),
+                        speed_hold_target_speed=float(
+                            speed_hold_target_speed_by_env[env_idx]
+                        ),
                     )
 
             next_done = torch.tensor(done, device=device, dtype=torch.float32)
