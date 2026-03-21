@@ -117,8 +117,10 @@ class CARLAEnvTFv6(gym.Env):
         info = {
             "n_steps": np.frombuffer(data[idx + 3], dtype=np.int32),
             "suggest": np.frombuffer(data[idx + 4], dtype=np.int32),
+            "route_completion": np.frombuffer(data[idx + 5], dtype=np.float32),
+            "infraction_type": bytes(data[idx + 6]).decode("utf-8"),
         }
-        num_sent = np.frombuffer(data[idx + 5], dtype=np.uint64).item()
+        num_sent = np.frombuffer(data[idx + 7], dtype=np.uint64).item()
 
         self._check_or_resync_counter(num_sent)
 
@@ -140,6 +142,8 @@ class CARLAEnvTFv6(gym.Env):
         info = {
             "n_steps": np.frombuffer(data[idx + 3], dtype=np.int32).item(),
             "suggest": np.frombuffer(data[idx + 4], dtype=np.int32).item(),
+            "route_completion": np.frombuffer(data[idx + 5], dtype=np.float32).item(),
+            "infraction_type": bytes(data[idx + 6]).decode("utf-8"),
         }
         self.episode_return += float(reward)
         self.episode_length += 1
@@ -148,7 +152,7 @@ class CARLAEnvTFv6(gym.Env):
                 "r": float(self.episode_return),
                 "l": int(self.episode_length),
             }
-        num_sent = np.frombuffer(data[idx + 5], dtype=np.uint64).item()
+        num_sent = np.frombuffer(data[idx + 7], dtype=np.uint64).item()
 
         self._check_or_resync_counter(num_sent)
 

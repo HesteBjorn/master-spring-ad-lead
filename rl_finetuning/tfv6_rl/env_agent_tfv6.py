@@ -585,6 +585,44 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
             )
         return np.asarray(values, dtype=np.float32)
 
+    def _get_route_completion_percent(self) -> float:
+        route_completion = getattr(self.reward_handler, "last_route_completion", None)
+        if route_completion is None:
+            route_completion_metric = getattr(
+                self.reward_handler, "route_completion", None
+            )
+            route_completion = getattr(route_completion_metric, "actual_value", None)
+        if route_completion is None:
+            return float("nan")
+        return float(np.clip(float(route_completion), 0.0, 100.0))
+
+    def _build_env_info(self, base_info: dict, *, truncation: bool) -> dict:
+        info = dict(base_info)
+        info["route_completion"] = self._get_route_completion_percent()
+        info["infraction_type"] = str(info.get("infraction_type", "") or "")
+        if truncation and info["infraction_type"] in ("", "finished_route"):
+            info["route_completion"] = 100.0
+        return info
+
+    def _send_env_data(self, data: dict) -> None:
+        self.num_send += 1
+        packed_obs = self.obs_codec.pack(data["observation"])
+        info = data["info"]
+        self.socket.send_multipart(
+            (
+                *packed_obs,
+                np.array(data["reward"], dtype=np.float32),
+                np.array(data["termination"], dtype=bool),
+                np.array(data["truncation"], dtype=bool),
+                np.array(info["n_steps"], dtype=np.int32),
+                np.array(info["suggest"], dtype=np.int32),
+                np.array(info["route_completion"], dtype=np.float32),
+                info["infraction_type"].encode("utf-8"),
+                np.array(self.num_send, dtype=np.uint64),
+            ),
+            copy=False,
+        )
+
     def run_step(self, input_data, timestamp, sensors=None):
         self.step += 1
         self.last_timestamp = timestamp
@@ -640,7 +678,7 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
             "reward": reward,
             "termination": termination,
             "truncation": truncation,
-            "info": exploration_suggest,
+            "info": self._build_env_info(exploration_suggest, truncation=truncation),
         }
 
         if termination or truncation:
@@ -649,20 +687,7 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
             self.data = data
             raise NextRoute("Episode ended by reward.")
 
-        self.num_send += 1
-        packed_obs = self.obs_codec.pack(data["observation"])
-        self.socket.send_multipart(
-            (
-                *packed_obs,
-                np.array(data["reward"], dtype=np.float32),
-                np.array(data["termination"], dtype=bool),
-                np.array(data["truncation"], dtype=bool),
-                np.array(data["info"]["n_steps"], dtype=np.int32),
-                np.array(data["info"]["suggest"], dtype=np.int32),
-                np.array(self.num_send, dtype=np.uint64),
-            ),
-            copy=False,
-        )
+        self._send_env_data(data)
 
         self.send_first_observation = True
 
@@ -742,23 +767,10 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
                 "reward": reward,
                 "termination": term,
                 "truncation": trunc,
-                "info": exploration_suggest,
+                "info": self._build_env_info(exploration_suggest, truncation=trunc),
             }
 
-        self.num_send += 1
-        packed_obs = self.obs_codec.pack(data["observation"])
-        self.socket.send_multipart(
-            (
-                *packed_obs,
-                np.array(data["reward"], dtype=np.float32),
-                np.array(data["termination"], dtype=bool),
-                np.array(data["truncation"], dtype=bool),
-                np.array(data["info"]["n_steps"], dtype=np.int32),
-                np.array(data["info"]["suggest"], dtype=np.int32),
-                np.array(self.num_send, dtype=np.uint64),
-            ),
-            copy=False,
-        )
+        self._send_env_data(data)
         if hasattr(self, "reward_handler"):
             try:
                 self.reward_handler.destroy()

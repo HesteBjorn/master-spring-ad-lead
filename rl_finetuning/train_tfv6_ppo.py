@@ -1601,6 +1601,43 @@ def main():
                 termination, truncation
             )  # Not treated separately in original PPO
             rewards[step] = torch.tensor(reward, device=device, dtype=torch.float32)
+            final_info_list = info.get("final_info", [])
+            route_completion_by_env = np.full(
+                args.num_envs_per_proc, np.nan, dtype=np.float32
+            )
+            terminal_infraction_by_env = [""] * args.num_envs_per_proc
+            if "route_completion" in info:
+                route_completion_info = np.asarray(
+                    info["route_completion"], dtype=np.float32
+                ).reshape(-1)
+                num_route_values = min(
+                    route_completion_info.shape[0], args.num_envs_per_proc
+                )
+                route_completion_by_env[:num_route_values] = route_completion_info[
+                    :num_route_values
+                ]
+            if "infraction_type" in info:
+                infraction_info = np.asarray(
+                    info["infraction_type"], dtype=object
+                ).reshape(-1)
+                num_infraction_values = min(
+                    infraction_info.shape[0], args.num_envs_per_proc
+                )
+                for idx in range(num_infraction_values):
+                    if done[idx] and infraction_info[idx] is not None:
+                        terminal_infraction_by_env[idx] = str(
+                            infraction_info[idx] or ""
+                        )
+            for idx, single_info in enumerate(final_info_list):
+                if idx >= args.num_envs_per_proc or single_info is None:
+                    continue
+                if "route_completion" in single_info:
+                    route_completion_by_env[idx] = float(
+                        single_info["route_completion"]
+                    )
+                terminal_infraction_by_env[idx] = str(
+                    single_info.get("infraction_type", "") or ""
+                )
 
             if debug_viz is not None:
                 for env_idx in range(args.num_envs_per_proc):
@@ -1633,6 +1670,7 @@ def main():
                         ),
                         log_std=diag_log_std[env_idx].detach().cpu().numpy(),
                         value_estimate=float(value[env_idx].item()),
+                        route_completion=float(route_completion_by_env[env_idx]),
                     )
 
             next_done = torch.tensor(done, device=device, dtype=torch.float32)
@@ -1650,12 +1688,19 @@ def main():
             }
 
             if "final_info" in info.keys():
-                for idx, single_info in enumerate(info["final_info"]):
+                for idx, single_info in enumerate(final_info_list):
                     if single_info is not None:
                         if config.use_exploration_suggest:
                             # Exploration loss
                             exp_n_steps[step, idx] = single_info["n_steps"]
                             exp_suggest[step, idx] = single_info["suggest"]
+            if debug_viz is not None:
+                for idx in range(args.num_envs_per_proc):
+                    if bool(done[idx]):
+                        debug_viz.note_episode_outcome(
+                            env_idx=idx,
+                            terminal_infraction_type=terminal_infraction_by_env[idx],
+                        )
 
             for ep_return, ep_length in _iter_episode_stats(info):
                 print(

@@ -26,6 +26,22 @@ class ControlOutput:
     brake: float
 
 
+@dataclass
+class _PendingForwardReturnStamp:
+    rollout_step: int
+    env_idx: int
+    image_path: str
+    stamp_x: int
+    stamp_y: int
+
+
+@dataclass
+class _PendingEpisodeInfractionStamp:
+    image_path: str
+    stamp_x: int
+    stamp_y: int
+
+
 class _ClosedLoopControlAdapter:
     """Mirror EnvAgentTFv6 control logic for visualization-only control traces."""
 
@@ -163,8 +179,11 @@ class PPORolloutVisualizer:
         self.images_written = 0
         self.episode_returns = [0.0 for _ in range(max(1, num_envs))]
         self.pending_forward_return_stamps: dict[
-            int, list[tuple[int, int, str, int, int]]
+            int, list[_PendingForwardReturnStamp]
         ] = {}
+        self.pending_episode_infraction_stamps: list[
+            list[_PendingEpisodeInfractionStamp]
+        ] = [[] for _ in range(max(1, num_envs))]
         self.negative_reward_burst_remaining = [0 for _ in range(max(1, num_envs))]
         self.negative_reward_burst_len_terminal = 2
         self.negative_reward_burst_len_non_terminal = 10
@@ -534,6 +553,7 @@ class PPORolloutVisualizer:
         plot_left = x0 + 12
         plot_right = x0 + w - 10
         plot_top = y0 + 64
+        bar_top = plot_top + 22
         plot_bottom = y0 + h - 42
         cv2.rectangle(
             panel, (plot_left, plot_top), (plot_right, plot_bottom), (235, 235, 235), -1
@@ -560,7 +580,7 @@ class PPORolloutVisualizer:
 
         def prob_to_py(v: float) -> int:
             alpha = float(np.clip(v / max_prob, 0.0, 1.0))
-            return int(round(plot_bottom - alpha * (plot_bottom - plot_top)))
+            return int(round(plot_bottom - alpha * (plot_bottom - bar_top)))
 
         cv2.putText(
             panel,
@@ -678,6 +698,20 @@ class PPORolloutVisualizer:
                     mids.astype(np.float32),
                     np.array([right_edge], dtype=np.float32),
                 )
+            )
+
+        prob_label_y = plot_top + 14
+        for idx, prob in enumerate(speed_probs):
+            left = speed_to_px(float(bin_edges[idx]))
+            right = speed_to_px(float(bin_edges[idx + 1]))
+            prob_center_x = int(round(0.5 * (left + right)))
+            self._put_centered_text(
+                panel,
+                f"{100.0 * float(prob):.1f}%",
+                prob_center_x,
+                prob_label_y,
+                font_scale=0.31,
+                color=(35, 35, 35),
             )
 
         for idx, prob in enumerate(speed_probs):
@@ -990,6 +1024,68 @@ class PPORolloutVisualizer:
             )
             y += 24
 
+    def _put_centered_text(
+        self,
+        panel: np.ndarray,
+        text: str,
+        center_x: int,
+        baseline_y: int,
+        *,
+        font_scale: float,
+        color: tuple[int, int, int],
+    ) -> None:
+        (text_w, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
+        text_x = int(round(center_x - text_w / 2.0))
+        cv2.putText(
+            panel,
+            text,
+            (text_x, baseline_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            color,
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
+    def _stamp_text_line(
+        self, image: np.ndarray, *, stamp_x: int, stamp_y: int, text: str
+    ) -> None:
+        (text_w, text_h), baseline = cv2.getTextSize(
+            text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+        )
+        y_top = stamp_y - text_h - baseline - 3
+        y_bottom = stamp_y + baseline + 3
+        cv2.rectangle(
+            image,
+            (stamp_x - 2, y_top),
+            (stamp_x + text_w + 6, y_bottom),
+            (248, 248, 248),
+            -1,
+        )
+        cv2.putText(
+            image,
+            text,
+            (stamp_x, stamp_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (20, 20, 20),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
+    def _format_route_completion(self, route_completion: float | None) -> str:
+        if route_completion is None or not np.isfinite(route_completion):
+            return "route_completion=N/A"
+        return f"route_completion={float(route_completion):.1f}%"
+
+    def _format_infraction_reason(self, infraction_type: str | None) -> str:
+        if infraction_type is None:
+            return "None"
+        normalized = str(infraction_type).strip()
+        if normalized == "" or normalized == "finished_route":
+            return "None"
+        return normalized.replace("_", " ")
+
     def maybe_write(
         self,
         *,
@@ -1006,6 +1102,7 @@ class PPORolloutVisualizer:
         target_speed_logits: np.ndarray | None,
         log_std: np.ndarray,
         value_estimate: float,
+        route_completion: float | None,
     ) -> None:
         env_slot = env_idx % len(self.episode_returns)
         if reward < 0.0:
@@ -1142,12 +1239,16 @@ class PPORolloutVisualizer:
         episode_return = float(self.episode_returns[env_slot])
 
         text_lines = [
-            f"update={update_idx} step={rollout_step}",
+            (
+                f"update={update_idx} step={rollout_step} "
+                f"{self._format_route_completion(route_completion)}"
+            ),
             (
                 f"reward={reward:+.4f} cumulative_reward={episode_return:+.4f} "
                 f"value={value_estimate:+.4f}"
             ),
             "forward_discounted_return=pending",
+            "forward_infraction_reason=pending",
             f"std[min/mean/max]={std.min():.4f}/{std.mean():.4f}/{std.max():.4f}",
         ]
         line_h = 24
@@ -1237,9 +1338,23 @@ class PPORolloutVisualizer:
         self.images_written += 1
 
         stamp_x = right_x + 12
-        stamp_y = text_start_y + 2 * line_h
+        forward_return_y = text_start_y + 2 * line_h
+        forward_infraction_y = text_start_y + 3 * line_h
         self.pending_forward_return_stamps.setdefault(update_idx, []).append(
-            (rollout_step, env_idx, image_path, stamp_x, stamp_y)
+            _PendingForwardReturnStamp(
+                rollout_step=rollout_step,
+                env_idx=env_idx,
+                image_path=image_path,
+                stamp_x=stamp_x,
+                stamp_y=forward_return_y,
+            )
+        )
+        self.pending_episode_infraction_stamps[env_slot].append(
+            _PendingEpisodeInfractionStamp(
+                image_path=image_path,
+                stamp_x=stamp_x,
+                stamp_y=forward_infraction_y,
+            )
         )
 
         if self.negative_reward_burst_remaining[env_slot] > 0:
@@ -1259,33 +1374,45 @@ class PPORolloutVisualizer:
             return
 
         num_steps, num_envs = forward_returns.shape
-        for rollout_step, env_idx, image_path, stamp_x, stamp_y in records:
+        for record in records:
             os.makedirs(self.output_dir, exist_ok=True)
-            if rollout_step >= num_steps or env_idx >= num_envs:
+            if record.rollout_step >= num_steps or record.env_idx >= num_envs:
                 continue
-            if not os.path.isfile(image_path):
+            if not os.path.isfile(record.image_path):
                 continue
-            image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+            image = cv2.imread(record.image_path, cv2.IMREAD_COLOR)
             if image is None:
                 continue
 
-            forward_return = float(forward_returns[rollout_step, env_idx])
-            y_top, y_bottom = stamp_y - 16, stamp_y + 8
-            cv2.rectangle(
+            forward_return = float(forward_returns[record.rollout_step, record.env_idx])
+            self._stamp_text_line(
                 image,
-                (stamp_x - 2, y_top),
-                (stamp_x + 560, y_bottom),
-                (248, 248, 248),
-                -1,
+                stamp_x=record.stamp_x,
+                stamp_y=record.stamp_y,
+                text=f"forward_discounted_return={forward_return:+.4f}",
             )
-            cv2.putText(
+            cv2.imwrite(record.image_path, image, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+
+    def note_episode_outcome(
+        self, *, env_idx: int, terminal_infraction_type: str | None
+    ) -> None:
+        env_slot = env_idx % len(self.pending_episode_infraction_stamps)
+        records = self.pending_episode_infraction_stamps[env_slot]
+        if not records:
+            return
+
+        infraction_reason = self._format_infraction_reason(terminal_infraction_type)
+        for record in records:
+            if not os.path.isfile(record.image_path):
+                continue
+            image = cv2.imread(record.image_path, cv2.IMREAD_COLOR)
+            if image is None:
+                continue
+            self._stamp_text_line(
                 image,
-                f"forward_discounted_return={forward_return:+.4f}",
-                (stamp_x, stamp_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (20, 20, 20),
-                1,
-                lineType=cv2.LINE_AA,
+                stamp_x=record.stamp_x,
+                stamp_y=record.stamp_y,
+                text=f"forward_infraction_reason={infraction_reason}",
             )
-            cv2.imwrite(image_path, image, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            cv2.imwrite(record.image_path, image, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        records.clear()
