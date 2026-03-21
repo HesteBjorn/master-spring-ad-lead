@@ -31,7 +31,6 @@ from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 from lead.common import common_utils
 from lead.common.base_agent import BaseAgent
 from lead.common.pid_controller import LateralPIDController, PIDController, get_throttle
-from lead.common.route_planner import RoutePlanner as LeadRoutePlanner
 from lead.common.sensor_setup import av_sensor_setup
 from lead.data_loader import carla_dataset_utils, training_cache
 from lead.data_loader.carla_dataset_utils import rasterize_lidar
@@ -180,11 +179,6 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         self.action_codec = None
         self.obs_codec = None
         self.controller = None
-        self.command_waypoint_planners_dict = {}
-        self.tp_global_plan_world_coord = None
-        self.tp_downsample_factor = int(
-            os.environ.get("TFV6_RL_TP_DOWNSAMPLE_FACTOR", "200")
-        )
 
         self.initialized_global = False
         self.initialized_route = False
@@ -196,23 +190,17 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
 
     def set_global_plan(self, global_plan_world_coord):
         self.dense_global_plan_world_coord = global_plan_world_coord
-        self._global_plan_world_coord = global_plan_world_coord
-        self.tp_global_plan_world_coord = global_plan_world_coord
-
-        if self.tp_downsample_factor > 1:
-            ds_ids = route_manipulation.downsample_route(
-                global_plan_world_coord, self.tp_downsample_factor
-            )
-            self.tp_global_plan_world_coord = [
-                (global_plan_world_coord[i][0], global_plan_world_coord[i][1])
-                for i in ds_ids
-            ]
-
         world = CarlaDataProvider.get_world()
         lat_ref, lon_ref = route_manipulation._get_latlon_ref(world)
-        self._global_plan = route_manipulation.location_route_to_gps(
+        global_plan_gps = route_manipulation.location_route_to_gps(
             global_plan_world_coord, lat_ref, lon_ref
         )
+        ds_ids = route_manipulation.downsample_route(global_plan_world_coord, 200)
+        self._global_plan_world_coord = [
+            (global_plan_world_coord[i][0], global_plan_world_coord[i][1])
+            for i in ds_ids
+        ]
+        self._global_plan = [global_plan_gps[i] for i in ds_ids]
 
     def setup(self, exp_folder, port, route_config):
         # Recreate sensor interface per route to mirror wrapper lifecycle and
@@ -372,14 +360,6 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
 
         self.route_planner = CarlaRoutePlanner()
         self.route_planner.set_route(self.dense_global_plan_world_coord)
-        self.command_waypoint_planners_dict = {}
-        if not bool(getattr(self.training_config, "use_noisy_tp", False)):
-            for dist in self.config_closed_loop.tp_distances:
-                planner = LeadRoutePlanner(
-                    dist, self.config_closed_loop.route_planner_max_distance
-                )
-                planner.set_route(self.tp_global_plan_world_coord, gps=False)
-                self.command_waypoint_planners_dict[dist] = planner
 
         self.initialized_route = True
 
@@ -388,40 +368,8 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         pos = np.array([pos.x, pos.y])
         return self.route_planner.run_step(pos)
 
-    def _tp_planners_dict(self):
-        if bool(getattr(self.training_config, "use_noisy_tp", False)):
-            return self.gps_waypoint_planners_dict
-        return self.command_waypoint_planners_dict
-
-    def _tp_ego_position(self, input_data: dict) -> np.ndarray:
-        use_noisy_tp = bool(getattr(self.training_config, "use_noisy_tp", False))
-        if use_noisy_tp:
-            if bool(getattr(self.training_config, "use_kalman_filter_for_gps", True)):
-                return np.array(self.filtered_state[:2], dtype=np.float32)
-            return np.array(input_data["noisy_state"][:2], dtype=np.float32)
-
-        # Match TFv6 training labels (pos_global) when noisy TP is disabled.
-        ego_loc = self.vehicle.get_transform().location
-        return np.array([ego_loc.x, ego_loc.y], dtype=np.float32)
-
-    def _run_command_tp_planners(self, input_data: dict) -> None:
-        if bool(getattr(self.training_config, "use_noisy_tp", False)):
-            return
-        if not self.command_waypoint_planners_dict:
-            return
-        ego_loc = self.vehicle.get_transform().location
-        ego_xyz = np.array([ego_loc.x, ego_loc.y, input_data["noisy_state"][2]])
-        for planner in self.command_waypoint_planners_dict.values():
-            planner.run_step(ego_xyz)
-
-    def _training_style_target_points(self) -> bool:
-        # Match Base_TFv6 training TP semantics:
-        # - use non-noisy TP coordinates
-        # - use checkpoint TP pop distance
-        return not bool(getattr(self.training_config, "use_noisy_tp", False))
-
     def set_target_points(self, input_data: dict, pop_distance: float) -> None:
-        planner = self._tp_planners_dict()[pop_distance]
+        planner = self.gps_waypoint_planners_dict[pop_distance]
 
         next_target_points = [tp[0].tolist() for tp in planner.route]
         next_commands = [int(planner.route[i][1]) for i in range(len(planner.route))]
@@ -441,7 +389,11 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         next_commands = filtered_command_list
 
         def transform(point):
-            ego_position = self._tp_ego_position(input_data)
+            ego_position = (
+                self.filtered_state[:2]
+                if self.config_closed_loop.use_kalman_filter
+                else input_data["noisy_state"][:2]
+            )
             return common_utils.inverse_conversion_2d(
                 np.array(point), np.array(ego_position), self.compass
             )
@@ -467,7 +419,6 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         input_data = super().tick(
             input_data, use_kalman_filter=self.training_config.use_kalman_filter_for_gps
         )
-        self._run_command_tp_planners(input_data)
 
         rgb = input_data["rgb"]
         rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
@@ -505,47 +456,42 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
                     rgb_slices.append(input_data["rgb"][:, :, s:e])
             input_data["rgb"] = np.concatenate(rgb_slices, axis=2)
 
-        if self._training_style_target_points():
-            self.set_target_points(
-                input_data, pop_distance=self.training_config.tp_pop_distance
-            )
-        else:
-            self.set_target_points(
-                input_data,
-                pop_distance=self.config_closed_loop.route_planner_min_distance,
-            )
-            if self.config_closed_loop.sensor_agent_pop_distance_adaptive:
-                dense_points = (
-                    np.linalg.norm(
-                        input_data["target_point"] - input_data["target_point_next"]
-                    )
-                    < 10.0
-                    and min(
-                        np.linalg.norm(input_data["target_point_previous"]),
-                        np.linalg.norm(input_data["target_point"]),
-                    )
-                    < 10.0
+        self.set_target_points(
+            input_data,
+            pop_distance=self.config_closed_loop.route_planner_min_distance,
+        )
+        if self.config_closed_loop.sensor_agent_pop_distance_adaptive:
+            dense_points = (
+                np.linalg.norm(
+                    input_data["target_point"] - input_data["target_point_next"]
                 )
-                dense_points = dense_points or (
-                    np.linalg.norm(
-                        input_data["target_point_previous"] - input_data["target_point"]
-                    )
-                    < 10.0
-                    and min(
-                        np.linalg.norm(input_data["target_point_previous"]),
-                        np.linalg.norm(input_data["target_point"]),
-                    )
-                    < 10.0
+                < 10.0
+                and min(
+                    np.linalg.norm(input_data["target_point_previous"]),
+                    np.linalg.norm(input_data["target_point"]),
                 )
-                if dense_points:
-                    self.set_target_points(input_data, pop_distance=4.0)
+                < 10.0
+            )
+            dense_points = dense_points or (
+                np.linalg.norm(
+                    input_data["target_point_previous"] - input_data["target_point"]
+                )
+                < 10.0
+                and min(
+                    np.linalg.norm(input_data["target_point_previous"]),
+                    np.linalg.norm(input_data["target_point"]),
+                )
+                < 10.0
+            )
+            if dense_points:
+                self.set_target_points(input_data, pop_distance=4.0)
 
-            if (
-                self.config_closed_loop.sensor_agent_skip_distant_target_point
-                and np.linalg.norm(input_data["target_point_next"])
-                > self.config_closed_loop.sensor_agent_skip_distant_target_point_threshold
-            ):
-                input_data["target_point_next"] = input_data["target_point"]
+        if (
+            self.config_closed_loop.sensor_agent_skip_distant_target_point
+            and np.linalg.norm(input_data["target_point_next"])
+            > self.config_closed_loop.sensor_agent_skip_distant_target_point_threshold
+        ):
+            input_data["target_point_next"] = input_data["target_point"]
 
         # LiDAR accumulation
         lidar = self.accumulate_lidar()
