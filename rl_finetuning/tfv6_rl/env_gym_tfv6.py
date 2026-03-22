@@ -123,7 +123,6 @@ class CARLAEnvTFv6(gym.Env):
             "infraction_type": bytes(data[idx + 8]).decode("utf-8"),
         }
         num_sent = np.frombuffer(data[idx + 9], dtype=np.uint64).item()
-
         self._check_or_resync_counter(num_sent)
 
         return observation, info
@@ -158,8 +157,7 @@ class CARLAEnvTFv6(gym.Env):
                 "r": float(self.episode_return),
                 "l": int(self.episode_length),
             }
-        num_sent = np.frombuffer(data[idx + 7], dtype=np.uint64).item()
-
+        num_sent = np.frombuffer(data[idx + 9], dtype=np.uint64).item()
         self._check_or_resync_counter(num_sent)
 
         return observation, reward, termination, truncation, info

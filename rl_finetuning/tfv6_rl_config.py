@@ -41,7 +41,6 @@ class GlobalConfig(CaRLGlobalConfig):
         self.log_std_min = -5.0
         self.log_std_max = 1.0
         self.speed_sampling_style = "native_categorical"
-
         self.standstill_speed_hold_enabled = True
         self.standstill_speed_hold_frames = 3
         self.standstill_speed_hold_ego_speed_threshold = 0.1

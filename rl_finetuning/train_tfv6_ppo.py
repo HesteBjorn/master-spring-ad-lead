@@ -1126,7 +1126,6 @@ def main():
     assert isinstance(env.single_action_space, gym.spaces.Box), (
         "only continuous action space is supported"
     )
-
     agent = TFv6PPOPolicy(
         env.single_observation_space,
         env.single_action_space,
@@ -1563,9 +1562,10 @@ def main():
                 )
 
             for key in obs.keys():
-                obs[key][step] = next_obs[key].to(
-                    device=obs[key].device, non_blocking=obs_storage_pin_memory
-                )
+                # Avoid async GPU->temporary CPU->buffer transfers here. With pinned
+                # CPU rollout storage, assigning from `next_obs[key].to(...,
+                # non_blocking=True)` can leave the stored observation one step stale.
+                obs[key][step].copy_(next_obs[key], non_blocking=False)
             dones[step] = next_done
 
             # ALGO LOGIC: action logic
@@ -1622,7 +1622,6 @@ def main():
                 action.cpu().numpy()
             )
             env_times.append(t2.tocvalue())
-
             # for i in range(config.obs_num_channels):
             #   pyplots[i].set_data(next_obs['bev_semantics'][0, i])
             # plt.pause(0.0001)
@@ -1752,7 +1751,6 @@ def main():
                 )
                 for key in env.single_observation_space.spaces.keys()
             }
-
             if "final_info" in info.keys():
                 for idx, single_info in enumerate(final_info_list):
                     if single_info is not None:
