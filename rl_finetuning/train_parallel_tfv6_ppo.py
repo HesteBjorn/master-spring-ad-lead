@@ -108,9 +108,7 @@ def build_route_files(args) -> list[str]:
             )
         return [str(pathlib.Path(x).resolve()) for x in args.route_files]
 
-    route_root_folder = os.path.join(
-        args.git_root, f"custom_leaderboard/leaderboard/data/{args.routes_folder}"
-    )
+    route_root_folder = os.path.join(args.repo_root, f"{args.routes_folder}")
     route_start_id = args.num_envs_per_gpu * args.node_id
     route_end_id = args.route_end_id
 
