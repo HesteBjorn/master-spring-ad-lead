@@ -174,6 +174,9 @@ class LowRankDiagRouteGaussianDistribution(nn.Module):
         self.route_lowrank_std = float(route_lowrank_std)
         self.jitter = float(jitter)
         self.distribution: MultivariateNormal | None = None
+        self._wp_std: torch.Tensor | None = (
+            None  # stored in proba_distribution for log_prob
+        )
 
         if (
             not self.action_codec.predict_route
@@ -252,6 +255,13 @@ class LowRankDiagRouteGaussianDistribution(nn.Module):
         batch_size = mean_actions.shape[0]
         route_slice = self.action_codec.slices.route
 
+        # Store waypoint stds for the projected log_prob computation.
+        self._wp_std = (
+            std[:, self.action_codec.slices.waypoints].clone()
+            if self.action_codec.predict_waypoints
+            else None
+        )
+
         scale_trils = []
         for i in range(batch_size):
             std_row = std[i]
@@ -281,11 +291,53 @@ class LowRankDiagRouteGaussianDistribution(nn.Module):
 
     def log_prob(self, actions: torch.Tensor) -> torch.Tensor:
         assert self.distribution is not None
-        return self.distribution.log_prob(actions)
+        # Route: evaluate log_prob only in the low-rank basis subspace.
+        # This avoids the precision explosion in the (route_dim - rank) orthogonal
+        # directions, which have variance ~jitter=1e-6 and would cause PPO ratios
+        # to explode for any small mean shift in those directions.
+        route_slice = self.action_codec.slices.route
+        residual_route = actions[:, route_slice] - self.distribution.loc[:, route_slice]
+        basis = self.route_basis.to(dtype=actions.dtype, device=actions.device)
+        proj = residual_route @ basis  # [B, rank] — amplitudes along smooth modes
+        log_prob = (
+            Normal(
+                torch.zeros_like(proj),
+                proj.new_full(proj.shape, self.route_lowrank_std),
+            )
+            .log_prob(proj)
+            .sum(dim=1)
+        )
+        # Waypoints: standard diagonal Gaussian (no precision explosion there).
+        if self._wp_std is not None:
+            wp_slice = self.action_codec.slices.waypoints
+            residual_wp = actions[:, wp_slice] - self.distribution.loc[:, wp_slice]
+            log_prob = log_prob + Normal(
+                torch.zeros_like(residual_wp),
+                self._wp_std.to(dtype=residual_wp.dtype),
+            ).log_prob(residual_wp).sum(dim=1)
+        return log_prob
 
     def entropy(self) -> torch.Tensor:
         assert self.distribution is not None
-        return self.distribution.entropy()
+        # Match the projected log_prob: entropy of the rank-dim route Gaussian
+        # plus diagonal waypoint entropy.
+        device = self.distribution.loc.device
+        dtype = self.distribution.loc.dtype
+        batch_size = self.distribution.loc.shape[0]
+        route_ent = (
+            0.5
+            * math.log(2.0 * math.pi * math.e * self.route_lowrank_std**2)
+            * self.route_lowrank_rank
+        )
+        result = torch.full((batch_size,), route_ent, device=device, dtype=dtype)
+        if self._wp_std is not None:
+            wp_entropy = (
+                Normal(torch.zeros_like(self._wp_std), self._wp_std)
+                .entropy()
+                .sum(dim=1)
+            )
+            result = result + wp_entropy
+        return result
 
     def sample(self) -> torch.Tensor:
         assert self.distribution is not None

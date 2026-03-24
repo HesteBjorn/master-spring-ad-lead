@@ -24,7 +24,7 @@ source slurm/init.sh
 
 export PYTHONUNBUFFERED=1
 export WANDB_MODE="${WANDB_MODE:-disabled}"
-export CARLA_ROOT="${CARLA_ROOT:-$PWD/3rd_party/CARLA_0915}"
+export CARLA_ROOT="${CARLA_ROOT:-$PWD/3rd_party/fork_export_t1213_fixed/LinuxNoEditor}"
 export PYTHONPATH="$CARLA_ROOT/PythonAPI:$CARLA_ROOT/PythonAPI/carla:$PWD:$PYTHONPATH"
 
 # Module/conda setup (IDUN-specific)
