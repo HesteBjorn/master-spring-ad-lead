@@ -11,6 +11,7 @@ from lead.tfv6.tfv6 import TFv6
 from lead.training.config_training import TrainingConfig
 from rl_finetuning.tfv6_rl.action_codec import ActionCodec, infer_action_head_usage
 from rl_finetuning.tfv6_rl.action_noise_codec import ActionNoiseCodec
+from rl_finetuning.tfv6_rl.privileged_measurements import privileged_measurement_dim
 
 
 def load_training_config(checkpoint_dir: str) -> TrainingConfig:
@@ -212,13 +213,8 @@ class TFv6PPOPolicy(nn.Module):
                     self.use_privileged_measurements,
                 )
             )
-            self.num_privileged_measurements = int(
-                getattr(
-                    rl_config,
-                    "num_value_measurements",
-                    self.num_privileged_measurements,
-                )
-            )
+            if self.use_privileged_measurements:
+                self.num_privileged_measurements = privileged_measurement_dim(rl_config)
             self.use_kl_to_reference = bool(
                 getattr(rl_config, "use_kl_to_reference", self.use_kl_to_reference)
             )
@@ -271,15 +267,16 @@ class TFv6PPOPolicy(nn.Module):
         self.action_dist = self.action_noise_codec.action_dist
         self.privileged_obs_key = "privileged_measurements"
         self.value_token_dim = self.training_config.transfuser_token_dim
-        value_in_dim = self.value_token_dim + (
+        # Noise head input: mean-pooled kv (token_dim) + privileged measurements.
+        noise_in_dim = self.value_token_dim + (
             self.num_privileged_measurements if self.use_privileged_measurements else 0
         )
         # Predict grouped noise parameters with a small MLP head.
         # Hidden size matches the TFv6 planning token width for a minimal increase in capacity.
         self.action_noise_head = nn.Sequential(
-            nn.Linear(value_in_dim, value_in_dim),
+            nn.Linear(noise_in_dim, noise_in_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(value_in_dim, self.action_noise_codec.noise_pred_dim),
+            nn.Linear(noise_in_dim, self.action_noise_codec.noise_pred_dim),
         )
         final_noise_layer = self.action_noise_head[-1]
         nn.init.zeros_(
@@ -302,8 +299,23 @@ class TFv6PPOPolicy(nn.Module):
             for param in self.action_noise_head.parameters():
                 param.requires_grad_(False)
 
+        # Critic: 4-query attention pooling over kv tokens.
+        # Each query specializes on a different spatial/semantic aspect of the scene,
+        # giving the critic richer scene understanding than mean-pooling.
+        self.num_value_queries = 4
+        self.value_queries = nn.Parameter(
+            torch.randn(self.num_value_queries, self.value_token_dim) * 0.02
+        )
+        critic_in_dim = self.num_value_queries * self.value_token_dim + (
+            self.num_privileged_measurements if self.use_privileged_measurements else 0
+        )
         self.value_head = nn.Sequential(
-            nn.Linear(value_in_dim, 256),
+            nn.LayerNorm(critic_in_dim),
+            nn.Linear(critic_in_dim, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, 256),
+            nn.LayerNorm(256),
             nn.ReLU(inplace=True),
             nn.Linear(256, 1),
         )
@@ -351,10 +363,47 @@ class TFv6PPOPolicy(nn.Module):
         self._configure_active_planning_heads()
 
     def _build_value_features(self) -> torch.Tensor:
+        """Mean-pooled kv tokens — used by the noise head."""
         kv = getattr(self.tfv6.planning_decoder, "kv", None)
         if kv is None:
             raise RuntimeError("Planning decoder context tokens not available.")
         return kv.mean(dim=1)
+
+    def _build_critic_spatial_features(self) -> torch.Tensor:
+        """4-query attention pooling over kv tokens for the critic.
+
+        Each query attends independently over all planning context tokens,
+        allowing the critic to simultaneously focus on different aspects of
+        the scene (e.g. spatial threats, ego-state, route context).
+
+        Detach respects critic_updates_shared_features: kv is stopped before
+        the attention so TFv6 receives no gradient from the critic, while the
+        query parameters still receive gradient via the attention weights.
+        """
+        kv = getattr(self.tfv6.planning_decoder, "kv", None)
+        if kv is None:
+            raise RuntimeError("Planning decoder context tokens not available.")
+        kv_f = kv if self.critic_updates_shared_features else kv.detach()
+        scale = self.value_token_dim**0.5
+        # scores: [B, num_queries, N_tokens]
+        scores = torch.einsum("qd,bnd->bqn", self.value_queries, kv_f) / scale
+        weights = scores.softmax(dim=-1)
+        # pooled: [B, num_queries, token_dim] -> [B, num_queries * token_dim]
+        pooled = torch.einsum("bqn,bnd->bqd", weights, kv_f)
+        return pooled.flatten(start_dim=1).float()
+
+    def _build_critic_input(self, obs_dict: dict) -> torch.Tensor:
+        """Critic input: attention-pooled kv features + privileged measurements."""
+        spatial = self._build_critic_spatial_features()
+        privileged = self._get_privileged_measurements(
+            obs_dict,
+            batch_size=spatial.shape[0],
+            device=spatial.device,
+            dtype=spatial.dtype,
+        )
+        if privileged.shape[1] == 0:
+            return spatial
+        return torch.cat((spatial, privileged), dim=1)
 
     def _extract_tfv6_obs(self, obs_dict: dict) -> dict:
         if self.privileged_obs_key not in obs_dict:
@@ -458,8 +507,7 @@ class TFv6PPOPolicy(nn.Module):
                 self._extract_tfv6_obs(obs_dict),
                 skip_perception_heads=self.skip_perception_heads,
             )
-        value_features = self._build_value_and_noise_features(obs_dict)
-        return self.value_head(self._critic_input_features(value_features))
+        return self.value_head(self._build_critic_input(obs_dict))
 
     def forward(
         self,
@@ -519,7 +567,7 @@ class TFv6PPOPolicy(nn.Module):
         if entropy.ndim > 1:
             entropy = entropy.sum(1)
 
-        values = self.value_head(self._critic_input_features(value_features))
+        values = self.value_head(self._build_critic_input(obs_dict))
 
         exp_loss = None
         if exploration_suggests is not None:

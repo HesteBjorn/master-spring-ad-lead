@@ -7,7 +7,6 @@ import numpy as np
 from lead.training.config_training import TrainingConfig
 from rl_finetuning.tfv6_rl.privileged_measurements import (
     privileged_measurement_dim,
-    validate_privileged_measurement_dim,
 )
 
 
@@ -67,7 +66,9 @@ class ObsCodec:
         if rl_config is not None and bool(
             getattr(rl_config, "use_value_measurements", False)
         ):
-            validate_privileged_measurement_dim(rl_config)
+            # Auto-derive so num_value_measurements always matches enabled features,
+            # regardless of what is manually set in the config.
+            rl_config.num_value_measurements = privileged_measurement_dim(rl_config)
             self.specs.append(
                 ObsSpec(
                     "privileged_measurements",
