@@ -27,6 +27,13 @@ class CARLAEnvTFv6(gym.Env):
         self.rl_config = config
         self.episode_return = 0.0
         self.episode_length = 0
+        self._ep_reward_components = {
+            "speed_penalty": 0.0,
+            "ttc_frac": 0.0,
+            "comfort_penalty": 0.0,
+            "lane_centering": 0.0,
+            "outside_lanes_frac": 0.0,
+        }
 
         tfv6_checkpoint = getattr(config, "tfv6_checkpoint", None)
         if tfv6_checkpoint is None:
@@ -109,6 +116,13 @@ class CARLAEnvTFv6(gym.Env):
         self.num_recv += 1
         self.episode_return = 0.0
         self.episode_length = 0
+        self._ep_reward_components = {
+            "speed_penalty": 0.0,
+            "ttc_frac": 0.0,
+            "comfort_penalty": 0.0,
+            "lane_centering": 0.0,
+            "outside_lanes_frac": 0.0,
+        }
 
         obs_buffers = data[: len(self.obs_codec.specs)]
         observation = self.obs_codec.unpack(obs_buffers)
@@ -122,7 +136,7 @@ class CARLAEnvTFv6(gym.Env):
             "speed_hold_target_speed": np.frombuffer(data[idx + 7], dtype=np.float32),
             "infraction_type": bytes(data[idx + 8]).decode("utf-8"),
         }
-        num_sent = np.frombuffer(data[idx + 9], dtype=np.uint64).item()
+        num_sent = np.frombuffer(data[idx + 14], dtype=np.uint64).item()
         self._check_or_resync_counter(num_sent)
 
         return observation, info
@@ -149,15 +163,42 @@ class CARLAEnvTFv6(gym.Env):
                 data[idx + 7], dtype=np.float32
             ).item(),
             "infraction_type": bytes(data[idx + 8]).decode("utf-8"),
+            "reward_speed_penalty": np.frombuffer(
+                data[idx + 9], dtype=np.float32
+            ).item(),
+            "reward_ttc_penalty": np.frombuffer(
+                data[idx + 10], dtype=np.float32
+            ).item(),
+            "reward_comfort_penalty": np.frombuffer(
+                data[idx + 11], dtype=np.float32
+            ).item(),
+            "reward_lane_centering": np.frombuffer(
+                data[idx + 12], dtype=np.float32
+            ).item(),
+            "reward_outside_lanes": np.frombuffer(
+                data[idx + 13], dtype=np.float32
+            ).item(),
         }
         self.episode_return += float(reward)
         self.episode_length += 1
+        self._ep_reward_components["speed_penalty"] += info["reward_speed_penalty"]
+        self._ep_reward_components["ttc_frac"] += info["reward_ttc_penalty"]
+        self._ep_reward_components["comfort_penalty"] += info["reward_comfort_penalty"]
+        self._ep_reward_components["lane_centering"] += info["reward_lane_centering"]
+        self._ep_reward_components["outside_lanes_frac"] += info["reward_outside_lanes"]
         if termination or truncation:
+            n = float(self.episode_length)
             info["tfv6_episode"] = {
                 "r": float(self.episode_return),
                 "l": int(self.episode_length),
+                "speed_penalty": self._ep_reward_components["speed_penalty"] / n,
+                "ttc_frac": self._ep_reward_components["ttc_frac"] / n,
+                "comfort_penalty": self._ep_reward_components["comfort_penalty"] / n,
+                "lane_centering": self._ep_reward_components["lane_centering"] / n,
+                "outside_lanes_frac": self._ep_reward_components["outside_lanes_frac"]
+                / n,
             }
-        num_sent = np.frombuffer(data[idx + 9], dtype=np.uint64).item()
+        num_sent = np.frombuffer(data[idx + 14], dtype=np.uint64).item()
         self._check_or_resync_counter(num_sent)
 
         return observation, reward, termination, truncation, info

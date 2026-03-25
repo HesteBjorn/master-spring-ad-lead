@@ -131,6 +131,50 @@ def _iter_episode_stats(info: dict):
         )
 
 
+_REWARD_COMPONENT_KEYS = [
+    "speed_penalty",
+    "ttc_frac",
+    "comfort_penalty",
+    "lane_centering",
+    "outside_lanes_frac",
+]
+
+
+def _iter_reward_components(info: dict):
+    """Yield reward component dicts for completed tfv6 episodes.
+
+    Mirrors the scalar/array handling of _iter_episode_stats/_iter_from_episode_dict.
+    """
+
+    def _scalar(v):
+        return float(np.asarray(v).reshape(-1)[0])
+
+    if "final_info" in info:
+        for single_info in info["final_info"]:
+            if single_info is None:
+                continue
+            ep = single_info.get("tfv6_episode")
+            if ep is not None and "speed_penalty" in ep:
+                yield {k: _scalar(ep.get(k, 0.0)) for k in _REWARD_COMPONENT_KEYS}
+        return
+
+    ep = info.get("tfv6_episode")
+    if ep is not None and "speed_penalty" in ep:
+        arrays = {
+            k: np.asarray(ep.get(k, 0.0)).reshape(-1) for k in _REWARD_COMPONENT_KEYS
+        }
+        n = arrays[_REWARD_COMPONENT_KEYS[0]].shape[0]
+        done_mask = info.get("_tfv6_episode")
+        flat_done = (
+            np.asarray(done_mask, dtype=bool).reshape(-1)
+            if done_mask is not None
+            else np.ones(n, dtype=bool)
+        )
+        for idx in range(n):
+            if flat_done[idx]:
+                yield {k: float(arrays[k][idx]) for k in _REWARD_COMPONENT_KEYS}
+
+
 def _grad_norm_from_term(
     term: torch.Tensor, params: list[torch.nn.Parameter]
 ) -> torch.Tensor:
@@ -1491,6 +1535,12 @@ def main():
         num_total_returns = torch.zeros(
             world_size, device=device, dtype=torch.int32, requires_grad=False
         )
+        total_rc = {
+            k: torch.zeros(
+                world_size, device=device, dtype=torch.float32, requires_grad=False
+            )
+            for k in _REWARD_COMPONENT_KEYS
+        }
 
         if config.use_lstm:
             initial_lstm_state = (
@@ -1774,6 +1824,9 @@ def main():
                 total_returns[rank] += ep_return
                 total_lengths[rank] += ep_length
                 num_total_returns[rank] += 1
+            for rc in _iter_reward_components(info):
+                for k in _REWARD_COMPONENT_KEYS:
+                    total_rc[k][rank] += float(rc[k])
 
             if config.use_dd_ppo_preempt:
                 num_done = int(num_rollouts_done_store.get("num_done"))
@@ -1923,6 +1976,8 @@ def main():
         torch.distributed.all_reduce(
             num_total_returns, op=torch.distributed.ReduceOp.SUM
         )
+        for k in _REWARD_COMPONENT_KEYS:
+            torch.distributed.all_reduce(total_rc[k], op=torch.distributed.ReduceOp.SUM)
 
         if rank == 0:
             num_total_returns_all_processes = torch.sum(num_total_returns)
@@ -1953,6 +2008,13 @@ def main():
                 writer.add_scalar(
                     "charts/episodic_length", avg_length, config.global_step
                 )
+                for k in _REWARD_COMPONENT_KEYS:
+                    avg_rc = (
+                        torch.sum(total_rc[k]) / num_total_returns_all_processes
+                    ).item()
+                    writer.add_scalar(
+                        f"reward_components/{k}", avg_rc, config.global_step
+                    )
                 if windowed_avg_return >= config.max_training_score:
                     config.max_training_score = windowed_avg_return
                     # Same model could reach multiple high scores
