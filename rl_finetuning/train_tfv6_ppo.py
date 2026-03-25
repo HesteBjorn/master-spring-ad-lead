@@ -830,6 +830,13 @@ def parse_args(config):
                       type=float,
                       default=config.terminal_hint,
                       help='Reward at the end of the episode when colliding, the number will be subtracted.')
+    parser.add_argument('--terminal_penalty_warmup_n',
+                      type=int,
+                      default=0,
+                      help='Number of steps before a collision terminal to apply linearly increasing negative '
+                           'reward shaping. At step T-k the added reward is -terminal_hint*(N-k)/N, '
+                           'giving a ramp from 0 at T-N up to -terminal_hint*(N-1)/N at T-1. '
+                           '0 disables the feature.')
     parser.add_argument('--penalize_yellow_light',
                       type=lambda x: bool(strtobool(x)),
                       default=config.penalize_yellow_light,
@@ -1847,6 +1854,31 @@ def main():
 
         # In case of a dd-ppo preempt this can be smaller than local batch size
         num_collected_steps = step + 1
+
+        # Terminal penalty warmup: add linearly increasing negative rewards to the N steps
+        # preceding each collision terminal frame. This provides denser reward signal than
+        # relying solely on the sparse terminal event.
+        # At step T-k: add -terminal_hint * (N-k)/N  (ramp: 0 at T-N, ~-terminal_hint at T-1)
+        # Stops at episode boundaries so only steps in the same episode are shaped.
+        if args.terminal_penalty_warmup_n > 0 and args.terminal_hint > 0.0:
+            warmup_n = args.terminal_penalty_warmup_n
+            # Move to CPU for index-heavy boundary checks, copy back afterwards.
+            rewards_cpu = rewards[:num_collected_steps].cpu().clone()
+            dones_cpu = dones[:num_collected_steps].cpu()
+            collision_threshold = -0.5 * args.terminal_hint
+            for env_idx in range(args.num_envs_per_proc):
+                for t in range(num_collected_steps):
+                    if rewards_cpu[t, env_idx].item() >= collision_threshold:
+                        continue  # not a collision terminal frame
+                    for k in range(1, warmup_n + 1):
+                        t_prev = t - k
+                        if t_prev < 0:
+                            break  # reached start of buffer
+                        if dones_cpu[t_prev, env_idx].item() > 0.5:
+                            break  # crossed into a previous episode
+                        fraction = float(warmup_n - k) / float(warmup_n)
+                        rewards_cpu[t_prev, env_idx] -= args.terminal_hint * fraction
+            rewards[:num_collected_steps] = rewards_cpu.to(rewards.device)
 
         # bootstrap value if not done
         with torch.no_grad():
