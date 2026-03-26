@@ -214,16 +214,16 @@ class LowRankDiagRouteGaussianDistribution(nn.Module):
             col = col / (torch.linalg.norm(col) + 1e-8)
             cols.append(col)
 
-        turn_mode = u * torch.sin(0.5 * math.pi * u)
-        lane_change_mode = u * (1.0 - u)
+        lane_change_mode = u * torch.sin(0.5 * math.pi * u)
+        turn_mode = (u + 0.1) ** 2
 
         # Keep first two modes as requested and lateral first for controller relevance.
-        _add_axis_mode(turn_mode, axis=1)  # y
         _add_axis_mode(lane_change_mode, axis=1)  # y
+        _add_axis_mode(turn_mode, axis=1)  # y
 
         # If more rank is requested, add longitudinal counterparts.
-        _add_axis_mode(turn_mode, axis=0)  # x
         _add_axis_mode(lane_change_mode, axis=0)  # x
+        _add_axis_mode(turn_mode, axis=0)  # x
 
         # Extra fallback modes if rank > 4.
         mode = 1
