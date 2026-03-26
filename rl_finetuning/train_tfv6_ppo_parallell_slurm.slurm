@@ -82,4 +82,4 @@ bash rl_finetuning/train_tfv6_ppo_parallell.sh \
   "${CHECKPOINT_DIR}" \
   "${LOGDIR}" \
   "${EXP_NAME}" \
-  --debug 1
+  --debug 0

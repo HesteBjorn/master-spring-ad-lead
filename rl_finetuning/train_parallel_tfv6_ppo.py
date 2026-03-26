@@ -34,6 +34,25 @@ def next_free_port(port=1024, max_port=65535):
     raise OSError("no free ports")
 
 
+def wait_for_carla_ready(port, timeout=120):
+    """Poll the CARLA RPC port until it accepts a connection or timeout expires.
+
+    Returns True if the port became ready, False if it timed out (server crashed
+    or is unresponsive). The port only opens after UE4's render thread has fully
+    initialized, so a successful connection means it is safe to start the next
+    server on the same GPU.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        result = s.connect_ex(("localhost", port))
+        s.close()
+        if result == 0:
+            return True
+        time.sleep(1.0)
+    return False
+
+
 def kill(proc_pid):
     if psutil.pid_exists(proc_pid):
         process = psutil.Process(proc_pid)
@@ -471,67 +490,91 @@ if __name__ == "__main__":
             carla_processes = []
             leaderboard_processes = []
 
-            server_sleep = 7 if args.ml_cloud else 0.02
             client_sleep = 0.2 if args.ml_cloud else 0.02
             # TFv6 is a sensor agent. Keep CARLA threading enabled.
             tfv6_rpc_threads = args.carla_rpc_threads
             tfv6_streaming_threads = args.carla_streaming_threads
             tfv6_secondary_threads = args.carla_secondary_threads
 
-            for i in range(args.num_envs_per_node):
-                print(f"Start server {i}")
-                graphics_adapter = args.gpu_ids[i % len(args.gpu_ids)]
-                if args.carla_singularity:
-                    if not args.carla_singularity_path:
-                        raise ValueError(
-                            "--carla_singularity_path is required when --carla_singularity is set."
-                        )
-                    carla_processes.append(
-                        subprocess.Popen(
-                            f"singularity exec --nv --bind {args.carla_root}:{args.carla_root},{raw_logdir}:{raw_logdir} "
-                            f"{args.carla_singularity_path} "
-                            f"bash {args.carla_root}/CarlaUE4.sh -carla-rpc-port={client_ports[i]} -nosound "
-                            f"-carla-primary-port={carla_primary_ports[i]} -carla-streaming-port={sensor_ports[i]} "
-                            f"-RenderOffScreen -graphicsadapter={graphics_adapter} -RPCThreads={tfv6_rpc_threads} "
-                            f"-StreamingThreads={tfv6_streaming_threads} "
-                            f"-SecondaryThreads={tfv6_secondary_threads}",
-                            shell=True,
-                            stdout=server_outs[i],
-                            stderr=server_errs[i],
-                        )
-                    )
-                else:
-                    carla_processes.append(
-                        subprocess.Popen(
-                            # Keep CARLA server isolated from conda runtime libs to avoid UE4 lib conflicts.
-                            f"env -u LD_LIBRARY_PATH "
-                            f"bash {args.carla_root}/CarlaUE4.sh -carla-rpc-port={client_ports[i]} -nosound "
-                            f"-carla-primary-port={carla_primary_ports[i]} -carla-streaming-port={sensor_ports[i]} "
-                            f"-RenderOffScreen -graphicsadapter={graphics_adapter} -RPCThreads={tfv6_rpc_threads} "
-                            f"-StreamingThreads={tfv6_streaming_threads} "
-                            f"-SecondaryThreads={tfv6_secondary_threads}",
-                            shell=True,
-                            stdout=server_outs[i],
-                            stderr=server_errs[i],
-                        )
-                    )
-                time.sleep(server_sleep)
+            # Launch servers in GPU-batched rounds. Each round starts one server
+            # per GPU (all on different GPUs, no render-thread contention). When
+            # ml_cloud is set, we wait for every server in a round to open its
+            # RPC port before starting the next round, ensuring no same-GPU server
+            # is launched while a prior server on that GPU is still initializing.
+            num_gpus = len(args.gpu_ids)
+            num_rounds = (args.num_envs_per_node + num_gpus - 1) // num_gpus
 
-                print(f"Start client {i}")
-                leaderboard_processes.append(
-                    subprocess.Popen(
-                        f"bash {args.repo_root}/rl_finetuning/start_leaderboard_tfv6_ppo.sh "
-                        f"{args.repo_root} {args.git_root} {route_files[i]} {logdir} {i} "
-                        f"{client_ports[i]} {traffic_manager_ports[i]} {rl_ports[i]} {args.seed} "
-                        f"{skip_next_route} {args.route_repetitions} {args.tfv6_checkpoint} "
-                        f"{args.track} {args.frame_rate} False {args.timeout} "
-                        f"{args.runtime_timeout} {args.leaderboard_debug}",
-                        shell=True,
-                        stdout=client_outs[i],
-                        stderr=client_errs[i],
+            for round_idx in range(num_rounds):
+                round_indices = [
+                    round_idx * num_gpus + g
+                    for g in range(num_gpus)
+                    if round_idx * num_gpus + g < args.num_envs_per_node
+                ]
+
+                for i in round_indices:
+                    print(f"Start server {i}")
+                    graphics_adapter = args.gpu_ids[i % num_gpus]
+                    if args.carla_singularity:
+                        if not args.carla_singularity_path:
+                            raise ValueError(
+                                "--carla_singularity_path is required when --carla_singularity is set."
+                            )
+                        carla_processes.append(
+                            subprocess.Popen(
+                                f"singularity exec --nv --bind {args.carla_root}:{args.carla_root},{raw_logdir}:{raw_logdir} "
+                                f"{args.carla_singularity_path} "
+                                f"bash {args.carla_root}/CarlaUE4.sh -carla-rpc-port={client_ports[i]} -nosound "
+                                f"-carla-primary-port={carla_primary_ports[i]} -carla-streaming-port={sensor_ports[i]} "
+                                f"-RenderOffScreen -graphicsadapter={graphics_adapter} -RPCThreads={tfv6_rpc_threads} "
+                                f"-StreamingThreads={tfv6_streaming_threads} "
+                                f"-SecondaryThreads={tfv6_secondary_threads}",
+                                shell=True,
+                                stdout=server_outs[i],
+                                stderr=server_errs[i],
+                            )
+                        )
+                    else:
+                        carla_processes.append(
+                            subprocess.Popen(
+                                # Keep CARLA server isolated from conda runtime libs to avoid UE4 lib conflicts.
+                                f"env -u LD_LIBRARY_PATH "
+                                f"bash {args.carla_root}/CarlaUE4.sh -carla-rpc-port={client_ports[i]} -nosound "
+                                f"-carla-primary-port={carla_primary_ports[i]} -carla-streaming-port={sensor_ports[i]} "
+                                f"-RenderOffScreen -graphicsadapter={graphics_adapter} -RPCThreads={tfv6_rpc_threads} "
+                                f"-StreamingThreads={tfv6_streaming_threads} "
+                                f"-SecondaryThreads={tfv6_secondary_threads}",
+                                shell=True,
+                                stdout=server_outs[i],
+                                stderr=server_errs[i],
+                            )
+                        )
+
+                if args.ml_cloud:
+                    for i in round_indices:
+                        print(f"[launcher] Waiting for CARLA server {i} on port {client_ports[i]}...")
+                        if not wait_for_carla_ready(client_ports[i]):
+                            raise RuntimeError(
+                                f"CARLA server {i} (port {client_ports[i]}) did not become ready within 120s. "
+                                f"Check logs in {process_logdir} for details."
+                            )
+                        print(f"[launcher] CARLA server {i} ready.")
+
+                for i in round_indices:
+                    print(f"Start client {i}")
+                    leaderboard_processes.append(
+                        subprocess.Popen(
+                            f"bash {args.repo_root}/rl_finetuning/start_leaderboard_tfv6_ppo.sh "
+                            f"{args.repo_root} {args.git_root} {route_files[i]} {logdir} {i} "
+                            f"{client_ports[i]} {traffic_manager_ports[i]} {rl_ports[i]} {args.seed} "
+                            f"{skip_next_route} {args.route_repetitions} {args.tfv6_checkpoint} "
+                            f"{args.track} {args.frame_rate} False {args.timeout} "
+                            f"{args.runtime_timeout} {args.leaderboard_debug}",
+                            shell=True,
+                            stdout=client_outs[i],
+                            stderr=client_errs[i],
+                        )
                     )
-                )
-                time.sleep(client_sleep)
+                    time.sleep(client_sleep)
 
             skip_next_route = "False"
 

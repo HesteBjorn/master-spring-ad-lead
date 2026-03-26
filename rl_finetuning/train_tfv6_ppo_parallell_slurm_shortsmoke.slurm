@@ -3,14 +3,14 @@
 #SBATCH --account=share-ie-idi
 #SBATCH --mail-user=erikhbj@stud.ntnu.no
 #SBATCH --mail-type=ALL
-#SBATCH --partition=short
+#SBATCH --partition=GPUQ
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:2
-#SBATCH --cpus-per-task=24
-#SBATCH --mem=120G
-#SBATCH --time=0-00:20:00
-#SBATCH --constraint=gpu16g|gpu32g|gpu40g|gpu80g
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=256G
+#SBATCH --time=0-00:10:00
+#SBATCH --constraint=a100|h100|h200
 #SBATCH --output=outputs/rl_logs/slurm_%j.out
 #SBATCH --error=outputs/rl_logs/slurm_%j.err
 
@@ -24,14 +24,14 @@ source slurm/init.sh
 
 export PYTHONUNBUFFERED=1
 export WANDB_MODE="${WANDB_MODE:-disabled}"
-export CARLA_ROOT="${CARLA_ROOT:-$PWD/3rd_party/CARLA_0915}"
+export CARLA_ROOT="${CARLA_ROOT:-$PWD/3rd_party/fork_export_t1213_fixed/LinuxNoEditor}"
 export PYTHONPATH="$CARLA_ROOT/PythonAPI:$CARLA_ROOT/PythonAPI/carla:$PWD:$PYTHONPATH"
 
 # Module/conda setup (IDUN-specific)
 module purge
 module load Anaconda3/2024.02-1
 eval "$(conda shell.bash hook)"
-source activate "${CONDA_INTERPRETER:-lead}"
+source activate "${CONDA_INTERPRETER:-lead_carla_fork}"
 
 mkdir -p outputs/rl_logs
 
@@ -40,7 +40,7 @@ nvidia-smi
 
 GPU_COUNT="$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)"
 GPU_IDS="$(seq -s ' ' 0 $((GPU_COUNT - 1)))"
-GPU_MEM_MIB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n1)"
+GPU_MEM_MIB="$(nvidia-smi --id=0 --query-gpu=memory.total --format=csv,noheader,nounits)"
 
 # Target 2 envs/GPU when VRAM is sufficient. Fallback to 1 for small GPUs.
 if [[ "${NUM_ENVS_PER_GPU:-}" == "" ]]; then
@@ -50,7 +50,7 @@ if [[ "${NUM_ENVS_PER_GPU:-}" == "" ]]; then
     NUM_ENVS_PER_GPU=2
   fi
 fi
-
+NUM_ENVS_PER_GPU=3
 NUM_ENVS_PER_NODE="${NUM_ENVS_PER_NODE:-$((GPU_COUNT * NUM_ENVS_PER_GPU))}"
 
 RUN_CONFIG_FILE="${RUN_CONFIG_FILE:-rl_finetuning/configs/train_parallel_idun.env}"
