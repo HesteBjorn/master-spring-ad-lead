@@ -172,9 +172,14 @@ slurm-*.out
 3rd_party/CARLA_0915/
 3rd_party/CARLA_0915
 3rd_party/CARLA_0916/
+3rd_party/fork_export/
+3rd_party/fork_export_t1213/
+3rd_party/fork_export_t1213_fixed/
+3rd_party/fork_export_t1213_trace/
+3rd_party/fork_export_t1213_diag/
+3rd_party/fork_export_t1213_rootfix/
 3rd_party/carla_route_generator/
 outputs/
-!outputs/rl_logs
 3rd_party/navsim_workspace
 docs/build/
 !slurm/
