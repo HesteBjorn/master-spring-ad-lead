@@ -598,6 +598,10 @@ def parse_args(config):
                       type=float,
                       default=getattr(config, 'standstill_speed_hold_target_speed_threshold', 1.0 / 3.6),
                       help='Require sampled target speed to exceed this threshold in m/s before starting the standstill speed hold.')
+    parser.add_argument('--speed_temperature',
+                      type=float,
+                      default=getattr(config, 'speed_temperature', 1.0),
+                      help='Temperature for speed categorical distribution. T>1 softens the distribution for more exploration.')
     parser.add_argument('--route_sampling_technique',
                       type=str,
                       default=getattr(config, 'route_sampling_technique', 'spline_curvature_perturbation'),
@@ -1513,6 +1517,9 @@ def main():
             standstill_speed_hold_target_speed_threshold=getattr(
                 config, "standstill_speed_hold_target_speed_threshold", 1.0 / 3.6
             ),
+            speed_temperature=agent.module.speed_temperature
+            if isinstance(agent, torch.nn.parallel.DistributedDataParallel)
+            else agent.speed_temperature,
         )
         print(
             f"[debug_viz] enabled path={debug_dir} "

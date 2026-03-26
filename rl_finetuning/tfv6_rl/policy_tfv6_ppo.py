@@ -109,6 +109,7 @@ class TFv6PPOPolicy(nn.Module):
         self.lowrank_route_rank = 6
         self.lowrank_route_std_init = 0.015
         self.disable_learned_noise_head = True
+        self.speed_temperature = 1.0
         self.critic_updates_shared_features = True
         self.use_privileged_measurements = True
         self.num_privileged_measurements = 0
@@ -199,6 +200,9 @@ class TFv6PPOPolicy(nn.Module):
                     self.disable_learned_noise_head,
                 )
             )
+            self.speed_temperature = float(
+                getattr(rl_config, "speed_temperature", self.speed_temperature)
+            )
             self.critic_updates_shared_features = bool(
                 getattr(
                     rl_config,
@@ -263,6 +267,7 @@ class TFv6PPOPolicy(nn.Module):
             lowrank_route_rank=self.lowrank_route_rank,
             lowrank_route_std_init=self.lowrank_route_std_init,
             speed_sampling_style=self.speed_sampling_style,
+            speed_temperature=self.speed_temperature,
         )
         self.action_dist = self.action_noise_codec.action_dist
         self.privileged_obs_key = "privileged_measurements"

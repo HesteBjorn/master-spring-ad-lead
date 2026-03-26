@@ -171,9 +171,11 @@ class PPORolloutVisualizer:
         standstill_speed_hold_frames: int = 1,
         standstill_speed_hold_ego_speed_threshold: float = 0.1,
         standstill_speed_hold_target_speed_threshold: float = 1.0 / 3.6,
+        speed_temperature: float = 1.0,
     ) -> None:
         self.training_config = training_config
         self.action_codec = action_codec
+        self.speed_temperature = float(speed_temperature)
         self.output_dir = output_dir
         self.gamma = float(gamma)
         self.every_n = max(1, int(every_n))
@@ -1268,6 +1270,7 @@ class PPORolloutVisualizer:
         if target_speed_logits is not None:
             logits = np.asarray(target_speed_logits, dtype=np.float32).reshape(-1)
             if logits.size > 0:
+                logits = logits / self.speed_temperature
                 logits = logits - float(np.max(logits))
                 exp_logits = np.exp(logits)
                 denom = float(exp_logits.sum())

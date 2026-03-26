@@ -47,6 +47,7 @@ class GlobalConfig(CaRLGlobalConfig):
         self.standstill_speed_hold_target_speed_threshold = 1.0 / 3.6
         # Keep constant-noise behavior by default unless explicitly overridden.
         self.disable_learned_noise_head = True
+        self.speed_temperature = 1.0
         # Use a higher LR for std head so state-dependent uncertainty adapts faster.
         self.log_std_head_lr_mult = 5.0
         # Optional memory-saving path: keep rollout observations on CPU and

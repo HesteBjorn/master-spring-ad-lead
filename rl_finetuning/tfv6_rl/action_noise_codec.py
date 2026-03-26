@@ -448,9 +448,12 @@ class HybridActionDistribution:
         speed_logits: torch.Tensor,
         speed_values: torch.Tensor,
         continuous_action_dim: int,
+        speed_temperature: float = 1.0,
     ) -> None:
         self.continuous_dist = continuous_dist
-        self.speed_categorical = Categorical(logits=speed_logits.float())
+        self.speed_categorical = Categorical(
+            logits=speed_logits.float() / speed_temperature
+        )
         self.speed_values = speed_values.to(
             device=speed_logits.device, dtype=speed_logits.dtype
         )
@@ -578,6 +581,7 @@ class ActionNoiseCodec:
         beta_concentration_min: float = 2.0,
         beta_concentration_max: float = 200.0,
         speed_sampling_style: str = "native_categorical",
+        speed_temperature: float = 1.0,
     ) -> None:
         self.full_action_codec = action_codec
         self.distribution_type = str(distribution_type)
@@ -596,6 +600,7 @@ class ActionNoiseCodec:
         self.beta_concentration_min = float(beta_concentration_min)
         self.beta_concentration_max = float(beta_concentration_max)
         self.speed_sampling_style = str(speed_sampling_style)
+        self.speed_temperature = float(speed_temperature)
         if self.speed_sampling_style == "mean_gassian":
             self.speed_sampling_style = "mean_gaussian"
         if self.speed_sampling_style not in ("mean_gaussian", "native_categorical"):
@@ -1000,6 +1005,7 @@ class ActionNoiseCodec:
                 speed_logits=speed_logits,
                 speed_values=self.speed_values,
                 continuous_action_dim=self.continuous_action_dim,
+                speed_temperature=self.speed_temperature,
             )
         if dist is None:
             raise RuntimeError("No action distribution constructed.")
