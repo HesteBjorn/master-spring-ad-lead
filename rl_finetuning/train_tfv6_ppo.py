@@ -557,6 +557,11 @@ def parse_args(config):
                       type=float,
                       default=config.log_std_head_lr_mult,
                       help='Learning-rate multiplier for the log_std prediction head.')
+    parser.add_argument('--value_head_lr_mult',
+                      type=float,
+                      default=getattr(config, 'value_head_lr_mult', 1.0),
+                      help='Learning-rate multiplier for the critic (value_head + value_queries). '
+                           'Use >1 to let the critic bootstrap faster than the actor LR allows.')
     parser.add_argument('--disable_learned_noise_head',
                       type=lambda x: bool(strtobool(x)),
                       default=getattr(config, 'disable_learned_noise_head', True),
@@ -1276,10 +1281,17 @@ def main():
         for name, param in trainable_named_params
         if "action_noise_head." in name
     ]
+    value_head_named_params = [
+        (name, param)
+        for name, param in trainable_named_params
+        if "value_head." in name or name == "value_queries"
+    ]
+    value_head_param_ids = {id(p) for _, p in value_head_named_params}
+    log_std_param_ids = {id(p) for _, p in log_std_named_params}
     base_named_params = [
         (name, param)
         for name, param in trainable_named_params
-        if "action_noise_head." not in name
+        if id(param) not in value_head_param_ids and id(param) not in log_std_param_ids
     ]
 
     optimizer_param_groups = []
@@ -1289,6 +1301,7 @@ def main():
                 "params": [param for _, param in base_named_params],
                 "lr": config.current_learning_rate,
                 "is_log_std_head": False,
+                "is_value_head": False,
             }
         )
     if log_std_named_params:
@@ -1297,6 +1310,16 @@ def main():
                 "params": [param for _, param in log_std_named_params],
                 "lr": config.current_learning_rate * config.log_std_head_lr_mult,
                 "is_log_std_head": True,
+                "is_value_head": False,
+            }
+        )
+    if value_head_named_params:
+        optimizer_param_groups.append(
+            {
+                "params": [param for _, param in value_head_named_params],
+                "lr": config.current_learning_rate * config.value_head_lr_mult,
+                "is_log_std_head": False,
+                "is_value_head": True,
             }
         )
 
@@ -1305,6 +1328,13 @@ def main():
             "[optimizer] "
             f"log_std_head_lr_mult={config.log_std_head_lr_mult} "
             f"log_std_head_trainable_params={sum(p.numel() for _, p in log_std_named_params)}",
+            flush=True,
+        )
+    if rank == 0 and value_head_named_params:
+        print(
+            "[optimizer] "
+            f"value_head_lr_mult={config.value_head_lr_mult} "
+            f"value_head_trainable_params={sum(p.numel() for _, p in value_head_named_params)}",
             flush=True,
         )
 
@@ -1594,11 +1624,12 @@ def main():
             )
 
         for param_group in optimizer.param_groups:
-            lr_mult = (
-                config.log_std_head_lr_mult
-                if param_group.get("is_log_std_head", False)
-                else 1.0
-            )
+            if param_group.get("is_log_std_head", False):
+                lr_mult = config.log_std_head_lr_mult
+            elif param_group.get("is_value_head", False):
+                lr_mult = config.value_head_lr_mult
+            else:
+                lr_mult = 1.0
             param_group["lr"] = config.current_learning_rate * lr_mult
 
         t0 = TicToc()  # Data collect

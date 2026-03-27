@@ -304,14 +304,17 @@ class TFv6PPOPolicy(nn.Module):
             for param in self.action_noise_head.parameters():
                 param.requires_grad_(False)
 
-        # Critic: 4-query attention pooling over kv tokens.
-        # Each query specializes on a different spatial/semantic aspect of the scene,
-        # giving the critic richer scene understanding than mean-pooling.
+        # Critic: mean-pool skip connection + 4-query attention pooling over kv tokens.
+        # Mean-pool provides a stable direct gradient path (skip connection) so the MLP
+        # can bootstrap immediately. The 4 attention queries learn specialized residual
+        # views on top, each focusing on a different aspect of the scene.
+        # Combined spatial dim: token_dim (mean) + num_queries * token_dim (attention).
         self.num_value_queries = 4
         self.value_queries = nn.Parameter(
             torch.randn(self.num_value_queries, self.value_token_dim) * 0.02
         )
-        critic_in_dim = self.num_value_queries * self.value_token_dim + (
+        critic_spatial_dim = (1 + self.num_value_queries) * self.value_token_dim
+        critic_in_dim = critic_spatial_dim + (
             self.num_privileged_measurements if self.use_privileged_measurements else 0
         )
         self.value_head = nn.Sequential(
@@ -375,11 +378,15 @@ class TFv6PPOPolicy(nn.Module):
         return kv.mean(dim=1)
 
     def _build_critic_spatial_features(self) -> torch.Tensor:
-        """4-query attention pooling over kv tokens for the critic.
+        """Mean-pool skip + 4-query attention pooling over kv tokens for the critic.
 
-        Each query attends independently over all planning context tokens,
-        allowing the critic to simultaneously focus on different aspects of
-        the scene (e.g. spatial threats, ego-state, route context).
+        The mean-pool term is a skip connection: it gives the MLP a direct,
+        stable gradient path that bypasses the attention softmax, so the critic
+        can bootstrap immediately while the attention queries slowly specialise.
+        The attention queries each attend independently over all tokens, learning
+        residual specialised views on top of the mean-pool baseline.
+
+        Output shape: [B, (1 + num_queries) * token_dim]
 
         Detach respects critic_updates_shared_features: kv is stopped before
         the attention so TFv6 receives no gradient from the critic, while the
@@ -389,13 +396,18 @@ class TFv6PPOPolicy(nn.Module):
         if kv is None:
             raise RuntimeError("Planning decoder context tokens not available.")
         kv_f = kv if self.critic_updates_shared_features else kv.detach()
+        # Skip connection: mean-pool over all tokens — direct gradient path to MLP.
+        mean_pooled = kv_f.mean(dim=1)  # [B, token_dim]
         scale = self.value_token_dim**0.5
         # scores: [B, num_queries, N_tokens]
         scores = torch.einsum("qd,bnd->bqn", self.value_queries, kv_f) / scale
         weights = scores.softmax(dim=-1)
-        # pooled: [B, num_queries, token_dim] -> [B, num_queries * token_dim]
-        pooled = torch.einsum("bqn,bnd->bqd", weights, kv_f)
-        return pooled.flatten(start_dim=1).float()
+        # attention_pooled: [B, num_queries, token_dim]
+        attention_pooled = torch.einsum("bqn,bnd->bqd", weights, kv_f)
+        # Concatenate skip (mean) and attention along feature dim → [B, (1+Q)*D]
+        return torch.cat(
+            [mean_pooled, attention_pooled.flatten(start_dim=1)], dim=1
+        ).float()
 
     def _build_critic_input(self, obs_dict: dict) -> torch.Tensor:
         """Critic input: attention-pooled kv features + privileged measurements."""

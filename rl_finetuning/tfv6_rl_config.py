@@ -50,6 +50,9 @@ class GlobalConfig(CaRLGlobalConfig):
         self.speed_temperature = 1.0
         # Use a higher LR for std head so state-dependent uncertainty adapts faster.
         self.log_std_head_lr_mult = 5.0
+        # Higher LR for critic (value_head + value_queries) so it can bootstrap
+        # from a cold init while the actor stays at the conservative base LR.
+        self.value_head_lr_mult = 1.0
         # Optional memory-saving path: keep rollout observations on CPU and
         # transfer only active PPO minibatch observation slices to GPU.
         self.stream_obs_minibatches_from_cpu_to_save_gpu_memory = False
