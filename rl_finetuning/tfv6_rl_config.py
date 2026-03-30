@@ -17,9 +17,9 @@ class GlobalConfig(CaRLGlobalConfig):
         self.lr_schedule = "linear"
         self.use_value_measurements = True
         # TFv6 PPO policy defaults.
-        self.use_correlated_noise = True
+        self.use_correlated_noise = False
         self.correlated_noise_rho = 0.8
-        self.noise_ramp = True
+        self.noise_ramp = False
         self.skip_perception_heads = True
         self.train_planning_decoder_only = True
         self.action_noise_dist = "gaussian"
@@ -32,7 +32,7 @@ class GlobalConfig(CaRLGlobalConfig):
         self.lowrank_route_rank = 6
         self.lowrank_route_std_init = 0.015
         # Keep a lightweight trust region to the original TFv6 behavior during RL finetuning.
-        self.use_kl_to_reference = True
+        self.use_kl_to_reference = False
         self.kl_to_reference_coef = 1e-4
         # TFv6 PPO policy noise defaults (state-dependent log_std head).
         self.log_std_init = -4.0
@@ -41,7 +41,7 @@ class GlobalConfig(CaRLGlobalConfig):
         self.log_std_min = -5.0
         self.log_std_max = 1.0
         self.speed_sampling_style = "native_categorical"
-        self.standstill_speed_hold_enabled = True
+        self.standstill_speed_hold_enabled = False
         self.standstill_speed_hold_frames = 3
         self.standstill_speed_hold_ego_speed_threshold = 0.1
         self.standstill_speed_hold_target_speed_threshold = 1.0 / 3.6
