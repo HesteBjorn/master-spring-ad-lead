@@ -139,6 +139,19 @@ _REWARD_COMPONENT_KEYS = [
     "outside_lanes_frac",
 ]
 
+_INFRACTION_TYPES = [
+    "finished_route",
+    "collision",
+    "ran_red_light",
+    "ran_stop_sign",
+    "route_deviation",
+    "route_deviation_2",
+    "ego_blocked",
+    "vehicle_too_close",
+    "timeout",
+    "off_road_term",
+]
+
 
 def _iter_reward_components(info: dict):
     """Yield reward component dicts for completed tfv6 episodes.
@@ -1585,6 +1598,12 @@ def main():
             )
             for k in _REWARD_COMPONENT_KEYS
         }
+        infraction_counts = {
+            k: torch.zeros(
+                world_size, device=device, dtype=torch.float32, requires_grad=False
+            )
+            for k in _INFRACTION_TYPES
+        }
 
         if config.use_lstm:
             initial_lstm_state = (
@@ -1872,6 +1891,11 @@ def main():
             for rc in _iter_reward_components(info):
                 for k in _REWARD_COMPONENT_KEYS:
                     total_rc[k][rank] += float(rc[k])
+            for idx in range(args.num_envs_per_proc):
+                if bool(done[idx]):
+                    infraction = terminal_infraction_by_env[idx] or "finished_route"
+                    if infraction in infraction_counts:
+                        infraction_counts[infraction][rank] += 1.0
 
             if config.use_dd_ppo_preempt:
                 num_done = int(num_rollouts_done_store.get("num_done"))
@@ -2048,6 +2072,10 @@ def main():
         )
         for k in _REWARD_COMPONENT_KEYS:
             torch.distributed.all_reduce(total_rc[k], op=torch.distributed.ReduceOp.SUM)
+        for k in _INFRACTION_TYPES:
+            torch.distributed.all_reduce(
+                infraction_counts[k], op=torch.distributed.ReduceOp.SUM
+            )
 
         if rank == 0:
             num_total_returns_all_processes = torch.sum(num_total_returns)
@@ -2085,6 +2113,16 @@ def main():
                     writer.add_scalar(
                         f"reward_components/{k}", avg_rc, config.global_step
                     )
+                total_infraction_episodes = sum(
+                    torch.sum(infraction_counts[k]).item() for k in _INFRACTION_TYPES
+                )
+                if total_infraction_episodes > 0:
+                    for k in _INFRACTION_TYPES:
+                        frac = (
+                            torch.sum(infraction_counts[k]).item()
+                            / total_infraction_episodes
+                        )
+                        writer.add_scalar(f"infractions/{k}", frac, config.global_step)
                 if windowed_avg_return >= config.max_training_score:
                     config.max_training_score = windowed_avg_return
                     # Same model could reach multiple high scores
