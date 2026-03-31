@@ -883,7 +883,7 @@ class PPORolloutVisualizer:
         cv2.rectangle(panel, (x0, y0), (x0 + w, y0 + h), (210, 210, 210), 1)
         cv2.putText(
             panel,
-            "Speed (Residual RL)  \u2014  base|adj|sampled|ego",
+            "Speed (Residual RL)",
             (x0 + 8, y0 + 18),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.45,
@@ -1095,9 +1095,202 @@ class PPORolloutVisualizer:
                 (adj_x, mid_y),
                 (140, 140, 140),
                 1,
-                tipLength=0.2,
-                lineType=cv2.LINE_AA,
+                cv2.LINE_AA,
+                0,
+                0.2,
             )
+
+    def _draw_residual_coeff_panel(
+        self,
+        panel: np.ndarray,
+        *,
+        x0: int,
+        y0: int,
+        w: int,
+        h: int,
+        coeff_preds: np.ndarray,  # shape (2*(rank+1),): [means..., log_stds...]
+        rank: int,
+    ) -> None:
+        """Forest-plot style panel: one row per residual coefficient (route modes + speed)."""
+        n = rank + 1  # route modes + speed
+        means = coeff_preds[:n].astype(np.float32)
+        log_stds = coeff_preds[n:].astype(np.float32)
+        stds = np.exp(log_stds)
+
+        if w < 120 or h < 80:
+            return
+
+        COLOR_ROUTE = (20, 80, 230)  # blue  — route basis modes
+        COLOR_SPEED = (230, 110, 0)  # orange — speed coefficient
+        COLOR_ZERO = (160, 160, 160)  # gray  — zero reference
+
+        # --- Title ---
+        cv2.rectangle(panel, (x0, y0), (x0 + w - 1, y0 + h - 1), (210, 210, 210), 1)
+        cv2.putText(
+            panel,
+            "Residual Coefficients",
+            (x0 + 8, y0 + 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (20, 20, 20),
+            1,
+            cv2.LINE_AA,
+        )
+
+        header_h = 26
+        axis_h = 28  # bottom: x-axis ticks/labels
+        label_w = 52  # left: row labels
+        text_w = 88  # right: μ / σ numeric text
+        plot_x0 = x0 + label_w
+        plot_x1 = x0 + w - text_w - 4
+        plot_y0 = y0 + header_h
+        plot_y1 = y0 + h - axis_h
+
+        if plot_x1 <= plot_x0 + 20 or plot_y1 <= plot_y0 + n * 10:
+            return
+
+        row_h = max(12, (plot_y1 - plot_y0) // n)
+
+        # --- Auto x-axis range: cover mean ± 2σ for all coefficients ---
+        max_abs = float(np.max(np.abs(means) + 2.0 * stds))
+        max_abs = max(max_abs, 0.3)
+        axis_range = max_abs * 1.15
+
+        def val_to_px(v: float) -> int:
+            alpha = (float(v) + axis_range) / (2.0 * axis_range)
+            return int(round(plot_x0 + alpha * (plot_x1 - plot_x0)))
+
+        zero_px = val_to_px(0.0)
+        rows_bottom = plot_y0 + n * row_h
+
+        # Continuous zero reference line through all rows
+        cv2.line(
+            panel,
+            (zero_px, plot_y0),
+            (zero_px, rows_bottom),
+            COLOR_ZERO,
+            1,
+            cv2.LINE_AA,
+        )
+
+        for i in range(n):
+            row_y0 = plot_y0 + i * row_h
+            row_y1 = row_y0 + row_h
+            row_cy = (row_y0 + row_y1) // 2
+
+            color = COLOR_SPEED if i == rank else COLOR_ROUTE
+            label = "speed" if i == rank else f"mode {i}"
+            mu = float(means[i])
+            sigma = float(stds[i])
+
+            # Subtle row separator
+            if i > 0:
+                cv2.line(
+                    panel,
+                    (plot_x0, row_y0),
+                    (plot_x1, row_y0),
+                    (220, 220, 220),
+                    1,
+                )
+
+            # Light background tint per row
+            bg = (245, 248, 255) if color == COLOR_ROUTE else (255, 248, 242)
+            cv2.rectangle(
+                panel, (plot_x0, row_y0 + 2), (plot_x1 - 1, row_y1 - 2), bg, -1
+            )
+
+            # ±σ filled band (blended lighter version of the row color)
+            band_h4 = max(3, row_h // 4)
+            band_y0 = row_cy - band_h4
+            band_y1 = row_cy + band_h4
+            sx0 = max(plot_x0, min(plot_x1, val_to_px(mu - sigma)))
+            sx1 = max(plot_x0, min(plot_x1, val_to_px(mu + sigma)))
+            if sx1 > sx0:
+                fill = tuple(int(c * 0.25 + 248 * 0.75) for c in color)
+                cv2.rectangle(panel, (sx0, band_y0), (sx1, band_y1), fill, -1)
+                cv2.rectangle(panel, (sx0, band_y0), (sx1, band_y1), color, 1)
+
+            # Mean vertical line (slightly taller than band)
+            mu_px = max(plot_x0, min(plot_x1, val_to_px(mu)))
+            cv2.line(
+                panel,
+                (mu_px, band_y0 - 4),
+                (mu_px, band_y1 + 4),
+                color,
+                2,
+                cv2.LINE_AA,
+            )
+
+            # Mean dot with white outline
+            cv2.circle(panel, (mu_px, row_cy), 4, color, -1, cv2.LINE_AA)
+            cv2.circle(panel, (mu_px, row_cy), 4, (255, 255, 255), 1, cv2.LINE_AA)
+
+            # Row label (left side)
+            cv2.putText(
+                panel,
+                label,
+                (x0 + 4, row_cy + 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.36,
+                (40, 40, 40),
+                1,
+                cv2.LINE_AA,
+            )
+
+            # Numeric text (right side): two lines, μ and σ
+            mu_sign = "+" if mu >= 0 else ""
+            cv2.putText(
+                panel,
+                f"m={mu_sign}{mu:.3f}",
+                (plot_x1 + 6, row_cy - 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.33,
+                (40, 40, 40),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                panel,
+                f"s={sigma:.3f}",
+                (plot_x1 + 6, row_cy + 12),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.33,
+                (40, 40, 40),
+                1,
+                cv2.LINE_AA,
+            )
+
+        # --- X-axis ---
+        axis_y = rows_bottom
+        cv2.line(panel, (plot_x0, axis_y), (plot_x1, axis_y), (120, 120, 120), 1)
+        for tv in [-axis_range, -axis_range / 2.0, 0.0, axis_range / 2.0, axis_range]:
+            tx = val_to_px(tv)
+            if plot_x0 <= tx <= plot_x1:
+                cv2.line(panel, (tx, axis_y), (tx, axis_y + 4), (80, 80, 80), 1)
+                tick_label = "0" if tv == 0.0 else f"{tv:+.2f}"
+                (lw, _), _ = cv2.getTextSize(
+                    tick_label, cv2.FONT_HERSHEY_SIMPLEX, 0.30, 1
+                )
+                cv2.putText(
+                    panel,
+                    tick_label,
+                    (tx - lw // 2, axis_y + 14),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.30,
+                    (40, 40, 40),
+                    1,
+                    cv2.LINE_AA,
+                )
+        cv2.putText(
+            panel,
+            "coeff value",
+            (plot_x0, axis_y + 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.32,
+            (80, 80, 80),
+            1,
+            cv2.LINE_AA,
+        )
 
     def _draw_spatial_std_profile(
         self,
@@ -1421,6 +1614,7 @@ class PPORolloutVisualizer:
         mean_action: np.ndarray,
         base_mean_action: np.ndarray | None = None,
         target_speed_logits: np.ndarray | None = None,
+        residual_coeff_preds: np.ndarray | None = None,
         log_std: np.ndarray,
         value_estimate: float,
         route_completion: float | None,
@@ -1662,15 +1856,26 @@ class PPORolloutVisualizer:
                 hold_indicator_text=hold_indicator_text,
             )
 
-        self._draw_spatial_std_profile(
-            graphs_panel,
-            x0=0,
-            y0=0,
-            w=graph_w,
-            h=top_h,
-            route_point_std=route_point_std,
-            waypoint_point_std=waypoint_point_std,
-        )
+        if self.use_residual_policy and residual_coeff_preds is not None:
+            self._draw_residual_coeff_panel(
+                graphs_panel,
+                x0=0,
+                y0=0,
+                w=graph_w,
+                h=top_h,
+                coeff_preds=residual_coeff_preds,
+                rank=int(getattr(self.training_config, "residual_route_rank", 2)),
+            )
+        else:
+            self._draw_spatial_std_profile(
+                graphs_panel,
+                x0=0,
+                y0=0,
+                w=graph_w,
+                h=top_h,
+                route_point_std=route_point_std,
+                waypoint_point_std=waypoint_point_std,
+            )
 
         if done or truncated:
             self.episode_returns[env_slot] = 0.0

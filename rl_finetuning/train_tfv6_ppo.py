@@ -1874,6 +1874,11 @@ def main():
                             .cpu()
                             .numpy()
                         ),
+                        residual_coeff_preds=(
+                            noise_pred[env_idx].detach().cpu().numpy()
+                            if getattr(config, "use_residual_policy", False)
+                            else None
+                        ),
                         log_std=diag_log_std[env_idx].detach().cpu().numpy(),
                         value_estimate=float(value[env_idx].item()),
                         route_completion=float(route_completion_by_env[env_idx]),

@@ -360,12 +360,28 @@ class TFv6PPOPolicy(nn.Module):
             # Residual head: outputs 2*(rank+1) values.
             # Layout: [n_0..n_{rank-1}, speed_mean,  log_σ_0..log_σ_{rank-1}, log_speed_σ]
             #          ←——— rank+1 means ———→           ←———— rank+1 log_stds ————→
-            # Zero weight init; bias: means=0, log_stds=configured init values.
+            #
+            # Input = attention-pooled KV tokens (skip + 4-query, always detached from
+            # TFv6) + frozen base action (route_norm ++ speed_expected).
+            # No privileged measurements — those are for the critic only.
+            # KV always detached: the actor must never backpropagate into TFv6.
             residual_out_dim = 2 * (self.residual_route_rank + 1)
+            self.num_residual_queries = 4
+            self.residual_queries = nn.Parameter(
+                torch.randn(self.num_residual_queries, self.value_token_dim) * 0.02
+            )
+            residual_spatial_dim = (
+                1 + self.num_residual_queries
+            ) * self.value_token_dim
+            # Base action: route_dim route coords + 1 speed value (normalized, from frozen TFv6).
+            residual_action_dim = self.action_codec.route_dim + 1
+            residual_in_dim = residual_spatial_dim + residual_action_dim
             self.residual_head = nn.Sequential(
-                nn.Linear(noise_in_dim, noise_in_dim),
+                nn.LayerNorm(residual_in_dim),
+                nn.Linear(residual_in_dim, 256),
+                nn.LayerNorm(256),
                 nn.ReLU(inplace=True),
-                nn.Linear(noise_in_dim, residual_out_dim),
+                nn.Linear(256, residual_out_dim),
             )
             route_log_std_init = (
                 self.log_std_init_route
@@ -514,6 +530,28 @@ class TFv6PPOPolicy(nn.Module):
             [mean_pooled, attention_pooled.flatten(start_dim=1)], dim=1
         ).float()
 
+    def _build_residual_spatial_features(self) -> torch.Tensor:
+        """Mean-pool skip + query attention over KV tokens for the residual head.
+
+        Mirrors _build_critic_spatial_features but uses the separate residual_queries
+        and always detaches KV — the actor must never propagate gradients into the
+        frozen TFv6 backbone.
+
+        Output shape: [B, (1 + num_residual_queries) * token_dim]
+        """
+        kv = getattr(self.tfv6.planning_decoder, "kv", None)
+        if kv is None:
+            raise RuntimeError("Planning decoder context tokens not available.")
+        kv_d = kv.detach()  # always detach — actor must not update TFv6
+        mean_pooled = kv_d.mean(dim=1)  # [B, token_dim]
+        scale = self.value_token_dim**0.5
+        scores = torch.einsum("qd,bnd->bqn", self.residual_queries, kv_d) / scale
+        weights = scores.softmax(dim=-1)
+        attention_pooled = torch.einsum("bqn,bnd->bqd", weights, kv_d)
+        return torch.cat(
+            [mean_pooled, attention_pooled.flatten(start_dim=1)], dim=1
+        ).float()
+
     def _build_critic_input(self, obs_dict: dict) -> torch.Tensor:
         """Critic input: attention-pooled kv features + privileged measurements."""
         spatial = self._build_critic_spatial_features()
@@ -645,14 +683,24 @@ class TFv6PPOPolicy(nn.Module):
             [route_norm, speed_expected], dim=1
         ).detach()  # (B, route_dim+1)
 
-        # --- Shared features ---
-        value_features = self._build_value_and_noise_features(
-            obs_dict
-        )  # (B, noise_in_dim)
+        # --- Residual head features: attention-pooled KV (detached) + base action ---
+        # KV tokens carry the full scene context TFv6 attended to; always detached so
+        # the actor never backprops into the frozen backbone.
+        # Base action (route_norm ++ speed_expected) tells the head what TFv6 already
+        # intends to do, allowing it to condition its correction on the base plan.
+        spatial_features = (
+            self._build_residual_spatial_features()
+        )  # (B, residual_spatial_dim)
+        base_action = torch.cat(
+            [route_norm, speed_expected], dim=1
+        ).detach()  # (B, route_dim+1) — detach: no gradient through frozen TFv6 output
+        residual_features = torch.cat(
+            [spatial_features, base_action], dim=1
+        )  # (B, residual_in_dim)
 
         # --- Residual head: means + log_stds for basis coefficients ---
         # Output layout: [n_0..n_{rank-1}, speed_mean, log_σ_0..log_σ_{rank-1}, log_speed_σ]
-        head_out = self.residual_head(value_features).float()  # (B, 2*(rank+1))
+        head_out = self.residual_head(residual_features).float()  # (B, 2*(rank+1))
         rank = self.residual_route_rank
         coeff_means = head_out[:, : rank + 1]  # (B, rank+1)
         coeff_log_stds = head_out[:, rank + 1 :].clamp(
