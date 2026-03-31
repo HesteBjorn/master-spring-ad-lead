@@ -10,7 +10,11 @@ from lead.inference.config_closed_loop import ClosedLoopConfig
 from lead.tfv6.tfv6 import TFv6
 from lead.training.config_training import TrainingConfig
 from rl_finetuning.tfv6_rl.action_codec import ActionCodec, infer_action_head_usage
-from rl_finetuning.tfv6_rl.action_noise_codec import ActionNoiseCodec
+from rl_finetuning.tfv6_rl.action_noise_codec import (
+    ActionNoiseCodec,
+    DiagGaussianDistribution,
+    build_route_basis,
+)
 from rl_finetuning.tfv6_rl.privileged_measurements import privileged_measurement_dim
 
 
@@ -115,6 +119,10 @@ class TFv6PPOPolicy(nn.Module):
         self.num_privileged_measurements = 0
         self.use_kl_to_reference = True
         self.kl_to_reference_coef = 1e-4
+        self.use_residual_policy = False
+        self.residual_route_rank = 2
+        self.residual_alpha = 0.15
+        self.residual_alpha_speed = 0.15
         if rl_config is not None:
             self.use_correlated_noise = bool(
                 getattr(rl_config, "use_correlated_noise", self.use_correlated_noise)
@@ -232,6 +240,21 @@ class TFv6PPOPolicy(nn.Module):
                     self.train_planning_decoder_only,
                 )
             )
+            self.use_residual_policy = bool(
+                getattr(rl_config, "use_residual_policy", self.use_residual_policy)
+            )
+            self.residual_route_rank = int(
+                getattr(rl_config, "residual_route_rank", self.residual_route_rank)
+            )
+            self.residual_alpha = float(
+                getattr(rl_config, "residual_alpha", self.residual_alpha)
+            )
+            self.residual_alpha_speed = float(
+                getattr(rl_config, "residual_alpha_speed", self.residual_alpha_speed)
+            )
+        if self.use_residual_policy:
+            # Architectural constraint: the frozen base model replaces the KL trust region.
+            self.use_kl_to_reference = False
         if self.speed_sampling_style == "mean_gassian":
             self.speed_sampling_style = "mean_gaussian"
         if self.speed_sampling_style not in ("mean_gaussian", "native_categorical"):
@@ -276,33 +299,98 @@ class TFv6PPOPolicy(nn.Module):
         noise_in_dim = self.value_token_dim + (
             self.num_privileged_measurements if self.use_privileged_measurements else 0
         )
-        # Predict grouped noise parameters with a small MLP head.
-        # Hidden size matches the TFv6 planning token width for a minimal increase in capacity.
+        # Noise head: predicts per-group log_std for the action distribution (normal mode only).
+        # In residual mode this module is a 1-output dummy — the residual head handles
+        # both means and log_stds for the basis-coefficient distribution.
+        noise_head_out_dim = (
+            1 if self.use_residual_policy else self.action_noise_codec.noise_pred_dim
+        )
         self.action_noise_head = nn.Sequential(
             nn.Linear(noise_in_dim, noise_in_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(noise_in_dim, self.action_noise_codec.noise_pred_dim),
+            nn.Linear(noise_in_dim, noise_head_out_dim),
         )
         final_noise_layer = self.action_noise_head[-1]
-        nn.init.zeros_(
-            final_noise_layer.weight
-        )  # Exact constant initialization; bias sets the initial exploration level.
-        init_noise_bias = self.action_noise_codec.default_head_bias_vector(
-            log_std_init=self.log_std_init,
-            log_std_init_route=self.log_std_init_route,
-            log_std_init_speed=self.log_std_init_speed,
-            heading_amplitude1_std_init=self.heading_amplitude1_std_init,
-            heading_amplitude2_std_init=self.heading_amplitude2_std_init,
-            device=final_noise_layer.bias.device,
-            dtype=final_noise_layer.bias.dtype,
-        )
-        with torch.no_grad():
-            final_noise_layer.bias.copy_(init_noise_bias)
+        nn.init.zeros_(final_noise_layer.weight)
+        if not self.use_residual_policy:
+            init_noise_bias = self.action_noise_codec.default_head_bias_vector(
+                log_std_init=self.log_std_init,
+                log_std_init_route=self.log_std_init_route,
+                log_std_init_speed=self.log_std_init_speed,
+                heading_amplitude1_std_init=self.heading_amplitude1_std_init,
+                heading_amplitude2_std_init=self.heading_amplitude2_std_init,
+                device=final_noise_layer.bias.device,
+                dtype=final_noise_layer.bias.dtype,
+            )
+            with torch.no_grad():
+                final_noise_layer.bias.copy_(init_noise_bias)
 
-        # Constant-noise mode: keep std/head at initialized values.
+        # Constant-noise mode: keep std/head at initialized values (normal mode only).
         if self.disable_learned_noise_head:
             for param in self.action_noise_head.parameters():
                 param.requires_grad_(False)
+
+        # Residual RL components (only when use_residual_policy=True).
+        self.residual_head = None
+        self._last_base_action_mean: torch.Tensor | None = None
+        if self.use_residual_policy:
+            if not self.action_codec.predict_route:
+                raise ValueError(
+                    "Residual policy requires route predictions to be enabled."
+                )
+            if not self.action_codec.predict_target_speed:
+                raise ValueError(
+                    "Residual policy requires target speed predictions to be enabled."
+                )
+
+            # Fixed route correction basis: [route_dim, residual_route_rank]
+            route_basis = build_route_basis(
+                num_route_points=self.action_codec.num_route_points,
+                route_dim=self.action_codec.route_dim,
+                rank=self.residual_route_rank,
+            )
+            self.register_buffer("residual_route_basis", route_basis, persistent=False)
+
+            # Normalized speed bin values for computing E[categorical speed].
+            speed_bins = torch.tensor(
+                self.training_config.target_speed_classes, dtype=torch.float32
+            ) / float(self.training_config.max_speed)
+            self.register_buffer("residual_speed_bins", speed_bins, persistent=False)
+
+            # Residual head: outputs 2*(rank+1) values.
+            # Layout: [n_0..n_{rank-1}, speed_mean,  log_σ_0..log_σ_{rank-1}, log_speed_σ]
+            #          ←——— rank+1 means ———→           ←———— rank+1 log_stds ————→
+            # Zero weight init; bias: means=0, log_stds=configured init values.
+            residual_out_dim = 2 * (self.residual_route_rank + 1)
+            self.residual_head = nn.Sequential(
+                nn.Linear(noise_in_dim, noise_in_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(noise_in_dim, residual_out_dim),
+            )
+            route_log_std_init = (
+                self.log_std_init_route
+                if self.log_std_init_route is not None
+                else self.log_std_init
+            )
+            speed_log_std_init = (
+                self.log_std_init_speed
+                if self.log_std_init_speed is not None
+                else self.log_std_init
+            )
+            nn.init.zeros_(self.residual_head[-1].weight)
+            with torch.no_grad():
+                nn.init.zeros_(self.residual_head[-1].bias)
+                # Route log_stds at indices [rank+1 : 2*rank+1]
+                self.residual_head[-1].bias[
+                    self.residual_route_rank + 1 : 2 * self.residual_route_rank + 1
+                ] = route_log_std_init
+                # Speed log_std at index [2*rank+1]
+                self.residual_head[-1].bias[2 * self.residual_route_rank + 1] = (
+                    speed_log_std_init
+                )
+
+            # Reusable distribution object (no parameters, safe to keep as attribute).
+            self._residual_dist = DiagGaussianDistribution()
 
         # Critic: mean-pool skip connection + 4-query attention pooling over kv tokens.
         # Mean-pool provides a stable direct gradient path (skip connection) so the MLP
@@ -327,6 +415,18 @@ class TFv6PPOPolicy(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(256, 1),
         )
+
+    @property
+    def noise_pred_dim(self) -> int:
+        """Dimension of the noise_pred tensor returned by forward().
+
+        In residual mode: 2*(rank+1) — the full residual head output
+        (means + log_stds for the basis-coefficient distribution).
+        In normal mode: the codec's noise_pred_dim.
+        """
+        if self.use_residual_policy:
+            return 2 * (self.residual_route_rank + 1)
+        return self.action_noise_codec.noise_pred_dim
 
     def _set_module_trainable(self, module: nn.Module, trainable: bool) -> None:
         for param in module.parameters():
@@ -358,6 +458,11 @@ class TFv6PPOPolicy(nn.Module):
             )
 
     def _configure_trainable_tfv6_modules(self) -> None:
+        if self.use_residual_policy:
+            # Residual RL: entire TFv6 is frozen. Only the residual head is trained.
+            self._set_module_trainable(self.tfv6, False)
+            return
+
         if self.train_planning_decoder_only:
             # Decoder-only RL finetuning: keep TFv6 frozen except planning decoder.
             self._set_module_trainable(self.tfv6, False)
@@ -471,6 +576,180 @@ class TFv6PPOPolicy(nn.Module):
     def predict_action_noise(self, value_features: torch.Tensor) -> torch.Tensor:
         return self.action_noise_head(value_features)
 
+    def _forward_residual(
+        self,
+        obs_dict,
+        actions=None,
+        sample_type: str = "sample",
+        lstm_state=None,
+    ) -> tuple:
+        """Forward pass for residual RL mode.
+
+        The frozen TFv6 provides the base route and speed prediction.  The
+        residual head predicts per-basis-mode means and log_stds, defining a
+        diagonal Gaussian over the (rank+1) correction coefficients.
+
+        At rollout:
+          coeffs ~ N(means, exp(log_stds))    shape [B, rank+1]
+          delta_route = alpha * route_coeffs @ basis.T
+          delta_speed = alpha_speed * speed_coeff
+          action = [route_base + delta_route, speed_base + delta_speed]
+
+        At update (actions provided):
+          coefficients are recovered by projecting the stored action back into
+          basis space (valid because TFv6 is frozen → same base given same obs),
+          and log_prob is computed in that (rank+1)-dim coefficient space.
+
+        Residual head output layout (2*(rank+1) values):
+          [n_0..n_{rank-1}, speed_mean,  log_σ_0..log_σ_{rank-1}, log_speed_σ]
+        """
+        with torch.amp.autocast(
+            device_type=self.device.type,
+            dtype=self.autocast_dtype,
+            enabled=self.autocast_enabled,
+        ):
+            predictions = self.tfv6(
+                self._extract_tfv6_obs(obs_dict),
+                skip_perception_heads=self.skip_perception_heads,
+            )
+
+        # --- Base route (normalized) — frozen TFv6 prediction ---
+        route = predictions.pred_route
+        assert route is not None, "Residual policy requires pred_route from TFv6."
+        route = route.float()
+        B = route.shape[0]
+        route_scale = self.action_codec.route_scale.to(
+            device=route.device, dtype=route.dtype
+        )
+        route_norm = (route / route_scale).reshape(
+            B, -1
+        )  # (B, route_dim) no clamp: keep exact base
+
+        # --- Base speed: E[categorical] in normalized units ---
+        assert predictions.pred_target_speed_distribution is not None, (
+            "Residual policy requires pred_target_speed_distribution from TFv6."
+        )
+        target_speed_logits = (
+            predictions.pred_target_speed_distribution.float()
+        )  # (B, bins)
+        speed_probs = torch.softmax(
+            target_speed_logits / self.speed_temperature, dim=-1
+        )
+        speed_bins = self.residual_speed_bins.to(
+            device=speed_probs.device, dtype=speed_probs.dtype
+        )
+        speed_expected = (speed_probs * speed_bins).sum(dim=-1, keepdim=True)  # (B, 1)
+
+        # Store base action for debug visualization (readable by training loop after forward).
+        self._last_base_action_mean = torch.cat(
+            [route_norm, speed_expected], dim=1
+        ).detach()  # (B, route_dim+1)
+
+        # --- Shared features ---
+        value_features = self._build_value_and_noise_features(
+            obs_dict
+        )  # (B, noise_in_dim)
+
+        # --- Residual head: means + log_stds for basis coefficients ---
+        # Output layout: [n_0..n_{rank-1}, speed_mean, log_σ_0..log_σ_{rank-1}, log_speed_σ]
+        head_out = self.residual_head(value_features).float()  # (B, 2*(rank+1))
+        rank = self.residual_route_rank
+        coeff_means = head_out[:, : rank + 1]  # (B, rank+1)
+        coeff_log_stds = head_out[:, rank + 1 :].clamp(
+            self.log_std_min, self.log_std_max
+        )  # (B, rank+1)
+
+        route_coeff_means = coeff_means[:, :rank]  # (B, rank)
+        speed_coeff_mean = coeff_means[:, rank:]  # (B, 1)
+
+        # --- Distribution over coefficients ---
+        self._residual_dist.proba_distribution(coeff_means, coeff_log_stds)
+        dist = self._residual_dist
+
+        basis = self.residual_route_basis.to(
+            device=route_coeff_means.device, dtype=route_coeff_means.dtype
+        )
+
+        # --- Action mean (base + deterministic residual correction) ---
+        delta_route_mean = (
+            self.residual_alpha * route_coeff_means @ basis.t()
+        )  # (B, route_dim)
+        delta_speed_mean = self.residual_alpha_speed * speed_coeff_mean  # (B, 1)
+        action_mean = torch.cat(
+            [route_norm + delta_route_mean, speed_expected + delta_speed_mean], dim=1
+        )  # (B, route_dim+1)
+
+        # --- Sample or recover coefficients ---
+        if actions is None:
+            if sample_type in ("mean", "mode", "deterministic"):
+                sampled_coeffs = coeff_means
+            else:
+                sampled_coeffs = dist.sample()  # (B, rank+1) — smooth basis directions
+
+            route_coeffs_s = sampled_coeffs[:, :rank]  # (B, rank)
+            speed_coeff_s = sampled_coeffs[:, rank:]  # (B, 1)
+            delta_route_s = (
+                self.residual_alpha * route_coeffs_s @ basis.t()
+            )  # (B, route_dim)
+            delta_speed_s = self.residual_alpha_speed * speed_coeff_s  # (B, 1)
+            actions = torch.cat(
+                [route_norm + delta_route_s, speed_expected + delta_speed_s], dim=1
+            )  # (B, route_dim+1) — full action for env.step()
+            # log_prob in coefficient space (dist is over rank+1 dims, not route_dim+1)
+            coeffs_for_log_prob = sampled_coeffs
+        else:
+            # Update step: recover basis coefficients from stored action.
+            # TFv6 is frozen so route_norm and speed_expected are identical to rollout.
+            route_dim = self.action_codec.route_dim
+            stored_route = actions[:, :route_dim]
+            stored_speed = actions[:, route_dim:]
+            route_coeffs_s = (
+                (stored_route - route_norm) / (self.residual_alpha + 1e-8) @ basis
+            )  # (B, rank)
+            speed_coeff_s = (stored_speed - speed_expected) / (
+                self.residual_alpha_speed + 1e-8
+            )  # (B, 1)
+            coeffs_for_log_prob = torch.cat(
+                [route_coeffs_s, speed_coeff_s], dim=1
+            )  # (B, rank+1)
+            # Replace actions with coefficients so the returned tensor has consistent shape.
+            actions = coeffs_for_log_prob
+
+        log_prob = dist.log_prob(coeffs_for_log_prob)
+        entropy = dist.entropy()
+        if entropy.ndim > 1:
+            entropy = entropy.sum(1)
+
+        values = self.value_head(self._build_critic_input(obs_dict))
+
+        # Effective per-dim log_std in action space (for spatial std profile in debug viz).
+        route_coeff_stds_sq = torch.exp(coeff_log_stds[:, :rank]).pow(2)  # (B, rank)
+        basis_sq = basis.pow(2)  # (route_dim, rank)
+        route_var_per_dim = (self.residual_alpha**2) * (
+            route_coeff_stds_sq @ basis_sq.t()
+        )  # (B, route_dim)
+        route_log_std_eff = 0.5 * torch.log(route_var_per_dim + 1e-8)  # (B, route_dim)
+        speed_log_std_eff = torch.log(
+            self.residual_alpha_speed * torch.exp(coeff_log_stds[:, rank:]) + 1e-8
+        )  # (B, 1)
+        diag_log_std = torch.cat(
+            [route_log_std_eff, speed_log_std_eff], dim=1
+        )  # (B, route_dim+1)
+
+        return (
+            actions,  # (B, rank+1) at update; (B, 21) at rollout
+            log_prob,
+            entropy,
+            values,
+            None,  # exp_loss (unused)
+            action_mean.detach(),  # (B, 21) base+residual mean for viz
+            head_out.detach(),  # (B, 2*(rank+1)) coeff means+log_stds for buffer
+            dist,
+            target_speed_logits.detach(),  # (B, bins) base TFv6 speed logits
+            diag_log_std.detach(),  # (B, 21) effective action-space log_std for viz
+            lstm_state,
+        )
+
     @torch.no_grad()
     def get_reference_policy_outputs(
         self, obs_dict
@@ -535,6 +814,9 @@ class TFv6PPOPolicy(nn.Module):
         lstm_state=None,
         done=None,
     ) -> tuple:
+        if self.use_residual_policy:
+            return self._forward_residual(obs_dict, actions, sample_type, lstm_state)
+
         with torch.amp.autocast(
             device_type=self.device.type,
             dtype=self.autocast_dtype,

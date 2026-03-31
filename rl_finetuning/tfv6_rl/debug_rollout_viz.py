@@ -172,6 +172,7 @@ class PPORolloutVisualizer:
         standstill_speed_hold_ego_speed_threshold: float = 0.1,
         standstill_speed_hold_target_speed_threshold: float = 1.0 / 3.6,
         speed_temperature: float = 1.0,
+        use_residual_policy: bool = False,
     ) -> None:
         self.training_config = training_config
         self.action_codec = action_codec
@@ -189,6 +190,7 @@ class PPORolloutVisualizer:
         self.standstill_speed_hold_target_speed_threshold = float(
             standstill_speed_hold_target_speed_threshold
         )
+        self.use_residual_policy = bool(use_residual_policy)
         os.makedirs(self.output_dir, exist_ok=True)
         self.images_written = 0
         self.episode_returns = [0.0 for _ in range(max(1, num_envs))]
@@ -357,6 +359,7 @@ class PPORolloutVisualizer:
         route_mean: np.ndarray | None,
         waypoints_sample: np.ndarray | None,
         waypoints_mean: np.ndarray | None,
+        route_base: np.ndarray | None = None,
     ) -> tuple[np.ndarray, dict[str, object]]:
         bev = lidar.astype(np.float32)
         if bev.ndim == 3:
@@ -403,12 +406,33 @@ class PPORolloutVisualizer:
         )
 
         if self.steer_modality == "route":
-            self._draw_polyline(
-                bev_img, route_mean, color=(230, 110, 0), radius=6, line_thickness=2
-            )
-            self._draw_polyline(
-                bev_img, route_sample, color=(20, 80, 230), radius=5, line_thickness=2
-            )
+            if self.use_residual_policy:
+                # Residual mode: blue = base TFv6, green = base+residual mean, orange = sampled.
+                self._draw_polyline(
+                    bev_img, route_base, color=(20, 80, 230), radius=5, line_thickness=2
+                )
+                self._draw_polyline(
+                    bev_img, route_mean, color=(50, 190, 60), radius=6, line_thickness=2
+                )
+                self._draw_polyline(
+                    bev_img,
+                    route_sample,
+                    color=(230, 110, 0),
+                    radius=5,
+                    line_thickness=2,
+                )
+            else:
+                # Normal mode: blue = TFv6 mean, orange = PPO sampled.
+                self._draw_polyline(
+                    bev_img, route_mean, color=(20, 80, 230), radius=6, line_thickness=2
+                )
+                self._draw_polyline(
+                    bev_img,
+                    route_sample,
+                    color=(230, 110, 0),
+                    radius=5,
+                    line_thickness=2,
+                )
         if self.waypoints_active_for_control:
             self._draw_polyline(
                 bev_img,
@@ -473,12 +497,21 @@ class PPORolloutVisualizer:
     def _overlay_legend_on_bev(self, bev: np.ndarray) -> None:
         legend_items = []
         if self.steer_modality == "route":
-            legend_items.extend(
-                [
-                    ("Route mean (TFv6)", (230, 110, 0)),
-                    ("Route sampled (PPO)", (20, 80, 230)),
-                ]
-            )
+            if self.use_residual_policy:
+                legend_items.extend(
+                    [
+                        ("Route base (TFv6)", (20, 80, 230)),
+                        ("Route mean (base+residual)", (50, 190, 60)),
+                        ("Route sampled", (230, 110, 0)),
+                    ]
+                )
+            else:
+                legend_items.extend(
+                    [
+                        ("Route mean (TFv6)", (20, 80, 230)),
+                        ("Route sampled (PPO)", (230, 110, 0)),
+                    ]
+                )
         if self.waypoints_active_for_control:
             legend_items.extend(
                 [
@@ -814,6 +847,258 @@ class PPORolloutVisualizer:
             lineType=cv2.LINE_AA,
         )
 
+    def _draw_residual_speed_panel(
+        self,
+        panel: np.ndarray,
+        *,
+        x0: int,
+        y0: int,
+        w: int,
+        h: int,
+        base_speed: float,
+        adjusted_speed: float,
+        sampled_speed: float | None,
+        current_speed: float,
+        hold_indicator_text: str | None,
+        speed_std_m_s: float = 0.0,
+    ) -> None:
+        """Speed panel for residual RL mode.
+
+        Vertical markers on a plain speed axis:
+          • blue   — frozen TFv6 E[categorical speed]  (matches route base color)
+          • green  — residual-adjusted mean (base + delta)
+          • orange — sampled speed (executed)           (matches route sampled color)
+          • purple — current ego speed
+        An orange Gaussian envelope around the adjusted mean is drawn when
+        speed_std_m_s > 0. An arrow connects base to adjusted.
+        """
+        if w < 220 or h < 120:
+            return
+
+        COLOR_BASE = (20, 80, 230)  # blue   — frozen TFv6 base
+        COLOR_ADJ = (50, 190, 60)  # green  — residual-adjusted mean
+        COLOR_SAMPLED = (230, 110, 0)  # orange — sampled / executed speed
+        COLOR_EGO = (180, 0, 180)  # purple — ego speed
+
+        cv2.rectangle(panel, (x0, y0), (x0 + w, y0 + h), (210, 210, 210), 1)
+        cv2.putText(
+            panel,
+            "Speed (Residual RL)  \u2014  base|adj|sampled|ego",
+            (x0 + 8, y0 + 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (20, 20, 20),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
+        delta = adjusted_speed - base_speed
+        sampled_str = (
+            f"   smp={sampled_speed:.2f} m/s" if sampled_speed is not None else ""
+        )
+        cv2.putText(
+            panel,
+            (
+                f"base={base_speed:.2f} m/s   adj={adjusted_speed:.2f} m/s"
+                f"   d={delta:+.2f} m/s{sampled_str}   ego={current_speed:.2f} m/s"
+            ),
+            (x0 + 8, y0 + 36),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            (30, 30, 30),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
+        # Legend
+        lx = x0 + 10
+        legend_entries = [
+            ("base (TFv6)", COLOR_BASE),
+            ("adjusted mean", COLOR_ADJ),
+            ("sampled", COLOR_SAMPLED),
+            ("ego speed", COLOR_EGO),
+        ]
+        for lname, lcolor in legend_entries:
+            cv2.line(
+                panel,
+                (lx, y0 + 50),
+                (lx + 18, y0 + 50),
+                lcolor,
+                2,
+                lineType=cv2.LINE_AA,
+            )
+            cv2.putText(
+                panel,
+                lname,
+                (lx + 24, y0 + 54),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                (30, 30, 30),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+            (tw, _), _ = cv2.getTextSize(lname, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+            lx += 24 + tw + 12
+        if hold_indicator_text is not None:
+            cv2.putText(
+                panel,
+                hold_indicator_text,
+                (lx, y0 + 54),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                (30, 30, 30),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+
+        # Plot area
+        plot_left = x0 + 12
+        plot_right = x0 + w - 10
+        plot_top = y0 + 66
+        plot_bottom = y0 + h - 32
+        if plot_bottom <= plot_top + 20:
+            return
+
+        cv2.rectangle(
+            panel, (plot_left, plot_top), (plot_right, plot_bottom), (235, 235, 235), -1
+        )
+        cv2.rectangle(
+            panel, (plot_left, plot_top), (plot_right, plot_bottom), (180, 180, 180), 1
+        )
+
+        max_speed_v = max(
+            float(self.training_config.max_speed),
+            base_speed + 1.0,
+            adjusted_speed + 1.0,
+            current_speed + 1.0,
+            1.0,
+        )
+
+        def spd_to_px(v: float) -> int:
+            return int(
+                round(
+                    plot_left
+                    + float(np.clip(v / max_speed_v, 0.0, 1.0))
+                    * (plot_right - plot_left)
+                )
+            )
+
+        # Grid lines + axis labels
+        for tick_v in np.linspace(0.0, max_speed_v, 5):
+            tx = spd_to_px(float(tick_v))
+            cv2.line(
+                panel,
+                (tx, plot_top),
+                (tx, plot_bottom),
+                (215, 215, 215),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+            cv2.line(panel, (tx, plot_bottom), (tx, plot_bottom + 4), (80, 80, 80), 1)
+            cv2.putText(
+                panel,
+                f"{tick_v:.1f}",
+                (tx - 12, plot_bottom + 16),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.31,
+                (40, 40, 40),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+        cv2.putText(
+            panel,
+            "speed [m/s]",
+            (plot_left + (plot_right - plot_left) // 3, plot_bottom + 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            (40, 40, 40),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
+        base_x = spd_to_px(base_speed)
+        adj_x = spd_to_px(adjusted_speed)
+
+        # Orange Gaussian envelope around the adjusted mean (if std is available)
+        if speed_std_m_s > 0.005:
+            n_pts = max(plot_right - plot_left, 1)
+            speeds_v = np.linspace(0.0, max_speed_v, n_pts, dtype=np.float32)
+            gauss = np.exp(
+                -0.5 * ((speeds_v - adjusted_speed) / max(speed_std_m_s, 1e-4)) ** 2
+            )
+            peak_h = plot_bottom - plot_top - 2
+            top_ys = (plot_bottom - gauss * peak_h).astype(np.int32)
+            top_ys = np.clip(top_ys, plot_top, plot_bottom)
+            top_pts = np.stack(
+                [np.arange(plot_left, plot_left + n_pts, dtype=np.int32), top_ys],
+                axis=1,
+            )
+            poly = np.concatenate(
+                [top_pts, [[plot_right, plot_bottom], [plot_left, plot_bottom]]], axis=0
+            ).astype(np.int32)
+            overlay = panel.copy()
+            cv2.fillPoly(overlay, [poly], color=(180, 210, 255))  # light orange fill
+            cv2.addWeighted(overlay, 0.35, panel, 0.65, 0, panel)
+            cv2.polylines(
+                panel,
+                [top_pts.reshape(-1, 1, 2)],
+                False,
+                COLOR_SAMPLED,
+                1,
+                lineType=cv2.LINE_AA,
+            )
+
+        # Vertical lines — draw ego first so policy lines render on top.
+        # Draw sampled before adjusted so adjusted mean is visible on top.
+        ego_x = spd_to_px(current_speed)
+        smp_x = spd_to_px(sampled_speed) if sampled_speed is not None else None
+        cv2.line(
+            panel,
+            (ego_x, plot_top),
+            (ego_x, plot_bottom),
+            COLOR_EGO,
+            1,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.line(
+            panel,
+            (base_x, plot_top),
+            (base_x, plot_bottom),
+            COLOR_BASE,
+            2,
+            lineType=cv2.LINE_AA,
+        )
+        if smp_x is not None:
+            cv2.line(
+                panel,
+                (smp_x, plot_top),
+                (smp_x, plot_bottom),
+                COLOR_SAMPLED,
+                2,
+                lineType=cv2.LINE_AA,
+            )
+        cv2.line(
+            panel,
+            (adj_x, plot_top),
+            (adj_x, plot_bottom),
+            COLOR_ADJ,
+            2,
+            lineType=cv2.LINE_AA,
+        )
+
+        # Arrow from base to adjusted: makes the correction direction immediately visible
+        if abs(adj_x - base_x) > 3:
+            mid_y = (plot_top + plot_bottom) // 2
+            cv2.arrowedLine(
+                panel,
+                (base_x, mid_y),
+                (adj_x, mid_y),
+                (140, 140, 140),
+                1,
+                tipLength=0.2,
+                lineType=cv2.LINE_AA,
+            )
+
     def _draw_spatial_std_profile(
         self,
         panel: np.ndarray,
@@ -1134,7 +1419,8 @@ class PPORolloutVisualizer:
         truncated: bool,
         sampled_action: np.ndarray,
         mean_action: np.ndarray,
-        target_speed_logits: np.ndarray | None,
+        base_mean_action: np.ndarray | None = None,
+        target_speed_logits: np.ndarray | None = None,
         log_std: np.ndarray,
         value_estimate: float,
         route_completion: float | None,
@@ -1202,6 +1488,11 @@ class PPORolloutVisualizer:
         target_speed_mean = (
             None if target_speed_mean is None else float(target_speed_mean[0])
         )
+        # Decode base TFv6 action (residual mode only: pure frozen-model prediction).
+        route_base = None
+        if base_mean_action is not None:
+            route_base_decoded, _, _ = self.action_codec.decode(base_mean_action)
+            route_base = None if route_base_decoded is None else route_base_decoded[0]
         hold_indicator_text = self._standstill_hold_indicator_text(
             speed_hold_frames=speed_hold_frames,
             speed_hold_target_speed=speed_hold_target_speed,
@@ -1219,6 +1510,7 @@ class PPORolloutVisualizer:
             route_mean=route_mean,
             waypoints_sample=waypoints_sample,
             waypoints_mean=waypoints_mean,
+            route_base=route_base,
         )
         rgb_h, rgb_w = rgb.shape[:2]
         # Keep legacy overall resolution basis, then widen total canvas by 50%.
@@ -1280,6 +1572,23 @@ class PPORolloutVisualizer:
         self.episode_returns[env_slot] += reward
         episode_return = float(self.episode_returns[env_slot])
 
+        # Small env-id label in the top-right corner of the scalar panel so the user
+        # can identify which route/environment instance this frame came from.
+        _env_label = f"env={env_idx}"
+        (_env_lw, _env_lh), _ = cv2.getTextSize(
+            _env_label, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1
+        )
+        cv2.putText(
+            scalar_panel,
+            _env_label,
+            (scalar_w - _env_lw - 6, 16),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (120, 120, 120),
+            1,
+            cv2.LINE_AA,
+        )
+
         text_lines = [
             (
                 f"update={update_idx} step={rollout_step} "
@@ -1302,6 +1611,36 @@ class PPORolloutVisualizer:
         self._put_text_lines(scalar_panel, text_lines, start_y=text_start_y)
 
         if (
+            self.use_residual_policy
+            and base_speed_probs is not None
+            and target_speed_mean is not None
+        ):
+            # Residual mode: replace histogram with a clean speed-line panel.
+            # base_speed = E[frozen TFv6 categorical] in m/s;
+            # target_speed_mean is the residual-adjusted mean (base + delta) in m/s.
+            speed_bins_np = np.asarray(
+                self.training_config.target_speed_classes, dtype=np.float32
+            )
+            base_speed_m_s = float(np.sum(base_speed_probs * speed_bins_np))
+            # diag_log_std[-1] is the effective speed log-std in normalized action space.
+            speed_std_m_s = float(
+                np.exp(float(log_std[-1])) * float(self.training_config.max_speed)
+            )
+            speed_panel_h = max(0, text_start_y - 18)
+            self._draw_residual_speed_panel(
+                scalar_panel,
+                x0=0,
+                y0=0,
+                w=scalar_w,
+                h=speed_panel_h,
+                base_speed=base_speed_m_s,
+                adjusted_speed=target_speed_mean,
+                sampled_speed=target_speed_sample,
+                current_speed=speed,
+                hold_indicator_text=hold_indicator_text,
+                speed_std_m_s=speed_std_m_s,
+            )
+        elif (
             self.target_speed_active_for_control
             and target_speed_mean is not None
             and base_speed_probs is not None

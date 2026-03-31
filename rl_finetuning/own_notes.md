@@ -70,26 +70,42 @@ tensorboard --logdir outputs/rl_logs
 ### Local parallell training
 ```bash
 # Multi env in parallel
+conda activate lead
+CARLA_ROOT=/home/erikhbj/Documents/master/master-spring-ad-lead/3rd_party/CARLA_0915 \
 RUN_CONFIG_FILE=rl_finetuning/configs/train_parallel_singleGPU.env \
 bash rl_finetuning/train_tfv6_ppo_parallell.sh \
   outputs/checkpoints/tfv6_resnet34 \
   outputs/rl_logs \
-  TFV6_PPO_PARALLEL_LOCAL_MULTIENV_SINGLEGPU \
-  --debug 1
-```
-
-### Slurm parallell training
-```bash
-sbatch --export=ALL,RUN_CONFIG_FILE=rl_finetuning/configs/train_parallel_idun.env rl_finetuning/train_tfv6_ppo_parallell_slurm.slurm
+  TFV6_PPO_PARALLEL_LOCAL_newTP_debug3 \
+  --debug 0 --debug_viz --debug_viz_every_n 1 --debug_viz_max_images 1000
 ```
 ```bash
-# Idun check queue status
-scontrol show job -dd 24060485 | egrep "JobId=|Partition=|QOS=|A
-ccount=|UserId=|Priority=|Reason=|StartTime=|EligibleTime=|ReqTRES=|NumNodes=|NumCPUs=|Mi
-nMemory="
-
-# Check status for all in queue
-squeue -u erikhbj -h -t PD -o "%i" | xargs -r -n1 -I{} sh -c 'echo "===== JOB {} =====";scontrol show job -dd {} | egrep "JobId=|Partition=|QOS=|Account=|UserId=|Priority=|Reason=|StartTime=|EligibleTime=|ReqTRES=| NumNodes=|NumCPUs=|MinMemory="'
+# Carla fork run
+conda activate lead_carla_fork
+export CARLA_ROOT=/home/erikhbj/Documents/master/master-spring-ad-lead/3rd_party/fork_export_t1213_fixed/LinuxNoEditor
+# export CARLA_ROOT=/home/erikhbj/Documents/master/master-spring-ad-lead/3rd_party/fork_export/runtime/LinuxNoEditor   # First original working version before town12 and 13 fix.
+# Avoid mixing in an old CARLA Python path from another shell session
+unset PYTHONPATH
+RUN_CONFIG_FILE=rl_finetuning/configs/train_parallel_singleGPU_singlescenario.env \
+bash rl_finetuning/train_tfv6_ppo_parallell.sh \
+  outputs/checkpoints/tfv6_resnet34 \
+  outputs/rl_logs \
+  TFV6_PPO_LOCAL_only_NSLTEF_warmstart_routedevpenal_terminalwarmupn5 \
+  --debug 0 --debug_viz --debug_viz_every_n 1 --debug_viz_max_images 4000
+  # RUN_CONFIG_FILE=rl_finetuning/configs/train_parallel_singleGPU.env \
+  # TFV6_PPO_PARALLEL_LOCAL_carlafork_newspeedsample_holdspeed_fixTPflip_t1_2 \
+```
+```bash
+# RESIDUAL RUN
+conda activate lead_carla_fork
+export CARLA_ROOT=/home/erikhbj/Documents/master/master-spring-ad-lead/3rd_party/fork_export_t1213_fixed/LinuxNoEditor
+unset PYTHONPATH
+RUN_CONFIG_FILE=rl_finetuning/configs/train_local_residual.env  \
+bash rl_finetuning/train_tfv6_ppo_parallell.sh \
+  outputs/checkpoints/tfv6_resnet34 \
+  outputs/rl_logs \
+  TFV6_LOCAL_RESIDUAL_2 \
+  --debug 0 --debug_viz --debug_viz_every_n 1 --debug_viz_max_images 2000
 ```
 
 ### Kill all running processes
@@ -104,6 +120,29 @@ pkill -f "CarlaUE4-Linux-Shipping" || true
 pkill -f "CarlaUE4.sh" || true
 ps -ef | rg "CarlaUE4|leaderboard_evaluator|train_parallel_tfv6_ppo|train_tfv6_ppo.py|torchrun|tensorboard" || true
 ```
+
+### Slurm parallell training
+```bash
+sbatch --export=ALL,RUN_CONFIG_FILE=rl_finetuning/configs/train_parallel_idun.env rl_finetuning/train_tfv6_ppo_parallell_slurm.slurm
+```
+```bash
+# Computesmoke
+sbatch --export=ALL,RUN_CONFIG_FILE=rl_finetuning/configs/train_parallel_idun.env rl_finetuning/train_tfv6_ppo_parallell_slurm_shortsmoke.slurm
+```
+```bash
+# Idun check queue status
+scontrol show job -dd 24060485 | egrep "JobId=|Partition=|QOS=|Account=|UserId=|Priority=|Reason=|StartTime=|EligibleTime=|ReqTRES=|NumNodes=|NumCPUs=|MinMemory="
+
+# Check status for all in queue
+squeue -u erikhbj -h -t PD -o "%i" | xargs -r -n1 -I{} sh -c 'echo "===== JOB {} =====";scontrol show job -dd {} | egrep "JobId=|Partition=|QOS=|Account=|UserId=|Priority=|Reason=|StartTime=|EligibleTime=|ReqTRES=| NumNodes=|NumCPUs=|MinMemory="'
+```
+#### Transfer slurm logs to local machine (run from local machine)
+```bash
+# Transfer files from slurm to local machine
+RELATIVE_FILEPATH=outputs/rl_logs/TFV6_PPO_PARALLEL_SLURM_24232338/
+rsync -avz --include="events.out.tfevents.*" --include="config.json" --exclude="*.pth" erikhbj@idun.hpc.ntnu.no:/cluster/home/erikhbj/master/master-spring-ad-lead/${RELATIVE_FILEPATH} ./${RELATIVE_FILEPATH}
+```
+
 
 # Analysis
 

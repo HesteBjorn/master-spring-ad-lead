@@ -56,3 +56,15 @@ class GlobalConfig(CaRLGlobalConfig):
         # Optional memory-saving path: keep rollout observations on CPU and
         # transfer only active PPO minibatch observation slices to GPU.
         self.stream_obs_minibatches_from_cpu_to_save_gpu_memory = False
+        # Residual RL policy: freeze entire TFv6 and learn a small corrective residual.
+        # When enabled, use_kl_to_reference is forced off (architectural constraint replaces it).
+        self.use_residual_policy = False
+        self.residual_route_rank = (
+            2  # basis modes: 2=lateral only, 4=+longitudinal, 6=+higher-freq
+        )
+        self.residual_alpha = (
+            0.15  # max route correction per mode in normalized space (~6m at rank-peak)
+        )
+        self.residual_alpha_speed = (
+            0.15  # max speed correction in normalized space (fraction of max_speed)
+        )

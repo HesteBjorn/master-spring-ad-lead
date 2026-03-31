@@ -655,6 +655,25 @@ def parse_args(config):
                       type=float,
                       default=getattr(config, 'kl_to_reference_coef', 1e-4),
                       help='Coefficient for the KL-to-reference regularization term.')
+    parser.add_argument('--use_residual_policy',
+                      type=lambda x: bool(strtobool(x)),
+                      default=getattr(config, 'use_residual_policy', False),
+                      nargs='?',
+                      const=True,
+                      help='Freeze entire TFv6 and learn a small basis-function residual on top. '
+                           'Replaces direct decoder finetuning. Forces use_kl_to_reference=False.')
+    parser.add_argument('--residual_route_rank',
+                      type=int,
+                      default=getattr(config, 'residual_route_rank', 2),
+                      help='Number of smooth basis modes for route correction (2=lateral, 4=+longitudinal).')
+    parser.add_argument('--residual_alpha',
+                      type=float,
+                      default=getattr(config, 'residual_alpha', 0.15),
+                      help='Max route correction per basis mode in normalized space (alpha * tanh(coeff)).')
+    parser.add_argument('--residual_alpha_speed',
+                      type=float,
+                      default=getattr(config, 'residual_alpha_speed', 0.15),
+                      help='Max speed correction in normalized space (fraction of max_speed).')
     parser.add_argument('--use_rpo',
                       type=lambda x: bool(strtobool(x)),
                       default=config.use_rpo,
@@ -1427,7 +1446,7 @@ def main():
         (local_bs_per_env, args.num_envs_per_proc) + env.single_action_space.shape,
         device=device,
     )
-    noise_pred_dim = agent.module.action_noise_codec.noise_pred_dim
+    noise_pred_dim = agent.module.noise_pred_dim
     old_noise_preds = torch.zeros(
         (local_bs_per_env, args.num_envs_per_proc, noise_pred_dim),
         device=device,
@@ -1563,6 +1582,7 @@ def main():
             speed_temperature=agent.module.speed_temperature
             if isinstance(agent, torch.nn.parallel.DistributedDataParallel)
             else agent.speed_temperature,
+            use_residual_policy=getattr(config, "use_residual_policy", False),
         )
         print(
             f"[debug_viz] enabled path={debug_dir} "
@@ -1820,6 +1840,16 @@ def main():
                         key: obs[key][step, env_idx].detach().cpu().numpy()
                         for key in env.single_observation_space.spaces.keys()
                     }
+                    _last_base = agent.module._last_base_action_mean
+                    base_mean_action_np = (
+                        np.clip(_last_base[env_idx].cpu().numpy(), -1.0, 1.0)
+                        if (
+                            getattr(config, "use_residual_policy", False)
+                            and _last_base is not None
+                            and env_idx < _last_base.shape[0]
+                        )
+                        else None
+                    )
                     debug_viz.maybe_write(
                         global_step=config.global_step,
                         rollout_step=step,
@@ -1835,6 +1865,7 @@ def main():
                         mean_action=np.clip(
                             mu[env_idx].detach().cpu().numpy(), -1.0, 1.0
                         ),
+                        base_mean_action=base_mean_action_np,
                         target_speed_logits=(
                             None
                             if base_target_speed_logits is None
@@ -2379,23 +2410,40 @@ def main():
                     old_approx_kl = (-logratio).mean()
                     # approx_kl = ((ratio - 1) - logratio).mean()
 
-                    # We compute approx KL according to roach
-                    old_distribution, _ = (
-                        agent.module.action_noise_codec.proba_distribution(
-                            old_mu_sampled,
-                            old_noise_preds_sampled,
-                            from_head=False,
-                            speed_logits=(
-                                None
-                                if b_old_target_speed_logits is None
-                                else b_old_target_speed_logits[mb_inds]
-                            ),
+                    if getattr(config, "use_residual_policy", False):
+                        # Residual mode: distributions are diagonal Gaussians over
+                        # (rank+1) basis coefficients. Reconstruct old dist from
+                        # stored head output: [:rank+1] = coeff means, [rank+1:] = log_stds.
+                        _r = config.residual_route_rank
+                        old_coeff_means = old_noise_preds_sampled[:, : _r + 1]
+                        old_coeff_log_stds = old_noise_preds_sampled[:, _r + 1 :]
+                        old_normal = torch.distributions.Normal(
+                            old_coeff_means, torch.exp(old_coeff_log_stds)
                         )
-                    )
-                    kl_div = agent.module.action_noise_codec.kl_divergence(
-                        old_distribution, distribution
-                    )
-                    approx_kl_divs.append(kl_div.mean())
+                        kl_div = torch.distributions.kl_divergence(
+                            old_normal, distribution.distribution
+                        )
+                        if kl_div.ndim > 1:
+                            kl_div = kl_div.sum(dim=1)
+                        approx_kl_divs.append(kl_div.mean())
+                    else:
+                        # We compute approx KL according to roach
+                        old_distribution, _ = (
+                            agent.module.action_noise_codec.proba_distribution(
+                                old_mu_sampled,
+                                old_noise_preds_sampled,
+                                from_head=False,
+                                speed_logits=(
+                                    None
+                                    if b_old_target_speed_logits is None
+                                    else b_old_target_speed_logits[mb_inds]
+                                ),
+                            )
+                        )
+                        kl_div = agent.module.action_noise_codec.kl_divergence(
+                            old_distribution, distribution
+                        )
+                        approx_kl_divs.append(kl_div.mean())
 
                     clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean()]
 
@@ -2663,12 +2711,22 @@ def main():
                         rollout_std[:, speed_slice].mean().item(),
                         config.global_step,
                     )
-            for idx, group_name in enumerate(noise_codec.noise_pred_names):
-                writer.add_scalar(
-                    f"policy/noise_pred_{group_name}",
-                    b_old_noise_preds[:, idx].mean().item(),
-                    config.global_step,
-                )
+            if getattr(config, "use_residual_policy", False):
+                # Residual noise head has 2 outputs: route_log_std and speed_log_std.
+                for idx, name in enumerate(["route_log_std", "speed_log_std"]):
+                    if idx < b_old_noise_preds.shape[1]:
+                        writer.add_scalar(
+                            f"policy/noise_pred_{name}",
+                            b_old_noise_preds[:, idx].mean().item(),
+                            config.global_step,
+                        )
+            else:
+                for idx, group_name in enumerate(noise_codec.noise_pred_names):
+                    writer.add_scalar(
+                        f"policy/noise_pred_{group_name}",
+                        b_old_noise_preds[:, idx].mean().item(),
+                        config.global_step,
+                    )
             if noise_codec.distribution_type == "beta":
                 # Beta-specific diagnostics: grouped concentration and implied alpha/beta.
                 grouped_conc = b_old_noise_preds

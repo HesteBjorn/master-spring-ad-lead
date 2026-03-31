@@ -158,6 +158,57 @@ class CorrelatedGaussianDistribution(nn.Module):
         return torch.zeros((), device=self.distribution.mean.device)
 
 
+def build_route_basis(
+    *, num_route_points: int, route_dim: int, rank: int
+) -> torch.Tensor:
+    """Build a smooth orthonormal basis for route trajectory corrections.
+
+    Returns a [route_dim, rank] tensor whose columns are unit-norm vectors
+    spanning physically meaningful trajectory deformation modes.  The first
+    two columns are lateral (y-axis) modes that dominate for turning scenarios;
+    subsequent columns add longitudinal (x-axis) and higher-frequency variants.
+
+    Mode order (lateral first for controller relevance):
+      0  u·sin(π u/2)  on y — broad arc / lane-change swing
+      1  (u+0.1)²      on y — quadratic turn curvature
+      2  u·sin(π u/2)  on x — longitudinal stretch
+      3  (u+0.1)²      on x — longitudinal curvature
+      4+ higher-freq sinusoids alternating y/x
+    """
+    u = torch.linspace(0.0, 1.0, steps=max(num_route_points, 2))[:num_route_points]
+    cols: list[torch.Tensor] = []
+
+    def _add_axis_mode(mode_values: torch.Tensor, axis: int) -> None:
+        if len(cols) >= rank:
+            return
+        col = torch.zeros(route_dim, dtype=torch.float32)
+        col[axis::2] = mode_values
+        col = col / (torch.linalg.norm(col) + 1e-8)
+        cols.append(col)
+
+    lane_change_mode = u * torch.sin(0.5 * math.pi * u)
+    turn_mode = (u + 0.1) ** 2
+
+    _add_axis_mode(lane_change_mode, axis=1)  # y
+    _add_axis_mode(turn_mode, axis=1)  # y
+    _add_axis_mode(lane_change_mode, axis=0)  # x
+    _add_axis_mode(turn_mode, axis=0)  # x
+
+    mode = 1
+    while len(cols) < rank:
+        extra = u * torch.sin((mode + 0.5) * math.pi * u)
+        _add_axis_mode(extra, axis=1)
+        _add_axis_mode(extra, axis=0)
+        mode += 1
+
+    raw = torch.stack(cols, dim=1)  # [route_dim, rank]
+    # Orthonormalize so that basis.T @ basis = I exactly.
+    # Required for the update-time coefficient projection
+    # (stored_action - base) / alpha @ basis to recover the original sampled coefficients.
+    Q, _ = torch.linalg.qr(raw)
+    return Q[:, : len(cols)]  # [route_dim, rank]
+
+
 class LowRankDiagRouteGaussianDistribution(nn.Module):
     """Gaussian with route block covariance = low-rank smooth modes + diagonal."""
 
@@ -189,51 +240,12 @@ class LowRankDiagRouteGaussianDistribution(nn.Module):
         if route_dim <= 0:
             raise ValueError("Route action dimension must be positive.")
         self.route_lowrank_rank = min(self.route_lowrank_rank, route_dim)
-        basis = self._build_route_basis(
+        basis = build_route_basis(
             num_route_points=self.action_codec.num_route_points,
             route_dim=route_dim,
             rank=self.route_lowrank_rank,
         )
         self.register_buffer("route_basis", basis, persistent=False)
-
-    def _build_route_basis(
-        self, *, num_route_points: int, route_dim: int, rank: int
-    ) -> torch.Tensor:
-        # Smooth low-rank route modes over normalized path coordinate u in [0, 1].
-        # We prioritize two interpretable lateral modes:
-        # 1) u*sin(pi*u/2): broad turn-like bending with movable tail
-        # 2) u*(1-u): lane-change-like mid-route bulge.
-        u = torch.linspace(0.0, 1.0, steps=max(num_route_points, 2))[:num_route_points]
-        cols: list[torch.Tensor] = []
-
-        def _add_axis_mode(mode_values: torch.Tensor, axis: int) -> None:
-            if len(cols) >= rank:
-                return
-            col = torch.zeros(route_dim, dtype=torch.float32)
-            col[axis::2] = mode_values
-            col = col / (torch.linalg.norm(col) + 1e-8)
-            cols.append(col)
-
-        lane_change_mode = u * torch.sin(0.5 * math.pi * u)
-        turn_mode = (u + 0.1) ** 2
-
-        # Keep first two modes as requested and lateral first for controller relevance.
-        _add_axis_mode(lane_change_mode, axis=1)  # y
-        _add_axis_mode(turn_mode, axis=1)  # y
-
-        # If more rank is requested, add longitudinal counterparts.
-        _add_axis_mode(lane_change_mode, axis=0)  # x
-        _add_axis_mode(turn_mode, axis=0)  # x
-
-        # Extra fallback modes if rank > 4.
-        mode = 1
-        while len(cols) < rank:
-            extra = u * torch.sin((mode + 0.5) * math.pi * u)
-            _add_axis_mode(extra, axis=1)  # y
-            _add_axis_mode(extra, axis=0)  # x
-            mode += 1
-
-        return torch.stack(cols, dim=1)  # [route_dim, rank]
 
     def _route_covariance(
         self, route_std: torch.Tensor, device: torch.device, dtype: torch.dtype
