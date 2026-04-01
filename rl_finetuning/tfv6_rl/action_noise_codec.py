@@ -164,16 +164,18 @@ def build_route_basis(
     """Build a smooth orthonormal basis for route trajectory corrections.
 
     Returns a [route_dim, rank] tensor whose columns are unit-norm vectors
-    spanning physically meaningful trajectory deformation modes.  The first
-    two columns are lateral (y-axis) modes that dominate for turning scenarios;
-    subsequent columns add longitudinal (x-axis) and higher-frequency variants.
+    spanning physically meaningful trajectory deformation modes.
 
-    Mode order (lateral first for controller relevance):
-      0  u·sin(π u/2)  on y — broad arc / lane-change swing
-      1  (u+0.1)²      on y — quadratic turn curvature
-      2  u·sin(π u/2)  on x — longitudinal stretch
-      3  (u+0.1)²      on x — longitudinal curvature
-      4+ higher-freq sinusoids alternating y/x
+    Mode order:
+      0  (u + 1/9)  on y — lateral offset that originates from ego centre.
+                           At u=0 (route[0], ~2.25m ahead) the value is 1/9;
+                           at u=1 (route[-1]) the value is 10/9.  The mode is
+                           zero at u = -1/9, which corresponds approximately to
+                           the ego vehicle centre one step behind route[0].
+                           The controller aim-point (2.25 m at junctions) sits
+                           at route[0], so this mode directly changes steering.
+      1  (u + 1/9)  on x — longitudinal stretch with the same ego-centred origin
+      2+ higher-freq sinusoids alternating y/x
     """
     u = torch.linspace(0.0, 1.0, steps=max(num_route_points, 2))[:num_route_points]
     cols: list[torch.Tensor] = []
@@ -186,13 +188,12 @@ def build_route_basis(
         col = col / (torch.linalg.norm(col) + 1e-8)
         cols.append(col)
 
-    lane_change_mode = u * torch.sin(0.5 * math.pi * u)
-    turn_mode = (u + 0.1) ** 2
+    # Primary ego-centred linear mode (zero at ego centre, nonzero at route[0])
+    c = 1.0 / (num_route_points - 1)  # = 1/9 for 10 points
+    linear_mode = u + c
 
-    _add_axis_mode(lane_change_mode, axis=1)  # y
-    _add_axis_mode(turn_mode, axis=1)  # y
-    _add_axis_mode(lane_change_mode, axis=0)  # x
-    _add_axis_mode(turn_mode, axis=0)  # x
+    _add_axis_mode(linear_mode, axis=1)  # y — lateral correction (mode 0)
+    _add_axis_mode(linear_mode, axis=0)  # x — longitudinal correction (mode 1)
 
     mode = 1
     while len(cols) < rank:

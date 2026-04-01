@@ -1109,12 +1109,13 @@ class PPORolloutVisualizer:
         w: int,
         h: int,
         coeff_preds: np.ndarray,  # shape (2*(rank+1),): [means..., log_stds...]
-        rank: int,
     ) -> None:
         """Forest-plot style panel: one row per residual coefficient (route modes + speed)."""
-        n = rank + 1  # route modes + speed
+        # Derive rank from array size: 2*(rank+1) elements → rank = len/2 - 1
+        n = len(coeff_preds) // 2  # route modes + speed
+        rank = n - 1
         means = coeff_preds[:n].astype(np.float32)
-        log_stds = coeff_preds[n:].astype(np.float32)
+        log_stds = coeff_preds[n : n + n].astype(np.float32)
         stds = np.exp(log_stds)
 
         if w < 120 or h < 80:
@@ -1241,7 +1242,7 @@ class PPORolloutVisualizer:
             mu_sign = "+" if mu >= 0 else ""
             cv2.putText(
                 panel,
-                f"m={mu_sign}{mu:.3f}",
+                f"mu={mu_sign}{mu:.3f}",
                 (plot_x1 + 6, row_cy - 2),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.33,
@@ -1251,7 +1252,7 @@ class PPORolloutVisualizer:
             )
             cv2.putText(
                 panel,
-                f"s={sigma:.3f}",
+                f"std={sigma:.3f}",
                 (plot_x1 + 6, row_cy + 12),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.33,
@@ -1864,7 +1865,6 @@ class PPORolloutVisualizer:
                 w=graph_w,
                 h=top_h,
                 coeff_preds=residual_coeff_preds,
-                rank=int(getattr(self.training_config, "residual_route_rank", 2)),
             )
         else:
             self._draw_spatial_std_profile(

@@ -2717,14 +2717,31 @@ def main():
                         config.global_step,
                     )
             if getattr(config, "use_residual_policy", False):
-                # Residual noise head has 2 outputs: route_log_std and speed_log_std.
-                for idx, name in enumerate(["route_log_std", "speed_log_std"]):
-                    if idx < b_old_noise_preds.shape[1]:
-                        writer.add_scalar(
-                            f"policy/noise_pred_{name}",
-                            b_old_noise_preds[:, idx].mean().item(),
-                            config.global_step,
-                        )
+                # Layout: [route_coeff_0..rank-1 means, speed_mean,
+                #          route_coeff_0..rank-1 log_stds, speed_log_std]
+                _rrank = getattr(config, "residual_route_rank", 1)
+                for i in range(_rrank):
+                    writer.add_scalar(
+                        f"residual/route_coeff_{i}_mean",
+                        b_old_noise_preds[:, i].mean().item(),
+                        config.global_step,
+                    )
+                writer.add_scalar(
+                    "residual/speed_coeff_mean",
+                    b_old_noise_preds[:, _rrank].mean().item(),
+                    config.global_step,
+                )
+                for i in range(_rrank):
+                    writer.add_scalar(
+                        f"residual/route_coeff_{i}_log_std",
+                        b_old_noise_preds[:, _rrank + 1 + i].mean().item(),
+                        config.global_step,
+                    )
+                writer.add_scalar(
+                    "residual/speed_coeff_log_std",
+                    b_old_noise_preds[:, 2 * _rrank + 1].mean().item(),
+                    config.global_step,
+                )
             else:
                 for idx, group_name in enumerate(noise_codec.noise_pred_names):
                     writer.add_scalar(
