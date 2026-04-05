@@ -674,6 +674,13 @@ def parse_args(config):
                       type=float,
                       default=getattr(config, 'residual_alpha_speed', 0.15),
                       help='Max speed correction in normalized space (fraction of max_speed).')
+    parser.add_argument('--disable_residual_route',
+                      type=lambda x: bool(strtobool(x)),
+                      default=getattr(config, 'disable_residual_route', False),
+                      nargs='?',
+                      const=True,
+                      help='Zero out route correction entirely; only the speed residual is trained. '
+                           'The PPO objective covers only the speed coefficient distribution.')
     parser.add_argument('--use_rpo',
                       type=lambda x: bool(strtobool(x)),
                       default=config.use_rpo,

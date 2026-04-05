@@ -123,6 +123,7 @@ class TFv6PPOPolicy(nn.Module):
         self.residual_route_rank = 2
         self.residual_alpha = 0.15
         self.residual_alpha_speed = 0.15
+        self.disable_residual_route = False
         if rl_config is not None:
             self.use_correlated_noise = bool(
                 getattr(rl_config, "use_correlated_noise", self.use_correlated_noise)
@@ -251,6 +252,11 @@ class TFv6PPOPolicy(nn.Module):
             )
             self.residual_alpha_speed = float(
                 getattr(rl_config, "residual_alpha_speed", self.residual_alpha_speed)
+            )
+            self.disable_residual_route = bool(
+                getattr(
+                    rl_config, "disable_residual_route", self.disable_residual_route
+                )
             )
         if self.use_residual_policy:
             # Architectural constraint: the frozen base model replaces the KL trust region.
@@ -404,6 +410,19 @@ class TFv6PPOPolicy(nn.Module):
                 self.residual_head[-1].bias[2 * self.residual_route_rank + 1] = (
                     speed_log_std_init
                 )
+
+            # Fixed log_std values used when disable_learned_noise_head=True.
+            # Mirrors the normal-path behaviour of freezing the noise head.
+            self._residual_fixed_route_log_std = float(
+                self.log_std_init_route
+                if self.log_std_init_route is not None
+                else self.log_std_init
+            )
+            self._residual_fixed_speed_log_std = float(
+                self.log_std_init_speed
+                if self.log_std_init_speed is not None
+                else self.log_std_init
+            )
 
             # Reusable distribution object (no parameters, safe to keep as attribute).
             self._residual_dist = DiagGaussianDistribution()
@@ -707,20 +726,48 @@ class TFv6PPOPolicy(nn.Module):
             self.log_std_min, self.log_std_max
         )  # (B, rank+1)
 
+        # --- Fixed log_stds when disable_learned_noise_head=True ---
+        # Mirrors the normal-path behaviour: log_stds stay at their init values.
+        if self.disable_learned_noise_head:
+            fixed_route_ls = torch.full(
+                (coeff_log_stds.shape[0], rank),
+                self._residual_fixed_route_log_std,
+                device=coeff_log_stds.device,
+                dtype=coeff_log_stds.dtype,
+            )
+            fixed_speed_ls = torch.full(
+                (coeff_log_stds.shape[0], 1),
+                self._residual_fixed_speed_log_std,
+                device=coeff_log_stds.device,
+                dtype=coeff_log_stds.dtype,
+            )
+            coeff_log_stds = torch.cat([fixed_route_ls, fixed_speed_ls], dim=1)
+
         route_coeff_means = coeff_means[:, :rank]  # (B, rank)
         speed_coeff_mean = coeff_means[:, rank:]  # (B, 1)
 
-        # --- Distribution over coefficients ---
-        self._residual_dist.proba_distribution(coeff_means, coeff_log_stds)
-        dist = self._residual_dist
+        disable_route = self.disable_residual_route
 
         basis = self.residual_route_basis.to(
             device=route_coeff_means.device, dtype=route_coeff_means.dtype
         )
 
+        # --- Distribution over coefficients ---
+        # When route is disabled the distribution is 1-D (speed only): route coefficients
+        # carry no gradient and are never applied, so exclude them from log_prob entirely.
+        if disable_route:
+            self._residual_dist.proba_distribution(
+                speed_coeff_mean, coeff_log_stds[:, rank:]
+            )
+        else:
+            self._residual_dist.proba_distribution(coeff_means, coeff_log_stds)
+        dist = self._residual_dist
+
         # --- Action mean (base + deterministic residual correction) ---
         delta_route_mean = (
-            self.residual_alpha * route_coeff_means @ basis.t()
+            torch.zeros_like(route_norm)
+            if disable_route
+            else self.residual_alpha * route_coeff_means @ basis.t()
         )  # (B, route_dim)
         delta_speed_mean = self.residual_alpha_speed * speed_coeff_mean  # (B, 1)
         action_mean = torch.cat(
@@ -730,36 +777,45 @@ class TFv6PPOPolicy(nn.Module):
         # --- Sample or recover coefficients ---
         if actions is None:
             if sample_type in ("mean", "mode", "deterministic"):
-                sampled_coeffs = coeff_means
+                sampled_coeffs = speed_coeff_mean if disable_route else coeff_means
             else:
-                sampled_coeffs = dist.sample()  # (B, rank+1) — smooth basis directions
+                sampled_coeffs = (
+                    dist.sample()
+                )  # (B, 1) if disable_route else (B, rank+1)
 
-            route_coeffs_s = sampled_coeffs[:, :rank]  # (B, rank)
-            speed_coeff_s = sampled_coeffs[:, rank:]  # (B, 1)
-            delta_route_s = (
-                self.residual_alpha * route_coeffs_s @ basis.t()
-            )  # (B, route_dim)
+            if disable_route:
+                speed_coeff_s = sampled_coeffs  # (B, 1)
+                delta_route_s = torch.zeros_like(route_norm)
+            else:
+                route_coeffs_s = sampled_coeffs[:, :rank]  # (B, rank)
+                speed_coeff_s = sampled_coeffs[:, rank:]  # (B, 1)
+                delta_route_s = (
+                    self.residual_alpha * route_coeffs_s @ basis.t()
+                )  # (B, route_dim)
+
             delta_speed_s = self.residual_alpha_speed * speed_coeff_s  # (B, 1)
             actions = torch.cat(
                 [route_norm + delta_route_s, speed_expected + delta_speed_s], dim=1
             )  # (B, route_dim+1) — full action for env.step()
-            # log_prob in coefficient space (dist is over rank+1 dims, not route_dim+1)
-            coeffs_for_log_prob = sampled_coeffs
+            coeffs_for_log_prob = sampled_coeffs  # (B,1) or (B, rank+1)
         else:
             # Update step: recover basis coefficients from stored action.
             # TFv6 is frozen so route_norm and speed_expected are identical to rollout.
             route_dim = self.action_codec.route_dim
-            stored_route = actions[:, :route_dim]
             stored_speed = actions[:, route_dim:]
-            route_coeffs_s = (
-                (stored_route - route_norm) / (self.residual_alpha + 1e-8) @ basis
-            )  # (B, rank)
             speed_coeff_s = (stored_speed - speed_expected) / (
                 self.residual_alpha_speed + 1e-8
             )  # (B, 1)
-            coeffs_for_log_prob = torch.cat(
-                [route_coeffs_s, speed_coeff_s], dim=1
-            )  # (B, rank+1)
+            if disable_route:
+                coeffs_for_log_prob = speed_coeff_s
+            else:
+                stored_route = actions[:, :route_dim]
+                route_coeffs_s = (
+                    (stored_route - route_norm) / (self.residual_alpha + 1e-8) @ basis
+                )  # (B, rank)
+                coeffs_for_log_prob = torch.cat(
+                    [route_coeffs_s, speed_coeff_s], dim=1
+                )  # (B, rank+1)
             # Replace actions with coefficients so the returned tensor has consistent shape.
             actions = coeffs_for_log_prob
 
