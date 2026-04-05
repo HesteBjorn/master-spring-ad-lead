@@ -31,7 +31,7 @@ export PYTHONPATH="$CARLA_ROOT/PythonAPI:$CARLA_ROOT/PythonAPI/carla:$PWD:$PYTHO
 module purge
 module load Anaconda3/2024.02-1
 eval "$(conda shell.bash hook)"
-source activate "${CONDA_INTERPRETER:-lead}"
+source activate "${CONDA_INTERPRETER:-lead_carla_fork}"
 
 mkdir -p outputs/rl_logs
 
@@ -60,7 +60,7 @@ if [[ "${NUM_ENVS_PER_GPU:-}" == "" ]]; then
   fi
 fi
 # TEMPORARY OVERRIDE TO TEST:
-NUM_ENVS_PER_GPU=3
+NUM_ENVS_PER_GPU=2
 
 NUM_ENVS_PER_NODE="${NUM_ENVS_PER_NODE:-$((GPU_COUNT * NUM_ENVS_PER_GPU))}"
 
