@@ -2733,9 +2733,19 @@ def main():
                         b_old_noise_preds[:, i].mean().item(),
                         config.global_step,
                     )
+                    writer.add_scalar(
+                        f"residual/route_coeff_{i}_mean_std",
+                        b_old_noise_preds[:, i].std().item(),
+                        config.global_step,
+                    )
                 writer.add_scalar(
                     "residual/speed_coeff_mean",
                     b_old_noise_preds[:, _rrank].mean().item(),
+                    config.global_step,
+                )
+                writer.add_scalar(
+                    "residual/speed_coeff_mean_std",
+                    b_old_noise_preds[:, _rrank].std().item(),
                     config.global_step,
                 )
                 for i in range(_rrank):
