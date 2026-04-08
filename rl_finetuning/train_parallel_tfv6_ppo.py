@@ -453,187 +453,229 @@ if __name__ == "__main__":
 
         current_port = args.start_port + 5000 * args.node_id
         skip_next_route = "False"
+        max_startup_retries = 3
 
         while training:
             if args.debug:
                 training = False
-            train_process = None
-            rl_ports = []
-            traffic_manager_ports = []
-            sensor_ports = []
-            client_ports = []
-            carla_primary_ports = []
-            if current_port > 60000:
-                current_port = args.start_port
-            for _ in range(args.num_envs_per_node):
-                current_port = next_free_port(current_port)
-                rl_ports.append(current_port)
-                current_port += 3
-                current_port = next_free_port(current_port)
-                traffic_manager_ports.append(current_port)
-                current_port += 3
-                current_port = next_free_port(current_port)
-                sensor_ports.append(current_port)
-                current_port += 3
-                current_port = next_free_port(current_port)
-                client_ports.append(current_port)
-                current_port += 3
-                current_port = next_free_port(current_port)
-                carla_primary_ports.append(current_port)
-                current_port += 3
+            startup_attempt = 0
+            while True:
+                train_process = None
+                rl_ports = []
+                traffic_manager_ports = []
+                sensor_ports = []
+                client_ports = []
+                carla_primary_ports = []
+                if current_port > 60000:
+                    current_port = args.start_port
+                for _ in range(args.num_envs_per_node):
+                    current_port = next_free_port(current_port)
+                    rl_ports.append(current_port)
+                    current_port += 3
+                    current_port = next_free_port(current_port)
+                    traffic_manager_ports.append(current_port)
+                    current_port += 3
+                    current_port = next_free_port(current_port)
+                    sensor_ports.append(current_port)
+                    current_port += 3
+                    current_port = next_free_port(current_port)
+                    client_ports.append(current_port)
+                    current_port += 3
+                    current_port = next_free_port(current_port)
+                    carla_primary_ports.append(current_port)
+                    current_port += 3
 
-                if args.num_nodes > 1:
-                    tcp_store_port = 7000
-                else:
-                    tcp_store_port = next_free_port(7000)
+                    if args.num_nodes > 1:
+                        tcp_store_port = 7000
+                    else:
+                        tcp_store_port = next_free_port(7000)
 
-            carla_processes = []
-            leaderboard_processes = []
+                carla_processes = []
+                leaderboard_processes = []
 
-            client_sleep = 0.2 if args.ml_cloud else 0.02
-            # TFv6 is a sensor agent. Keep CARLA threading enabled.
-            tfv6_rpc_threads = args.carla_rpc_threads
-            tfv6_streaming_threads = args.carla_streaming_threads
-            tfv6_secondary_threads = args.carla_secondary_threads
+                try:
+                    client_sleep = 0.2 if args.ml_cloud else 0.02
+                    # TFv6 is a sensor agent. Keep CARLA threading enabled.
+                    tfv6_rpc_threads = args.carla_rpc_threads
+                    tfv6_streaming_threads = args.carla_streaming_threads
+                    tfv6_secondary_threads = args.carla_secondary_threads
 
-            # Launch servers in GPU-batched rounds. Each round starts one server
-            # per GPU (all on different GPUs, no render-thread contention). When
-            # ml_cloud is set, we wait for every server in a round to open its
-            # RPC port before starting the next round, ensuring no same-GPU server
-            # is launched while a prior server on that GPU is still initializing.
-            num_gpus = len(args.gpu_ids)
-            num_rounds = (args.num_envs_per_node + num_gpus - 1) // num_gpus
+                    # Launch servers in GPU-batched rounds. Each round starts one server
+                    # per GPU (all on different GPUs, no render-thread contention). When
+                    # ml_cloud is set, we wait for every server in a round to open its
+                    # RPC port before starting the next round, ensuring no same-GPU server
+                    # is launched while a prior server on that GPU is still initializing.
+                    num_gpus = len(args.gpu_ids)
+                    num_rounds = (args.num_envs_per_node + num_gpus - 1) // num_gpus
 
-            for round_idx in range(num_rounds):
-                round_indices = [
-                    round_idx * num_gpus + g
-                    for g in range(num_gpus)
-                    if round_idx * num_gpus + g < args.num_envs_per_node
-                ]
+                    for round_idx in range(num_rounds):
+                        round_indices = [
+                            round_idx * num_gpus + g
+                            for g in range(num_gpus)
+                            if round_idx * num_gpus + g < args.num_envs_per_node
+                        ]
 
-                for i in round_indices:
-                    print(f"Start server {i}")
-                    graphics_adapter = args.gpu_ids[i % num_gpus]
-                    if args.carla_singularity:
-                        if not args.carla_singularity_path:
-                            raise ValueError(
-                                "--carla_singularity_path is required when --carla_singularity is set."
+                        last_server_launch_time = None
+                        for idx, i in enumerate(round_indices):
+                            print(f"Start server {i}")
+                            graphics_adapter = args.gpu_ids[i % num_gpus]
+                            if args.carla_singularity:
+                                if not args.carla_singularity_path:
+                                    raise ValueError(
+                                        "--carla_singularity_path is required when --carla_singularity is set."
+                                    )
+                                carla_processes.append(
+                                    subprocess.Popen(
+                                        f"singularity exec --nv --bind {args.carla_root}:{args.carla_root},{raw_logdir}:{raw_logdir} "
+                                        f"{args.carla_singularity_path} "
+                                        f"bash {args.carla_root}/CarlaUE4.sh -carla-rpc-port={client_ports[i]} -nosound "
+                                        f"-carla-primary-port={carla_primary_ports[i]} -carla-streaming-port={sensor_ports[i]} "
+                                        f"-RenderOffScreen -graphicsadapter={graphics_adapter} -RPCThreads={tfv6_rpc_threads} "
+                                        f"-StreamingThreads={tfv6_streaming_threads} "
+                                        f"-SecondaryThreads={tfv6_secondary_threads}",
+                                        shell=True,
+                                        stdout=server_outs[i],
+                                        stderr=server_errs[i],
+                                    )
+                                )
+                            else:
+                                carla_processes.append(
+                                    subprocess.Popen(
+                                        # Keep CARLA server isolated from conda runtime libs to avoid UE4 lib conflicts.
+                                        f"env -u LD_LIBRARY_PATH "
+                                        f"bash {args.carla_root}/CarlaUE4.sh -carla-rpc-port={client_ports[i]} -nosound "
+                                        f"-carla-primary-port={carla_primary_ports[i]} -carla-streaming-port={sensor_ports[i]} "
+                                        f"-RenderOffScreen -graphicsadapter={graphics_adapter} -RPCThreads={tfv6_rpc_threads} "
+                                        f"-StreamingThreads={tfv6_streaming_threads} "
+                                        f"-SecondaryThreads={tfv6_secondary_threads}",
+                                        shell=True,
+                                        stdout=server_outs[i],
+                                        stderr=server_errs[i],
+                                    )
+                                )
+                            last_server_launch_time = time.time()
+                            # Stagger launches within a round to avoid saturating node CPU/IO
+                            # during simultaneous UE4 render thread initialization. Skip sleep
+                            # after the last server so we go straight to readiness polling.
+                            if args.ml_cloud and idx < len(round_indices) - 1:
+                                time.sleep(8)
+
+                        if args.ml_cloud:
+                            for i in round_indices:
+                                print(f"[launcher] Waiting for CARLA server {i} on port {client_ports[i]}...")
+                                if not wait_for_carla_ready(client_ports[i]):
+                                    raise RuntimeError(
+                                        f"CARLA server {i} (port {client_ports[i]}) did not become ready within 120s. "
+                                        f"Check logs in {process_logdir} for details."
+                                    )
+                                print(f"[launcher] CARLA server {i} ready.")
+                            # UE4's GameThread watchdog fires at exactly 60s from process start.
+                            # The RPC port can open a few seconds before the watchdog deadline,
+                            # so port-open alone is not a sufficient readiness signal. Wait until
+                            # 70s from the LAST server's launch so every server in the round has
+                            # had its full watchdog window before clients are started.
+                            elapsed = time.time() - last_server_launch_time
+                            stabilize_wait = max(0.0, 70.0 - elapsed)
+                            if stabilize_wait > 0:
+                                print(f"[launcher] Waiting {stabilize_wait:.0f}s for render threads to stabilize...")
+                                time.sleep(stabilize_wait)
+                            # Verify every server in this round is still alive before starting clients.
+                            for i in round_indices:
+                                proc = carla_processes[i]
+                                if proc.poll() is not None:
+                                    raise RuntimeError(
+                                        f"CARLA server {i} (port {client_ports[i]}) crashed during stabilization "
+                                        f"(exit code {proc.returncode}). Check logs in {process_logdir} for details."
+                                    )
+
+                        for i in round_indices:
+                            print(f"Start client {i}")
+                            leaderboard_processes.append(
+                                subprocess.Popen(
+                                    f"bash {args.repo_root}/rl_finetuning/start_leaderboard_tfv6_ppo.sh "
+                                    f"{args.repo_root} {args.git_root} {route_files[i]} {logdir} {i} "
+                                    f"{client_ports[i]} {traffic_manager_ports[i]} {rl_ports[i]} {args.seed} "
+                                    f"{skip_next_route} {args.route_repetitions} {args.tfv6_checkpoint} "
+                                    f"{args.track} {args.frame_rate} False {args.timeout} "
+                                    f"{args.runtime_timeout} {args.leaderboard_debug}",
+                                    shell=True,
+                                    stdout=client_outs[i],
+                                    stderr=client_errs[i],
+                                )
                             )
-                        carla_processes.append(
-                            subprocess.Popen(
-                                f"singularity exec --nv --bind {args.carla_root}:{args.carla_root},{raw_logdir}:{raw_logdir} "
-                                f"{args.carla_singularity_path} "
-                                f"bash {args.carla_root}/CarlaUE4.sh -carla-rpc-port={client_ports[i]} -nosound "
-                                f"-carla-primary-port={carla_primary_ports[i]} -carla-streaming-port={sensor_ports[i]} "
-                                f"-RenderOffScreen -graphicsadapter={graphics_adapter} -RPCThreads={tfv6_rpc_threads} "
-                                f"-StreamingThreads={tfv6_streaming_threads} "
-                                f"-SecondaryThreads={tfv6_secondary_threads}",
-                                shell=True,
-                                stdout=server_outs[i],
-                                stderr=server_errs[i],
-                            )
+                            time.sleep(client_sleep)
+
+                    skip_next_route = "False"
+
+                    cmdline = " ".join(map(shlex.quote, sys.argv[1:]))
+                    str_ports = " ".join(str(x) for x in rl_ports)
+
+                    load_file = None
+                    largest_step = 0
+                    if os.path.exists(logdir):
+                        for file in os.listdir(logdir):
+                            if file.startswith("model_latest_") and file.endswith(".pth"):
+                                full_path = os.path.join(logdir, file)
+                                if os.path.getsize(full_path) > 0:
+                                    numbers_in_string = re.findall(r"\d+", file)
+                                    if numbers_in_string:
+                                        start_step = int(numbers_in_string[0])
+                                        if start_step > largest_step:
+                                            largest_step = start_step
+                                            load_file = os.path.join(logdir, file)
+
+                    if args.use_traj_sync_ppo:
+                        num_processes = args.num_envs_per_node
+                        num_envs_per_proc = 1
+                        print(f"Num processes : {num_processes}")
+                    else:
+                        num_processes = args.num_envs_per_node // args.num_envs_per_gpu
+                        num_envs_per_proc = args.num_envs_per_gpu
+                    world_size = num_processes * args.num_nodes
+                    if len(args.gpu_ids) < world_size:
+                        raise ValueError(
+                            f"Need at least {world_size} gpu ids for trainer world size, got {len(args.gpu_ids)}."
+                        )
+
+                    if args.debug:
+                        train_out = open(
+                            os.path.join(process_logdir, "train_out.txt"),
+                            "w",
+                            encoding="utf-8",
+                        )
+                        train_err = open(
+                            os.path.join(process_logdir, "train_err.txt"),
+                            "w",
+                            encoding="utf-8",
                         )
                     else:
-                        carla_processes.append(
-                            subprocess.Popen(
-                                # Keep CARLA server isolated from conda runtime libs to avoid UE4 lib conflicts.
-                                f"env -u LD_LIBRARY_PATH "
-                                f"bash {args.carla_root}/CarlaUE4.sh -carla-rpc-port={client_ports[i]} -nosound "
-                                f"-carla-primary-port={carla_primary_ports[i]} -carla-streaming-port={sensor_ports[i]} "
-                                f"-RenderOffScreen -graphicsadapter={graphics_adapter} -RPCThreads={tfv6_rpc_threads} "
-                                f"-StreamingThreads={tfv6_streaming_threads} "
-                                f"-SecondaryThreads={tfv6_secondary_threads}",
-                                shell=True,
-                                stdout=server_outs[i],
-                                stderr=server_errs[i],
-                            )
-                        )
+                        train_out = sys.stdout
+                        train_err = sys.stderr
 
-                if args.ml_cloud:
-                    for i in round_indices:
-                        print(f"[launcher] Waiting for CARLA server {i} on port {client_ports[i]}...")
-                        if not wait_for_carla_ready(client_ports[i]):
-                            raise RuntimeError(
-                                f"CARLA server {i} (port {client_ports[i]}) did not become ready within 120s. "
-                                f"Check logs in {process_logdir} for details."
-                            )
-                        print(f"[launcher] CARLA server {i} ready.")
-
-                for i in round_indices:
-                    print(f"Start client {i}")
-                    leaderboard_processes.append(
-                        subprocess.Popen(
-                            f"bash {args.repo_root}/rl_finetuning/start_leaderboard_tfv6_ppo.sh "
-                            f"{args.repo_root} {args.git_root} {route_files[i]} {logdir} {i} "
-                            f"{client_ports[i]} {traffic_manager_ports[i]} {rl_ports[i]} {args.seed} "
-                            f"{skip_next_route} {args.route_repetitions} {args.tfv6_checkpoint} "
-                            f"{args.track} {args.frame_rate} False {args.timeout} "
-                            f"{args.runtime_timeout} {args.leaderboard_debug}",
-                            shell=True,
-                            stdout=client_outs[i],
-                            stderr=client_errs[i],
-                        )
+                    train_process = subprocess.Popen(
+                        f"bash {args.repo_root}/rl_finetuning/start_learner_dd_ppo_tfv6_ppo.sh "
+                        f"{args.repo_root} {num_processes} {args.num_nodes} {args.rdzv_addr} {args.rdzv_port} "
+                        f"{cmdline} --ports {str_ports} --logdir {raw_logdir} --load_file {load_file} "
+                        f"--num_envs_per_proc {num_envs_per_proc} --tcp_store_port {tcp_store_port}",
+                        shell=True,
+                        stdout=train_out,
+                        stderr=train_err,
                     )
-                    time.sleep(client_sleep)
 
-            skip_next_route = "False"
-
-            cmdline = " ".join(map(shlex.quote, sys.argv[1:]))
-            str_ports = " ".join(str(x) for x in rl_ports)
-
-            load_file = None
-            largest_step = 0
-            if os.path.exists(logdir):
-                for file in os.listdir(logdir):
-                    if file.startswith("model_latest_") and file.endswith(".pth"):
-                        full_path = os.path.join(logdir, file)
-                        if os.path.getsize(full_path) > 0:
-                            numbers_in_string = re.findall(r"\d+", file)
-                            if numbers_in_string:
-                                start_step = int(numbers_in_string[0])
-                                if start_step > largest_step:
-                                    largest_step = start_step
-                                    load_file = os.path.join(logdir, file)
-
-            if args.use_traj_sync_ppo:
-                num_processes = args.num_envs_per_node
-                num_envs_per_proc = 1
-                print(f"Num processes : {num_processes}")
-            else:
-                num_processes = args.num_envs_per_node // args.num_envs_per_gpu
-                num_envs_per_proc = args.num_envs_per_gpu
-            world_size = num_processes * args.num_nodes
-            if len(args.gpu_ids) < world_size:
-                raise ValueError(
-                    f"Need at least {world_size} gpu ids for trainer world size, got {len(args.gpu_ids)}."
-                )
-
-            if args.debug:
-                train_out = open(
-                    os.path.join(process_logdir, "train_out.txt"),
-                    "w",
-                    encoding="utf-8",
-                )
-                train_err = open(
-                    os.path.join(process_logdir, "train_err.txt"),
-                    "w",
-                    encoding="utf-8",
-                )
-            else:
-                train_out = sys.stdout
-                train_err = sys.stderr
-
-            train_process = subprocess.Popen(
-                f"bash {args.repo_root}/rl_finetuning/start_learner_dd_ppo_tfv6_ppo.sh "
-                f"{args.repo_root} {num_processes} {args.num_nodes} {args.rdzv_addr} {args.rdzv_port} "
-                f"{cmdline} --ports {str_ports} --logdir {raw_logdir} --load_file {load_file} "
-                f"--num_envs_per_proc {num_envs_per_proc} --tcp_store_port {tcp_store_port}",
-                shell=True,
-                stdout=train_out,
-                stderr=train_err,
-            )
-
-            time.sleep(1)
+                    time.sleep(1)
+                    break
+                except RuntimeError as exc:
+                    startup_attempt += 1
+                    print(
+                        f"[launcher] Startup attempt {startup_attempt}/{max_startup_retries} failed: {exc}"
+                    )
+                    cleanup(carla_processes, leaderboard_processes, train_process, client_ports)
+                    if startup_attempt >= max_startup_retries:
+                        raise RuntimeError(
+                            f"Exceeded {max_startup_retries} startup attempts; aborting. Last error: {exc}"
+                        ) from exc
+                    print("[launcher] Retrying full startup after 45s...")
+                    time.sleep(45)
 
             all_processes_running = True
             ended_leaderboard = []
@@ -678,7 +720,9 @@ if __name__ == "__main__":
                 training = False
 
             cleanup(carla_processes, leaderboard_processes, train_process, client_ports)
-            time.sleep(10)
+            # Allow the GPU driver time to fully release memory from killed CARLA
+            # processes before the next attempt allocates new ones.
+            time.sleep(45)
             del carla_processes
             del leaderboard_processes
             del train_process

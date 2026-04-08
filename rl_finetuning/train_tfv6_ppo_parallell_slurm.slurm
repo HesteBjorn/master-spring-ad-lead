@@ -1,5 +1,5 @@
 #!/usr/bin/bash
-#SBATCH --job-name=tfv6_ppo_parallel_smoke
+#SBATCH --job-name=tfv6_smoke_8gpu2env
 #SBATCH --account=share-ie-idi
 #SBATCH --mail-user=erikhbj@stud.ntnu.no
 #SBATCH --mail-type=ALL
@@ -10,7 +10,7 @@
 #SBATCH --cpus-per-task=48
 #SBATCH --constraint=h100|h200
 #SBATCH --mem=768G
-#SBATCH --time=1-00:00:00
+#SBATCH --time=3-00:00:00
 #SBATCH --output=outputs/rl_logs/slurm_%j.out
 #SBATCH --error=outputs/rl_logs/slurm_%j.err
 
