@@ -1,8 +1,15 @@
 #!/bin/bash
 
 # Checkpoints
-export CHECKPOINT_DIR=outputs/checkpoints/tfv6_resnet34_rlfinetuned_modelbest  # outputs/checkpoints/tfv6_resnet34/
-export ROUTES=data/benchmark_routes/bench2drive10routesexample.xml  # data/benchmark_routes/bench2drive220routes/23687.xml
+# export CHECKPOINT_DIR=outputs/checkpoints/tfv6_resnet34/  # outputs/checkpoints/tfv6_resnet34_rlfinetuned_modelbest
+# export AGENT=lead/inference/sensor_agent.py
+export CHECKPOINT_DIR=outputs/checkpoints/tfv6_residual_onlyspeed_latest
+export AGENT=rl_finetuning/inference/residual_sensor_agent.py  # NEED TO BE ACTIVE TO USE RESIDUAL
+
+# export ROUTES=data/benchmark_routes/bench2drive10routesexampleonlyfails.xml
+export ROUTES=data/benchmark_routes/bench2drive10NSLTEF.xml  # for left-turn eval
+# export ROUTES=data/benchmark_routes/bench2drive5NSRT.xml  # For right-turn eval
+# export ROUTES=data/benchmark_routes/bench2drive220routes/23687.xml  # For single route eval
 
 # Set environment variables
 export BENCHMARK_ROUTE_ID=$(basename $ROUTES .xml) # Last part of the route file name, e.g., 0 for 0.xml
@@ -27,7 +34,7 @@ CUDA_VISIBLE_DEVICES=0 python3 3rd_party/Bench2Drive/leaderboard/leaderboard/lea
     --routes=$ROUTES \
     --track=SENSORS \
     --checkpoint=$EVALUATION_OUTPUT_DIR/checkpoint_endpoint.json \
-    --agent=lead/inference/sensor_agent.py \
+    --agent=$AGENT \
     --agent-config=$CHECKPOINT_DIR \
     --debug=0 \
     --record=None \
@@ -37,4 +44,4 @@ CUDA_VISIBLE_DEVICES=0 python3 3rd_party/Bench2Drive/leaderboard/leaderboard/lea
     --timeout=60 \
     --debug-checkpoint=$EVALUATION_OUTPUT_DIR/debug_checkpoint/debug_checkpoint_endpoint.txt \
     --traffic-manager-seed=0 \
-    --repetitions=1
+    --repetitions=3

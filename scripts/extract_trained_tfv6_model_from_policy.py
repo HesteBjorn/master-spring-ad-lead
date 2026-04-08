@@ -7,6 +7,38 @@ import os
 import shutil
 from pathlib import Path
 
+# Keys from GlobalConfig that TFv6PPOPolicy reads via getattr(rl_config, key, default).
+# Only primitive-valued keys are safe to round-trip through plain json.load().
+_RL_CONFIG_KEYS_FOR_EVAL = (
+    "use_residual_policy",
+    "residual_route_rank",
+    "residual_alpha",
+    "residual_alpha_speed",
+    "disable_residual_route",
+    "disable_learned_noise_head",
+    "log_std_init",
+    "log_std_init_route",
+    "log_std_init_speed",
+    "log_std_min",
+    "log_std_max",
+    "speed_temperature",
+    "train_planning_decoder_only",
+    "use_correlated_noise",
+    "correlated_noise_rho",
+    "noise_ramp",
+    "action_noise_dist",
+    "speed_sampling_style",
+    "route_sampling_technique",
+    "lowrank_route_rank",
+    "lowrank_route_std_init",
+    "use_kl_to_reference",
+    "kl_to_reference_coef",
+    "critic_updates_shared_features",
+    "use_privileged_measurements",
+    "num_privileged_measurements",
+    "use_lstm",
+)
+
 os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
 
 import torch
@@ -114,6 +146,38 @@ def _prepare_output_dir(output_dir: Path, force: bool) -> None:
     output_dir.mkdir(parents=True, exist_ok=False)
 
 
+def _save_residual_eval_files(
+    policy_ckpt: Path,
+    rl_config: dict,
+    output_dir: Path,
+) -> None:
+    """Save the extra files needed for ResidualSensorAgent eval.
+
+    Adds two files to the already-prepared output_dir:
+      - residual_policy.pth : full TFv6PPOPolicy state dict (TFv6 + residual head weights)
+      - rl_config.json      : primitive-valued subset of GlobalConfig for policy construction
+
+    The existing model_rl_finetuned.pth (TFv6-only weights) is still kept so the
+    standard SensorAgent can load the dir as a plain TFv6 checkpoint if needed.
+    """
+    # Copy the full policy state dict — ResidualClosedLoopInference loads this on top of TFv6.
+    residual_policy_path = output_dir / "residual_policy.pth"
+    shutil.copy2(policy_ckpt, residual_policy_path)
+    print(f"[extract-tfv6] residual_policy.pth  -> {residual_policy_path}", flush=True)
+
+    # Save only the primitive-valued keys that TFv6PPOPolicy reads via getattr().
+    rl_config_out = {
+        k: rl_config[k]
+        for k in _RL_CONFIG_KEYS_FOR_EVAL
+        if k in rl_config and isinstance(rl_config[k], (bool, int, float, str, type(None)))
+    }
+    rl_config_path = output_dir / "rl_config.json"
+    with rl_config_path.open("w", encoding="utf-8") as f:
+        json.dump(rl_config_out, f, indent=2, sort_keys=True)
+    print(f"[extract-tfv6] rl_config.json       -> {rl_config_path}", flush=True)
+    print(f"[extract-tfv6] residual keys saved  : {sorted(rl_config_out.keys())}", flush=True)
+
+
 def _validate_extracted_checkpoint(output_dir: Path) -> None:
     training_config = load_training_config(str(output_dir))
     model = TFv6(torch.device("cpu"), training_config).eval()
@@ -185,11 +249,23 @@ def main() -> None:
     _validate_extracted_checkpoint(output_dir)
 
     print("[extract-tfv6] Validation OK: TFv6 loads with strict=True.", flush=True)
-    print(
-        "[extract-tfv6] Compatible folder ready for lead eval scripts "
-        "(contains config.json + model*.pth).",
-        flush=True,
-    )
+
+    # --- Residual policy: save extra eval files when use_residual_policy is set ---
+    run_rl_config = _read_json(policy_ckpt.parent / "config.json")
+    if run_rl_config.get("use_residual_policy", False):
+        print("[extract-tfv6] Residual policy detected — saving residual eval files.", flush=True)
+        _save_residual_eval_files(policy_ckpt, run_rl_config, output_dir)
+        print(
+            "[extract-tfv6] Residual checkpoint ready for ResidualSensorAgent "
+            "(contains config.json + model*.pth + residual_policy.pth + rl_config.json).",
+            flush=True,
+        )
+    else:
+        print(
+            "[extract-tfv6] Compatible folder ready for lead eval scripts "
+            "(contains config.json + model*.pth).",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

@@ -1,7 +1,11 @@
 #!/bin/bash
 
 # Checkpoints
-export CHECKPOINT_DIR=outputs/checkpoints/tfv6_resnet34/
+export CHECKPOINT_DIR=outputs/checkpoints/tfv6_resnet34/  # outputs/checkpoints/tfv6_resnet34_rlfinetuned_modelbest
+export AGENT=lead/inference/sensor_agent.py
+# export CHECKPOINT_DIR=outputs/checkpoints/tfv6_residual_onlyspeed_latest
+# export AGENT=rl_finetuning/inference/residual_sensor_agent.py  # NEED TO BE ACTIVE TO USE RESIDUAL
+
 export ROUTES=data/benchmark_routes/longest6/00.xml
 
 # Set environment variables
@@ -27,7 +31,7 @@ CUDA_VISIBLE_DEVICES=0 python3 3rd_party/leaderboard/leaderboard/leaderboard_eva
     --routes=$ROUTES \
     --track=SENSORS \
     --checkpoint=$EVALUATION_OUTPUT_DIR/checkpoint_endpoint.json \
-    --agent=lead/inference/sensor_agent.py \
+    --agent=$AGENT \
     --agent-config=$CHECKPOINT_DIR \
     --debug=0 \
     --record=None \

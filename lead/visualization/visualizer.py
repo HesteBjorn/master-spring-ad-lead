@@ -95,7 +95,6 @@ class Visualizer:
         bev_img = np.zeros((*bev.shape, 3), dtype=np.float32)
         for c in range(3):
             bev_img[..., c] = start_color[c] + (end_color[c] - start_color[c]) * bev
-        bev_img = bev_img.astype(np.uint8)
 
         self.bev_image = cv2.resize(
             bev_img,
@@ -957,6 +956,8 @@ class Visualizer:
                 pred_bounding_boxes: list[PredictedBoundingBox] = (
                     self.predictions.pred_bounding_box_image_system
                 )
+                if pred_bounding_boxes is None:
+                    return
                 for box in pred_bounding_boxes:
                     if box.score < self.config.bb_confidence_threshold:
                         continue

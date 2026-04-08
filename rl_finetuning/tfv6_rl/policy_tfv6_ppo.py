@@ -44,9 +44,9 @@ class TFv6PPOPolicy(nn.Module):
 
     def __init__(
         self,
-        observation_space,
-        action_space,
-        tfv6_checkpoint: str,
+        observation_space=None,
+        action_space=None,
+        tfv6_checkpoint: str = "",
         tfv6_prefix: str = "model",
         device: torch.device | None = None,
         rl_config=None,
@@ -63,6 +63,8 @@ class TFv6PPOPolicy(nn.Module):
             "cuda" if torch.cuda.is_available() else "cpu"
         )
 
+        if not tfv6_checkpoint:
+            raise ValueError("tfv6_checkpoint must be provided to TFv6PPOPolicy")
         self.training_config = load_training_config(tfv6_checkpoint)
         self.tfv6 = TFv6(self.device, self.training_config)
         weights_path = find_model_file(tfv6_checkpoint, prefix=tfv6_prefix)

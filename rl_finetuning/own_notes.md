@@ -3,8 +3,13 @@
 ## Extract policy checkpoint to eval-compatible TFv6 checkpoint
 ```bash
 python3 scripts/extract_trained_tfv6_model_from_policy.py \
-  outputs/rl_logs/TFV6_PPO_PARALLEL_LOCAL_MULTIENV_SINGLEGPU_33_NEWSTDHEAD/model_best.pth \
-  --output-dir outputs/checkpoints/tfv6_resnet34_rlfinetuned_modelbest
+  outputs/rl_logs/TFV6_LOCAL_RESIDUAL_onlyspeed/model_latest_000001821.pth \
+  --output-dir outputs/checkpoints/tfv6_residual_onlyspeed_latest
+```
+
+## Local eval bench2drive
+```bash
+bash scripts/start_carla.sh ; sleep 10 ; export CHECKPOINT_DIR=outputs/checkpoints/tfv6_residual_onlyspeed_latest && AGENT=rl_finetuning/inference/residual_sensor_agent.py bash scripts/eval_bench2drive.sh ;  bash scripts/clean_carla.sh
 ```
 
 ## Bench2Drive Idun
@@ -15,11 +20,12 @@ From repo root in idun run: `bash slurm/experiments/001_example/020_b2d_0.sh` to
 ## Run b2d dashboard from idun files
 ```bash
 # Login to idun and port forward
-ssh -L 5000:localhost:5000 erikhbj@idun.hpc.ntnu.no
+ssh -L 6007:localhost:6007 erikhbj@idun.hpc.ntnu.no
 module purge
 module load Anaconda3/2024.02-1
 conda activate lead
 ```
+
 ```bash
 # On idun
 cd /cluster/home/erikhbj/master/master-spring-ad-lead
@@ -123,6 +129,11 @@ ps -ef | rg "CarlaUE4|leaderboard_evaluator|train_parallel_tfv6_ppo|train_tfv6_p
 
 ### Slurm parallell training
 ```bash
+# Residual
+sbatch --export=ALL,RUN_CONFIG_FILE=rl_finetuning/configs/train_parallel_residual_idun.env,EXP_NAME=TFV6_RESIDUAL_ONLYSPEED_IDUN_2  rl_finetuning/train_tfv6_ppo_parallell_slurm.slurm
+```
+```bash
+# Finetuning
 sbatch --export=ALL,RUN_CONFIG_FILE=rl_finetuning/configs/train_parallel_idun.env rl_finetuning/train_tfv6_ppo_parallell_slurm.slurm
 ```
 ```bash
