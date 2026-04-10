@@ -2479,9 +2479,12 @@ def main():
             torch.distributed.barrier()
             torch.distributed.all_reduce(approx_kl, op=torch.distributed.ReduceOp.SUM)
             approx_kl = approx_kl / world_size
-            if args.target_kl is not None and config.lr_schedule == "kl":
+            if args.target_kl is not None:
                 if approx_kl > args.target_kl:
-                    if config.lr_schedule_step is not None:
+                    if (
+                        config.lr_schedule == "kl"
+                        and config.lr_schedule_step is not None
+                    ):
                         config.kl_early_stop += 1
                         if config.kl_early_stop >= config.lr_schedule_step:
                             config.current_learning_rate *= 0.5
