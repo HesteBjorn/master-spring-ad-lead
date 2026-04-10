@@ -2425,10 +2425,25 @@ def main():
                     if getattr(config, "use_residual_policy", False):
                         # Residual mode: distributions are diagonal Gaussians over
                         # (rank+1) basis coefficients. Reconstruct old dist from
-                        # stored head output: [:rank+1] = coeff means, [rank+1:] = log_stds.
+                        # stored head output layout:
+                        #   [:rank]        route coeff means
+                        #   [rank]         speed coeff mean
+                        #   [rank+1:2r+1]  route coeff log_stds
+                        #   [2r+1]         speed coeff log_std
+                        # When disable_residual_route=True the live distribution is 1-D
+                        # (speed only); slice to matching indices to avoid broadcast mismatch.
                         _r = config.residual_route_rank
-                        old_coeff_means = old_noise_preds_sampled[:, : _r + 1]
-                        old_coeff_log_stds = old_noise_preds_sampled[:, _r + 1 :]
+                        _disable_route = getattr(
+                            config, "disable_residual_route", False
+                        )
+                        if _disable_route:
+                            old_coeff_means = old_noise_preds_sampled[:, _r : _r + 1]
+                            old_coeff_log_stds = old_noise_preds_sampled[
+                                :, 2 * _r + 1 : 2 * _r + 2
+                            ]
+                        else:
+                            old_coeff_means = old_noise_preds_sampled[:, : _r + 1]
+                            old_coeff_log_stds = old_noise_preds_sampled[:, _r + 1 :]
                         old_normal = torch.distributions.Normal(
                             old_coeff_means, torch.exp(old_coeff_log_stds)
                         )
