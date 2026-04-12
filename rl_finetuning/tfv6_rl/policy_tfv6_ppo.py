@@ -370,35 +370,44 @@ class TFv6PPOPolicy(nn.Module):
             ) / float(self.training_config.max_speed)
             self.register_buffer("residual_speed_bins", speed_bins, persistent=False)
 
-            # Residual head: single transformer cross-attention decoder layer.
+            # Residual head: two-layer transformer cross-attention decoder.
             # Layout: [n_0..n_{rank-1}, speed_mean,  log_σ_0..log_σ_{rank-1}, log_speed_σ]
             #          ←——— rank+1 means ———→           ←———— rank+1 log_stds ————→
             #
-            # The base action (route_norm ++ speed_expected) is projected to a single
-            # query vector that attends over the 120 spatial KV tokens.  This conditions
-            # the spatial read-out on TFv6's current plan without a skip-connection
-            # collapse path.  No privileged measurements — critic only.
+            # Layer 1: action-derived query reads broadly from all KV tokens.
+            #          After layer 1 the query token q₁ contains scene information.
+            # Layer 2: q₁ (scene-informed) attends to KV again — this is scene-conditioned
+            #          attention, not action-conditioned. The query knows what is in the
+            #          scene and can now selectively focus on relevant regions.
+            #          Layer 2 attention weights are used for debug visualisation.
             # KV always detached: the actor must never backpropagate into TFv6.
             residual_out_dim = 2 * (self.residual_route_rank + 1)
             residual_action_dim = self.action_codec.route_dim + 1
-            token_dim = self.value_token_dim  # 64
+            token_dim = self.value_token_dim
 
-            # Query projection: base action → transformer token space.
-            # SiLU after projection allows non-linear conditioning of the query on the
-            # base action before attention — necessary since route × speed interactions
-            # are multiplicative and cannot be expressed by a linear map alone.
+            # Query projection: base action → transformer token space (layer 1 seed).
             self.residual_query_proj = nn.Sequential(
                 nn.Linear(residual_action_dim, token_dim),
                 nn.SiLU(),
             )
-            # Single cross-attention layer (2 heads × 32 dims each).
-            self.residual_cross_attn = nn.MultiheadAttention(
+            # Layer 1: broad scene readout conditioned on the base action.
+            self.residual_cross_attn1 = nn.MultiheadAttention(
                 token_dim, num_heads=2, batch_first=True
             )
-            self.residual_attn_norm = nn.LayerNorm(token_dim)
-            # FFN: standard 4× expansion with SiLU.
-            self.residual_ffn_norm = nn.LayerNorm(token_dim)
-            self.residual_ffn = nn.Sequential(
+            self.residual_attn_norm1 = nn.LayerNorm(token_dim)
+            self.residual_ffn_norm1 = nn.LayerNorm(token_dim)
+            self.residual_ffn1 = nn.Sequential(
+                nn.Linear(token_dim, token_dim * 4),
+                nn.SiLU(),
+                nn.Linear(token_dim * 4, token_dim),
+            )
+            # Layer 2: scene-conditioned targeted readout (query is now scene-aware).
+            self.residual_cross_attn2 = nn.MultiheadAttention(
+                token_dim, num_heads=2, batch_first=True
+            )
+            self.residual_attn_norm2 = nn.LayerNorm(token_dim)
+            self.residual_ffn_norm2 = nn.LayerNorm(token_dim)
+            self.residual_ffn2 = nn.Sequential(
                 nn.Linear(token_dim, token_dim * 4),
                 nn.SiLU(),
                 nn.Linear(token_dim * 4, token_dim),
@@ -570,17 +579,16 @@ class TFv6PPOPolicy(nn.Module):
         ).float()
 
     def _build_residual_features(self, base_action: torch.Tensor) -> torch.Tensor:
-        """Transformer cross-attention decoder layer for the residual head.
+        """Two-layer transformer cross-attention decoder for the residual head.
 
-        The base action (route_norm ++ speed_expected) is projected to a query vector
-        that attends over all 145 KV tokens: 120 spatial (12×10 BEV grid) + 25 status
+        All 145 KV tokens are used: 120 spatial (12×10 BEV grid) + 25 status
         (ego velocity, acceleration, route command, target points, past positions/speeds).
-        Including status tokens is essential for speed correction — the head must be
-        able to condition on current ego speed, command, and route context, not only
-        on the spatial scene layout.
 
-        No skip connection — the query residual inside the transformer is the only skip
-        path, which cannot collapse because base_action_proj ≠ mean_pool(kv).
+        Layer 1: action-derived query reads broadly from the scene.  After layer 1
+                 the query token contains scene information.
+        Layer 2: the scene-informed query attends again — this attention is conditioned
+                 on scene content, not just the base action.  Its weights are stored
+                 for debug visualisation.
 
         Output shape: [B, token_dim]
         """
@@ -591,24 +599,36 @@ class TFv6PPOPolicy(nn.Module):
         # All 145 tokens: [:120] spatial BEV grid, [120:] status (ego state + route).
         all_kv = kv.detach().float()  # (B, 145, token_dim)
 
-        # Project base action to query token space.
+        # Seed query from base action.
         q = self.residual_query_proj(base_action.float()).unsqueeze(
             1
         )  # (B, 1, token_dim)
 
-        # Pre-norm cross-attention with residual on the query.
-        q_normed = self.residual_attn_norm(q)
-        attn_out, weights = self.residual_cross_attn(
-            q_normed, all_kv, all_kv, need_weights=True, average_attn_weights=False
-        )  # attn_out: (B, 1, D)  weights: (B, num_heads, 1, 145)
-        # Store all 145 weights — viz slices [:120] for the spatial heatmap.
-        self._last_residual_attention_weights = weights[
+        # --- Layer 1: broad scene readout (action-conditioned, weights not stored) ---
+        attn_out1, _ = self.residual_cross_attn1(
+            self.residual_attn_norm1(q),
+            all_kv,
+            all_kv,
+            need_weights=False,
+        )
+        q = q + attn_out1
+        q = q + self.residual_ffn1(self.residual_ffn_norm1(q))
+
+        # --- Layer 2: scene-conditioned targeted readout (weights stored for viz) ---
+        # q now contains scene information from layer 1 — this query IS the scene.
+        attn_out2, weights2 = self.residual_cross_attn2(
+            self.residual_attn_norm2(q),
+            all_kv,
+            all_kv,
+            need_weights=True,
+            average_attn_weights=False,
+        )  # weights2: (B, num_heads, 1, 145)
+        # Store layer 2 weights — viz slices [:120] for the spatial heatmap.
+        self._last_residual_attention_weights = weights2[
             :, :, 0, :
         ].detach()  # (B, num_heads, 145)
-        q = q + attn_out  # query residual
-
-        # Pre-norm FFN with residual.
-        q = q + self.residual_ffn(self.residual_ffn_norm(q))
+        q = q + attn_out2
+        q = q + self.residual_ffn2(self.residual_ffn_norm2(q))
 
         return q.squeeze(1).float()  # (B, token_dim)
 
