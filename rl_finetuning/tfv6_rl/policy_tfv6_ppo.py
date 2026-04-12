@@ -341,6 +341,11 @@ class TFv6PPOPolicy(nn.Module):
         # Residual RL components (only when use_residual_policy=True).
         self.residual_head = None
         self._last_base_action_mean: torch.Tensor | None = None
+        # Attention weights from the last forward pass, for debug visualisation.
+        # Shape: (B, num_heads, 145) — set during _build_residual_features; first 120 are spatial.
+        # Not a parameter; not saved in state_dict; safe to read after any forward call.
+        self._last_residual_attention_weights: torch.Tensor | None = None
+        self._last_value_attention_weights: torch.Tensor | None = None
         if self.use_residual_policy:
             if not self.action_codec.predict_route:
                 raise ValueError(
@@ -365,32 +370,42 @@ class TFv6PPOPolicy(nn.Module):
             ) / float(self.training_config.max_speed)
             self.register_buffer("residual_speed_bins", speed_bins, persistent=False)
 
-            # Residual head: outputs 2*(rank+1) values.
+            # Residual head: single transformer cross-attention decoder layer.
             # Layout: [n_0..n_{rank-1}, speed_mean,  log_σ_0..log_σ_{rank-1}, log_speed_σ]
             #          ←——— rank+1 means ———→           ←———— rank+1 log_stds ————→
             #
-            # Input = attention-pooled KV tokens (skip + 4-query, always detached from
-            # TFv6) + frozen base action (route_norm ++ speed_expected).
-            # No privileged measurements — those are for the critic only.
+            # The base action (route_norm ++ speed_expected) is projected to a single
+            # query vector that attends over the 120 spatial KV tokens.  This conditions
+            # the spatial read-out on TFv6's current plan without a skip-connection
+            # collapse path.  No privileged measurements — critic only.
             # KV always detached: the actor must never backpropagate into TFv6.
             residual_out_dim = 2 * (self.residual_route_rank + 1)
-            self.num_residual_queries = 4
-            self.residual_queries = nn.Parameter(
-                torch.randn(self.num_residual_queries, self.value_token_dim) * 0.02
-            )
-            residual_spatial_dim = (
-                1 + self.num_residual_queries
-            ) * self.value_token_dim
-            # Base action: route_dim route coords + 1 speed value (normalized, from frozen TFv6).
             residual_action_dim = self.action_codec.route_dim + 1
-            residual_in_dim = residual_spatial_dim + residual_action_dim
-            self.residual_head = nn.Sequential(
-                nn.LayerNorm(residual_in_dim),
-                nn.Linear(residual_in_dim, 256),
-                nn.LayerNorm(256),
-                nn.ReLU(inplace=True),
-                nn.Linear(256, residual_out_dim),
+            token_dim = self.value_token_dim  # 64
+
+            # Query projection: base action → transformer token space.
+            # SiLU after projection allows non-linear conditioning of the query on the
+            # base action before attention — necessary since route × speed interactions
+            # are multiplicative and cannot be expressed by a linear map alone.
+            self.residual_query_proj = nn.Sequential(
+                nn.Linear(residual_action_dim, token_dim),
+                nn.SiLU(),
             )
+            # Single cross-attention layer (2 heads × 32 dims each).
+            self.residual_cross_attn = nn.MultiheadAttention(
+                token_dim, num_heads=2, batch_first=True
+            )
+            self.residual_attn_norm = nn.LayerNorm(token_dim)
+            # FFN: standard 4× expansion with SiLU.
+            self.residual_ffn_norm = nn.LayerNorm(token_dim)
+            self.residual_ffn = nn.Sequential(
+                nn.Linear(token_dim, token_dim * 4),
+                nn.SiLU(),
+                nn.Linear(token_dim * 4, token_dim),
+            )
+            # Linear readout.
+            self.residual_out = nn.Linear(token_dim, residual_out_dim)
+
             route_log_std_init = (
                 self.log_std_init_route
                 if self.log_std_init_route is not None
@@ -401,15 +416,15 @@ class TFv6PPOPolicy(nn.Module):
                 if self.log_std_init_speed is not None
                 else self.log_std_init
             )
-            nn.init.zeros_(self.residual_head[-1].weight)
+            nn.init.zeros_(self.residual_out.weight)
             with torch.no_grad():
-                nn.init.zeros_(self.residual_head[-1].bias)
+                nn.init.zeros_(self.residual_out.bias)
                 # Route log_stds at indices [rank+1 : 2*rank+1]
-                self.residual_head[-1].bias[
+                self.residual_out.bias[
                     self.residual_route_rank + 1 : 2 * self.residual_route_rank + 1
                 ] = route_log_std_init
                 # Speed log_std at index [2*rank+1]
-                self.residual_head[-1].bias[2 * self.residual_route_rank + 1] = (
+                self.residual_out.bias[2 * self.residual_route_rank + 1] = (
                     speed_log_std_init
                 )
 
@@ -544,6 +559,9 @@ class TFv6PPOPolicy(nn.Module):
         # scores: [B, num_queries, N_tokens]
         scores = torch.einsum("qd,bnd->bqn", self.value_queries, kv_f) / scale
         weights = scores.softmax(dim=-1)
+        self._last_value_attention_weights = (
+            weights.detach()
+        )  # [B, num_queries, N_tokens]
         # attention_pooled: [B, num_queries, token_dim]
         attention_pooled = torch.einsum("bqn,bnd->bqd", weights, kv_f)
         # Concatenate skip (mean) and attention along feature dim → [B, (1+Q)*D]
@@ -551,27 +569,48 @@ class TFv6PPOPolicy(nn.Module):
             [mean_pooled, attention_pooled.flatten(start_dim=1)], dim=1
         ).float()
 
-    def _build_residual_spatial_features(self) -> torch.Tensor:
-        """Mean-pool skip + query attention over KV tokens for the residual head.
+    def _build_residual_features(self, base_action: torch.Tensor) -> torch.Tensor:
+        """Transformer cross-attention decoder layer for the residual head.
 
-        Mirrors _build_critic_spatial_features but uses the separate residual_queries
-        and always detaches KV — the actor must never propagate gradients into the
-        frozen TFv6 backbone.
+        The base action (route_norm ++ speed_expected) is projected to a query vector
+        that attends over all 145 KV tokens: 120 spatial (12×10 BEV grid) + 25 status
+        (ego velocity, acceleration, route command, target points, past positions/speeds).
+        Including status tokens is essential for speed correction — the head must be
+        able to condition on current ego speed, command, and route context, not only
+        on the spatial scene layout.
 
-        Output shape: [B, (1 + num_residual_queries) * token_dim]
+        No skip connection — the query residual inside the transformer is the only skip
+        path, which cannot collapse because base_action_proj ≠ mean_pool(kv).
+
+        Output shape: [B, token_dim]
         """
         kv = getattr(self.tfv6.planning_decoder, "kv", None)
         if kv is None:
             raise RuntimeError("Planning decoder context tokens not available.")
-        kv_d = kv.detach()  # always detach — actor must not update TFv6
-        mean_pooled = kv_d.mean(dim=1)  # [B, token_dim]
-        scale = self.value_token_dim**0.5
-        scores = torch.einsum("qd,bnd->bqn", self.residual_queries, kv_d) / scale
-        weights = scores.softmax(dim=-1)
-        attention_pooled = torch.einsum("bqn,bnd->bqd", weights, kv_d)
-        return torch.cat(
-            [mean_pooled, attention_pooled.flatten(start_dim=1)], dim=1
-        ).float()
+        # Always detach — actor must never backpropagate into frozen TFv6.
+        # All 145 tokens: [:120] spatial BEV grid, [120:] status (ego state + route).
+        all_kv = kv.detach().float()  # (B, 145, token_dim)
+
+        # Project base action to query token space.
+        q = self.residual_query_proj(base_action.float()).unsqueeze(
+            1
+        )  # (B, 1, token_dim)
+
+        # Pre-norm cross-attention with residual on the query.
+        q_normed = self.residual_attn_norm(q)
+        attn_out, weights = self.residual_cross_attn(
+            q_normed, all_kv, all_kv, need_weights=True, average_attn_weights=False
+        )  # attn_out: (B, 1, D)  weights: (B, num_heads, 1, 145)
+        # Store all 145 weights — viz slices [:120] for the spatial heatmap.
+        self._last_residual_attention_weights = weights[
+            :, :, 0, :
+        ].detach()  # (B, num_heads, 145)
+        q = q + attn_out  # query residual
+
+        # Pre-norm FFN with residual.
+        q = q + self.residual_ffn(self.residual_ffn_norm(q))
+
+        return q.squeeze(1).float()  # (B, token_dim)
 
     def _build_critic_input(self, obs_dict: dict) -> torch.Tensor:
         """Critic input: attention-pooled kv features + privileged measurements."""
@@ -704,24 +743,17 @@ class TFv6PPOPolicy(nn.Module):
             [route_norm, speed_expected], dim=1
         ).detach()  # (B, route_dim+1)
 
-        # --- Residual head features: attention-pooled KV (detached) + base action ---
-        # KV tokens carry the full scene context TFv6 attended to; always detached so
-        # the actor never backprops into the frozen backbone.
-        # Base action (route_norm ++ speed_expected) tells the head what TFv6 already
-        # intends to do, allowing it to condition its correction on the base plan.
-        spatial_features = (
-            self._build_residual_spatial_features()
-        )  # (B, residual_spatial_dim)
+        # --- Residual transformer: base action as query over spatial KV tokens ---
+        # The base action conditions the spatial read-out on TFv6's current plan.
+        # KV always detached inside _build_residual_features — no gradient into TFv6.
         base_action = torch.cat(
             [route_norm, speed_expected], dim=1
-        ).detach()  # (B, route_dim+1) — detach: no gradient through frozen TFv6 output
-        residual_features = torch.cat(
-            [spatial_features, base_action], dim=1
-        )  # (B, residual_in_dim)
+        ).detach()  # (B, route_dim+1)
+        residual_features = self._build_residual_features(base_action)  # (B, token_dim)
 
-        # --- Residual head: means + log_stds for basis coefficients ---
+        # --- Residual output: means + log_stds for basis coefficients ---
         # Output layout: [n_0..n_{rank-1}, speed_mean, log_σ_0..log_σ_{rank-1}, log_speed_σ]
-        head_out = self.residual_head(residual_features).float()  # (B, 2*(rank+1))
+        head_out = self.residual_out(residual_features)  # (B, 2*(rank+1))
         rank = self.residual_route_rank
         coeff_means = head_out[:, : rank + 1]  # (B, rank+1)
         coeff_log_stds = head_out[:, rank + 1 :].clamp(

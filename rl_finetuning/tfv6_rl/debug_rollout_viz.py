@@ -1512,6 +1512,127 @@ class PPORolloutVisualizer:
             bev = bev[:, crop:-crop]
         return cv2.resize(bev, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
+    def _overlay_attention_heatmap(
+        self,
+        bev_col: np.ndarray,
+        attention_weights: np.ndarray,
+        alpha: float = 0.45,
+    ) -> np.ndarray:
+        """Overlay residual attention heatmap on an already-column-prepared BEV image.
+
+        attention_weights: float32 array (num_heads, 145) — output of
+        _last_residual_attention_weights[env_idx].  The first 120 entries are the
+        12×10 spatial BEV token grid (12 = x/forward, 10 = y/lateral, stride 32 px).
+        Entries 120:145 are status tokens (ego vel/accel, command, target points,
+        past positions/speeds) — included in cross-attention but not visualised here.
+
+        The overlay is applied with the same rot90 + crop transform as
+        _prepare_bev_for_column so the heatmap aligns with the rendered BEV.
+        """
+        n_spatial = 120  # 12 (x/forward) × 10 (y/lateral) backbone anchor cells
+        n_x, n_y = 12, 10  # backbone feature grid: x=forward, y=lateral
+
+        # Slice to spatial tokens only for the BEV heatmap; status tokens are not spatial.
+        # Average across heads.
+        w = attention_weights[:, :n_spatial].mean(axis=0)  # (120,)
+        w_min, w_max = w.min(), w.max()
+        w = (w - w_min) / (w_max - w_min + 1e-6)
+
+        # Reshape: (n_x=12, n_y=10) then transpose to (n_y=10, n_x=12) = (rows, cols)
+        # in the original BEV image space (rows=y/lateral, cols=x/forward).
+        hmap = w.reshape(n_x, n_y).T  # (10, 12)
+
+        # Upscale to full BEV pixel dims (bev_h × bev_w).
+        hmap_full = cv2.resize(
+            hmap, (self.bev_w, self.bev_h), interpolation=cv2.INTER_LINEAR
+        )
+
+        # Apply the same spatial transform as _prepare_bev_for_column.
+        hmap_rot = np.rot90(hmap_full, k=1)
+        hmap_rot = np.ascontiguousarray(hmap_rot)
+        crop = int(0.08 * hmap_rot.shape[1])
+        if 2 * crop < hmap_rot.shape[1] - 20:
+            hmap_rot = hmap_rot[:, crop:-crop]
+        hmap_resized = cv2.resize(
+            hmap_rot,
+            (bev_col.shape[1], bev_col.shape[0]),
+            interpolation=cv2.INTER_LINEAR,
+        )
+
+        # Color grade: transparent (low) → yellow → red (high).
+        # BGR: yellow=(0,255,255), red=(0,0,255). Only green channel varies.
+        t = hmap_resized.astype(np.float32)  # [0, 1]
+        hmap_color = np.stack(
+            [
+                np.zeros_like(t),  # B = 0
+                (255.0 * (1.0 - t)),  # G: 255 at low, 0 at high
+                np.full_like(t, 255.0),  # R = 255 always
+            ],
+            axis=2,
+        ).astype(np.float32)
+
+        # Per-pixel alpha: low attention → transparent, high → colored.
+        alpha_map = (t * alpha)[:, :, np.newaxis]
+        blended = (
+            (bev_col.astype(np.float32) * (1.0 - alpha_map) + hmap_color * alpha_map)
+            .clip(0, 255)
+            .astype(np.uint8)
+        )
+
+        # Colorbar: same grade blended against mid-gray background at each alpha level.
+        bar_w, bar_h = 12, min(100, blended.shape[0] - 40)
+        bar_x, bar_y = 6, 22
+        t_bar = np.linspace(1.0, 0.0, bar_h, dtype=np.float32)  # top=hi, bottom=lo
+        bar_colors = np.stack(
+            [
+                np.zeros_like(t_bar),
+                255.0 * (1.0 - t_bar),
+                np.full_like(t_bar, 255.0),
+            ],
+            axis=1,
+        ).reshape(bar_h, 1, 3)  # (bar_h, 1, 3) BGR float
+        bar_alphas = (t_bar * alpha).reshape(bar_h, 1, 1)
+        bg = np.full((bar_h, 1, 3), 128, dtype=np.float32)
+        bar_blended = (
+            (bg * (1.0 - bar_alphas) + bar_colors * bar_alphas)
+            .clip(0, 255)
+            .astype(np.uint8)
+        )
+        bar_blended = np.repeat(bar_blended, bar_w, axis=1)
+        blended[bar_y : bar_y + bar_h, bar_x : bar_x + bar_w] = bar_blended
+
+        cv2.putText(
+            blended,
+            f"{w_max:.5f}",
+            (bar_x + bar_w + 3, bar_y + 9),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.36,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            blended,
+            f"{w_min:.5f}",
+            (bar_x + bar_w + 3, bar_y + bar_h),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.36,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            blended,
+            "attn",
+            (bar_x, bar_y - 4),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.40,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        return blended
+
     def _put_text_lines(
         self, panel: np.ndarray, lines: list[str], start_y: int = 210
     ) -> None:
@@ -1616,6 +1737,7 @@ class PPORolloutVisualizer:
         base_mean_action: np.ndarray | None = None,
         target_speed_logits: np.ndarray | None = None,
         residual_coeff_preds: np.ndarray | None = None,
+        residual_attention_weights: np.ndarray | None = None,
         log_std: np.ndarray,
         value_estimate: float,
         route_completion: float | None,
@@ -1730,6 +1852,13 @@ class PPORolloutVisualizer:
         cam_h = final_h - gap - top_h
 
         bev_col = self._prepare_bev_for_column(bev, target_h=final_h, target_w=left_w)
+        if (
+            residual_attention_weights is not None
+            and residual_attention_weights.shape[-1] >= 120
+        ):
+            bev_col = self._overlay_attention_heatmap(
+                bev_col, residual_attention_weights
+            )
         self._overlay_legend_on_bev(bev_col)
 
         scalar_w = int(round(right_w * 0.56))

@@ -1857,6 +1857,16 @@ def main():
                         )
                         else None
                     )
+                    _last_attn = agent.module._last_residual_attention_weights
+                    residual_attn_np = (
+                        _last_attn[env_idx].cpu().numpy()
+                        if (
+                            getattr(config, "use_residual_policy", False)
+                            and _last_attn is not None
+                            and env_idx < _last_attn.shape[0]
+                        )
+                        else None
+                    )
                     debug_viz.maybe_write(
                         global_step=config.global_step,
                         rollout_step=step,
@@ -1886,6 +1896,7 @@ def main():
                             if getattr(config, "use_residual_policy", False)
                             else None
                         ),
+                        residual_attention_weights=residual_attn_np,
                         log_std=diag_log_std[env_idx].detach().cpu().numpy(),
                         value_estimate=float(value[env_idx].item()),
                         route_completion=float(route_completion_by_env[env_idx]),
