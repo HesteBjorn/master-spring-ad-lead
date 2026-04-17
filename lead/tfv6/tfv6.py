@@ -125,6 +125,7 @@ class TFv6(nn.Module):
 
         # Backbone
         bev_features, image_features = self.backbone(data)
+        self.bev_features = bev_features  # expose for residual head
 
         # Radar detection
         radar_features = radar_predictions = None

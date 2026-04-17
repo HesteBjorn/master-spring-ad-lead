@@ -342,7 +342,8 @@ class TFv6PPOPolicy(nn.Module):
         self.residual_head = None
         self._last_base_action_mean: torch.Tensor | None = None
         # Attention weights from the last forward pass, for debug visualisation.
-        # Shape: (B, num_heads, 145) — set during _build_residual_features; first 120 are spatial.
+        # Set to a (B, num_heads, N) tensor by architectures that expose attention;
+        # remains None for CNN-based architectures — viz skips the heatmap automatically.
         # Not a parameter; not saved in state_dict; safe to read after any forward call.
         self._last_residual_attention_weights: torch.Tensor | None = None
         self._last_value_attention_weights: torch.Tensor | None = None
@@ -370,50 +371,55 @@ class TFv6PPOPolicy(nn.Module):
             ) / float(self.training_config.max_speed)
             self.register_buffer("residual_speed_bins", speed_bins, persistent=False)
 
-            # Residual head: two-layer transformer cross-attention decoder.
+            # Residual head: CNN over frozen bev_features + status branch (Roach-style).
             # Layout: [n_0..n_{rank-1}, speed_mean,  log_σ_0..log_σ_{rank-1}, log_speed_σ]
             #          ←——— rank+1 means ———→           ←———— rank+1 log_stds ————→
             #
-            # Layer 1: action-derived query reads broadly from all KV tokens.
-            #          After layer 1 the query token q₁ contains scene information.
-            # Layer 2: q₁ (scene-informed) attends to KV again — this is scene-conditioned
-            #          attention, not action-conditioned. The query knows what is in the
-            #          scene and can now selectively focus on relevant regions.
-            #          Layer 2 attention weights are used for debug visualisation.
-            # KV always detached: the actor must never backpropagate into TFv6.
+            # Spatial branch: two 3×3 conv layers over the raw (B, C, 12, 10) BEV feature
+            #   map, followed by global average pool → (B, token_dim).
+            # Status branch:  mean-pool the 25 status KV tokens → linear → (B, token_dim).
+            # Both branches are concatenated before the output head.
+            # bev_features and kv are always detached — no gradient into frozen TFv6.
             residual_out_dim = 2 * (self.residual_route_rank + 1)
-            residual_action_dim = self.action_codec.route_dim + 1
             token_dim = self.value_token_dim
+            # Read the true bev_features channel count from the planning decoder's
+            # dimension_adapter, which was constructed with the correct input_bev_channels.
+            # Using bev_features_chanels from config is unreliable — it may differ from
+            # the actual backbone output (e.g. 64 vs 512 for resnet34 checkpoint).
+            bev_channels = self.tfv6.planning_decoder.planning_context_encoder.dimension_adapter.in_channels
 
-            # Query projection: base action → transformer token space (layer 1 seed).
-            self.residual_query_proj = nn.Sequential(
-                nn.Linear(residual_action_dim, token_dim),
-                nn.SiLU(),
+            # Spatial CNN branch.
+            # 1×1 conv first reduces the 512-channel backbone output to a compact
+            # 64-channel representation (channel selection / bottleneck), then two
+            # 3×3 convs reason spatially before global average pooling collapses the
+            # 10×12 grid to a single (B, token_dim) vector.
+            _bev_hidden = 64
+            self.residual_cnn = nn.Sequential(
+                nn.Conv2d(
+                    bev_channels, _bev_hidden, kernel_size=1
+                ),  # channel reduction
+                nn.GELU(),
+                nn.Conv2d(
+                    _bev_hidden, _bev_hidden, kernel_size=3, padding=1
+                ),  # spatial grouping
+                nn.GELU(),
+                nn.Conv2d(
+                    _bev_hidden, token_dim, kernel_size=3, padding=1
+                ),  # expand to token_dim
+                nn.GELU(),
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
             )
-            # Layer 1: broad scene readout conditioned on the base action.
-            self.residual_cross_attn1 = nn.MultiheadAttention(
-                token_dim, num_heads=2, batch_first=True
+            # Status branch: mean-pooled status KV tokens + TFv6's predicted action
+            # (route_norm + expected_speed) concatenated before the linear projection.
+            # Including base_action gives the corrector explicit access to TFv6's current
+            # plan, which is the most direct signal for deciding what to override.
+            residual_action_dim = self.action_codec.route_dim + 1
+            self.residual_status_proj = nn.Linear(
+                token_dim + residual_action_dim, token_dim
             )
-            self.residual_attn_norm1 = nn.LayerNorm(token_dim)
-            self.residual_ffn_norm1 = nn.LayerNorm(token_dim)
-            self.residual_ffn1 = nn.Sequential(
-                nn.Linear(token_dim, token_dim * 4),
-                nn.SiLU(),
-                nn.Linear(token_dim * 4, token_dim),
-            )
-            # Layer 2: scene-conditioned targeted readout (query is now scene-aware).
-            self.residual_cross_attn2 = nn.MultiheadAttention(
-                token_dim, num_heads=2, batch_first=True
-            )
-            self.residual_attn_norm2 = nn.LayerNorm(token_dim)
-            self.residual_ffn_norm2 = nn.LayerNorm(token_dim)
-            self.residual_ffn2 = nn.Sequential(
-                nn.Linear(token_dim, token_dim * 4),
-                nn.SiLU(),
-                nn.Linear(token_dim * 4, token_dim),
-            )
-            # Linear readout.
-            self.residual_out = nn.Linear(token_dim, residual_out_dim)
+            # Output head: spatial (token_dim) + status (token_dim) → residual params.
+            self.residual_out = nn.Linear(token_dim * 2, residual_out_dim)
 
             route_log_std_init = (
                 self.log_std_init_route
@@ -579,58 +585,46 @@ class TFv6PPOPolicy(nn.Module):
         ).float()
 
     def _build_residual_features(self, base_action: torch.Tensor) -> torch.Tensor:
-        """Two-layer transformer cross-attention decoder for the residual head.
+        """CNN residual head features (Roach-style spatial + status branches).
 
-        All 145 KV tokens are used: 120 spatial (12×10 BEV grid) + 25 status
-        (ego velocity, acceleration, route command, target points, past positions/speeds).
+        Spatial branch: frozen bev_features (B, C, 10, 12) passed through a 1×1
+            channel-reduction conv, two 3×3 spatial convs, and global average
+            pool → (B, token_dim).
+        Status branch:  mean of the 25 status KV tokens concatenated with
+            base_action (TFv6's predicted route + speed), then projected linearly
+            → (B, token_dim).
+        Both are concatenated → (B, 2*token_dim).
 
-        Layer 1: action-derived query reads broadly from the scene.  After layer 1
-                 the query token contains scene information.
-        Layer 2: the scene-informed query attends again — this attention is conditioned
-                 on scene content, not just the base action.  Its weights are stored
-                 for debug visualisation.
+        bev_features and kv are always detached — no gradient into frozen TFv6.
+        _last_residual_attention_weights is not set (stays None); the debug viz
+        skips the attention heatmap automatically.
 
-        Output shape: [B, token_dim]
+        Output shape: [B, 2*token_dim]
         """
+        bev = getattr(self.tfv6, "bev_features", None)
+        if bev is None:
+            raise RuntimeError(
+                "bev_features not available on tfv6 — ensure self.bev_features = bev_features is set in tfv6.py forward."
+            )
         kv = getattr(self.tfv6.planning_decoder, "kv", None)
         if kv is None:
             raise RuntimeError("Planning decoder context tokens not available.")
-        # Always detach — actor must never backpropagate into frozen TFv6.
-        # All 145 tokens: [:120] spatial BEV grid, [120:] status (ego state + route).
-        all_kv = kv.detach().float()  # (B, 145, token_dim)
 
-        # Seed query from base action.
-        q = self.residual_query_proj(base_action.float()).unsqueeze(
-            1
-        )  # (B, 1, token_dim)
+        # Spatial branch: raw BEV feature map, before any planning-decoder projection.
+        bev = bev.detach().float()  # (B, C, 10, 12)
+        spatial_ctx = self.residual_cnn(bev)  # (B, token_dim)
 
-        # --- Layer 1: broad scene readout (action-conditioned, weights not stored) ---
-        attn_out1, _ = self.residual_cross_attn1(
-            self.residual_attn_norm1(q),
-            all_kv,
-            all_kv,
-            need_weights=False,
-        )
-        q = q + attn_out1
-        q = q + self.residual_ffn1(self.residual_ffn_norm1(q))
+        # Status branch: ego state tokens + TFv6's current plan (route + speed).
+        # Concatenating base_action gives the corrector direct access to what TFv6
+        # decided so it can reason about what to override.
+        kv_status = kv.detach().float()[:, 120:].mean(dim=1)  # (B, token_dim)
+        status_ctx = self.residual_status_proj(
+            torch.cat(
+                [kv_status, base_action.float()], dim=1
+            )  # (B, token_dim + action_dim)
+        )  # (B, token_dim)
 
-        # --- Layer 2: scene-conditioned targeted readout (weights stored for viz) ---
-        # q now contains scene information from layer 1 — this query IS the scene.
-        attn_out2, weights2 = self.residual_cross_attn2(
-            self.residual_attn_norm2(q),
-            all_kv,
-            all_kv,
-            need_weights=True,
-            average_attn_weights=False,
-        )  # weights2: (B, num_heads, 1, 145)
-        # Store layer 2 weights — viz slices [:120] for the spatial heatmap.
-        self._last_residual_attention_weights = weights2[
-            :, :, 0, :
-        ].detach()  # (B, num_heads, 145)
-        q = q + attn_out2
-        q = q + self.residual_ffn2(self.residual_ffn_norm2(q))
-
-        return q.squeeze(1).float()  # (B, token_dim)
+        return torch.cat([spatial_ctx, status_ctx], dim=1).float()  # (B, 2*token_dim)
 
     def _build_critic_input(self, obs_dict: dict) -> torch.Tensor:
         """Critic input: attention-pooled kv features + privileged measurements."""
@@ -763,13 +757,10 @@ class TFv6PPOPolicy(nn.Module):
             [route_norm, speed_expected], dim=1
         ).detach()  # (B, route_dim+1)
 
-        # --- Residual transformer: base action as query over spatial KV tokens ---
-        # The base action conditions the spatial read-out on TFv6's current plan.
-        # KV always detached inside _build_residual_features — no gradient into TFv6.
-        base_action = torch.cat(
-            [route_norm, speed_expected], dim=1
-        ).detach()  # (B, route_dim+1)
-        residual_features = self._build_residual_features(base_action)  # (B, token_dim)
+        # --- Residual CNN: BEV feature map + status branch ---
+        residual_features = self._build_residual_features(
+            self._last_base_action_mean
+        )  # (B, 2*token_dim)
 
         # --- Residual output: means + log_stds for basis coefficients ---
         # Output layout: [n_0..n_{rank-1}, speed_mean, log_σ_0..log_σ_{rank-1}, log_speed_σ]
