@@ -372,15 +372,14 @@ class TFv6PPOPolicy(nn.Module):
             self.register_buffer("residual_speed_bins", speed_bins, persistent=False)
 
             # Residual head: CNN over frozen bev_features + status branch (Roach-style).
-            # Layout: [n_0..n_{rank-1}, speed_mean,  log_σ_0..log_σ_{rank-1}, log_speed_σ]
-            #          ←——— rank+1 means ———→           ←———— rank+1 log_stds ————→
+            # Buffer layout: [n_0..n_{rank-1}, speed_mean, log_σ_0..log_σ_{rank-1}, log_speed_σ]
+            #                 ←——— rank+1 means (network output) ———→  ←— rank+1 log_stds (parameters) —→
             #
-            # Spatial branch: two 3×3 conv layers over the raw (B, C, 12, 10) BEV feature
-            #   map, followed by global average pool → (B, token_dim).
-            # Status branch:  mean-pool the 25 status KV tokens → linear → (B, token_dim).
+            # Spatial branch: 1×1 bottleneck + two 3×3 conv layers over the raw BEV feature
+            #   map (B, C, 10, 12), followed by global average pool → (B, token_dim).
+            # Status branch:  mean-pool the 25 status KV tokens + base_action → linear → (B, token_dim).
             # Both branches are concatenated before the output head.
             # bev_features and kv are always detached — no gradient into frozen TFv6.
-            residual_out_dim = 2 * (self.residual_route_rank + 1)
             token_dim = self.value_token_dim
             # Read the true bev_features channel count from the planning decoder's
             # dimension_adapter, which was constructed with the correct input_bev_channels.
@@ -418,8 +417,9 @@ class TFv6PPOPolicy(nn.Module):
             self.residual_status_proj = nn.Linear(
                 token_dim + residual_action_dim, token_dim
             )
-            # Output head: spatial (token_dim) + status (token_dim) → residual params.
-            self.residual_out = nn.Linear(token_dim * 2, residual_out_dim)
+            # Output head: means only — log_stds are learned parameters, not network outputs.
+            rank = self.residual_route_rank
+            self.residual_out = nn.Linear(token_dim * 2, rank + 1)
 
             route_log_std_init = (
                 self.log_std_init_route
@@ -432,29 +432,21 @@ class TFv6PPOPolicy(nn.Module):
                 else self.log_std_init
             )
             nn.init.zeros_(self.residual_out.weight)
-            with torch.no_grad():
-                nn.init.zeros_(self.residual_out.bias)
-                # Route log_stds at indices [rank+1 : 2*rank+1]
-                self.residual_out.bias[
-                    self.residual_route_rank + 1 : 2 * self.residual_route_rank + 1
-                ] = route_log_std_init
-                # Speed log_std at index [2*rank+1]
-                self.residual_out.bias[2 * self.residual_route_rank + 1] = (
-                    speed_log_std_init
+            nn.init.zeros_(self.residual_out.bias)
+
+            # One learned log_std per action output: [route_0, ..., route_{rank-1}, speed].
+            # Separate parameters let each dimension adapt its own exploration scale.
+            # Not used when disable_learned_noise_head=True (fixed constants override).
+            self.residual_log_std = nn.Parameter(
+                torch.tensor(
+                    [route_log_std_init] * rank + [speed_log_std_init],
+                    dtype=torch.float32,
                 )
+            )
 
             # Fixed log_std values used when disable_learned_noise_head=True.
-            # Mirrors the normal-path behaviour of freezing the noise head.
-            self._residual_fixed_route_log_std = float(
-                self.log_std_init_route
-                if self.log_std_init_route is not None
-                else self.log_std_init
-            )
-            self._residual_fixed_speed_log_std = float(
-                self.log_std_init_speed
-                if self.log_std_init_speed is not None
-                else self.log_std_init
-            )
+            self._residual_fixed_route_log_std = float(route_log_std_init)
+            self._residual_fixed_speed_log_std = float(speed_log_std_init)
 
             # Reusable distribution object (no parameters, safe to keep as attribute).
             self._residual_dist = DiagGaussianDistribution()
@@ -762,31 +754,37 @@ class TFv6PPOPolicy(nn.Module):
             self._last_base_action_mean
         )  # (B, 2*token_dim)
 
-        # --- Residual output: means + log_stds for basis coefficients ---
-        # Output layout: [n_0..n_{rank-1}, speed_mean, log_σ_0..log_σ_{rank-1}, log_speed_σ]
-        head_out = self.residual_out(residual_features)  # (B, 2*(rank+1))
+        # --- Residual output: means from network, log_stds from learned parameters ---
+        # Output layout stored in buffer: [n_0..n_{rank-1}, speed_mean, log_σ_0..log_σ_{rank-1}, log_speed_σ]
+        coeff_means = self.residual_out(residual_features)  # (B, rank+1)
         rank = self.residual_route_rank
-        coeff_means = head_out[:, : rank + 1]  # (B, rank+1)
-        coeff_log_stds = head_out[:, rank + 1 :].clamp(
-            self.log_std_min, self.log_std_max
-        )  # (B, rank+1)
+        B = coeff_means.shape[0]
 
-        # --- Fixed log_stds when disable_learned_noise_head=True ---
-        # Mirrors the normal-path behaviour: log_stds stay at their init values.
+        # --- log_stds: learned parameter (one per action dim) or fixed constants ---
         if self.disable_learned_noise_head:
             fixed_route_ls = torch.full(
-                (coeff_log_stds.shape[0], rank),
+                (B, rank),
                 self._residual_fixed_route_log_std,
-                device=coeff_log_stds.device,
-                dtype=coeff_log_stds.dtype,
+                device=coeff_means.device,
+                dtype=coeff_means.dtype,
             )
             fixed_speed_ls = torch.full(
-                (coeff_log_stds.shape[0], 1),
+                (B, 1),
                 self._residual_fixed_speed_log_std,
-                device=coeff_log_stds.device,
-                dtype=coeff_log_stds.dtype,
+                device=coeff_means.device,
+                dtype=coeff_means.dtype,
             )
             coeff_log_stds = torch.cat([fixed_route_ls, fixed_speed_ls], dim=1)
+        else:
+            coeff_log_stds = (
+                self.residual_log_std.clamp(self.log_std_min, self.log_std_max)
+                .unsqueeze(0)
+                .expand(B, -1)
+            )  # (B, rank+1)
+
+        # Reconstruct full (B, 2*(rank+1)) tensor for rollout buffer compatibility.
+        # Buffer layout matches old head_out so train_tfv6_ppo.py needs no changes.
+        head_out = torch.cat([coeff_means, coeff_log_stds], dim=1)  # (B, 2*(rank+1))
 
         route_coeff_means = coeff_means[:, :rank]  # (B, rank)
         speed_coeff_mean = coeff_means[:, rank:]  # (B, 1)
