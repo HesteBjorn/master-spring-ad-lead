@@ -73,7 +73,7 @@ tensorboard --logdir outputs/rl_logs
 ```
 
 ## Parallell training
-### Local parallell training
+### PPO Local
 ```bash
 # Multi env in parallel
 conda activate lead
@@ -110,11 +110,52 @@ RUN_CONFIG_FILE=rl_finetuning/configs/train_local_residual.env  \
 bash rl_finetuning/train_tfv6_ppo_parallell.sh \
   outputs/checkpoints/tfv6_resnet34 \
   outputs/rl_logs \
-  TFV6_LOCAL_RESIDUAL_2 \
+  TFV6_LOCAL_RESIDUAL_onlyspeed_newarchitecture_CNN \
+  --debug 0 --debug_viz --debug_viz_every_n 1 --debug_viz_max_images 2000
+```
+#### To continue the newarchitecture_CNN run:
+For the outputs/rl_logs/TFV6_LOCAL_RESIDUAL_onlyspeed_newarchitecture_CNN run.
+Temporarily change line 1292 in train_tfv6_ppo.py from strict=True to strict=False for this one resume, then change it back. Or add a dedicated --strict_load flag.
+Since architecture have been slightly modified in the meantime (std head was changed to parameter)
+
+```bash
+# VC06 RESIDUAL
+conda activate lead_carla_fork
+export CARLA_ROOT=/data/work/erikhbj/master-spring-ad-lead/3rd_party/fork_export_t1213_fixed/LinuxNoEditor
+unset PYTHONPATH
+RUN_CONFIG_FILE=rl_finetuning/configs/train_vc06_ppo_residual.env  \
+bash rl_finetuning/train_tfv6_ppo_parallell.sh \
+  outputs/checkpoints/tfv6_resnet34 \
+  outputs/rl_logs \
+  TFV6_PPO_VC06_RESIDUAL_onlyspeed_CNN_fork \
+  --debug 0 --debug_viz --debug_viz_every_n 1 --debug_viz_max_images 2000
+
+# VC06 nofork
+conda activate lead
+export CARLA_ROOT=/data/work/erikhbj/master-spring-ad-lead/3rd_party/CARLA_0915
+unset PYTHONPATH
+RUN_CONFIG_FILE=rl_finetuning/configs/train_vc06_ppo_residual.env  \
+bash rl_finetuning/train_tfv6_ppo_parallell.sh \
+  outputs/checkpoints/tfv6_resnet34 \
+  outputs/rl_logs \
+  TFV6_PPO_VC06_RESIDUAL_onlyspeed_CNN_nofork \
   --debug 0 --debug_viz --debug_viz_every_n 1 --debug_viz_max_images 2000
 ```
 
-### Kill all running processes
+## TD3 Local
+```bash
+conda activate lead_carla_fork
+export CARLA_ROOT=/home/erikhbj/Documents/master/master-spring-ad-lead/3rd_party/fork_export_t1213_fixed/LinuxNoEditor
+unset PYTHONPATH
+RUN_CONFIG_FILE=rl_finetuning/configs/train_local_residual_td3.env \
+bash rl_finetuning/train_tfv6_td3_parallel.sh \
+  outputs/checkpoints/tfv6_resnet34 \
+  outputs/rl_logs \
+  TFV6_TD3_LOCAL_RESIDUAL_smoke_3 \
+  --debug 0 --debug_viz --debug_viz_every_n 1 --debug_viz_max_images 2000
+```
+
+## Kill all running processes
 ```bash
 pkill -f "train_tfv6_ppo_parallell.sh" || true
 pkill -f "train_parallel_tfv6_ppo.py" || true

@@ -1743,6 +1743,7 @@ class PPORolloutVisualizer:
         route_completion: float | None,
         speed_hold_frames: int,
         speed_hold_target_speed: float | None,
+        q_estimate: float | None = None,
     ) -> None:
         env_slot = env_idx % len(self.episode_returns)
         if reward < 0.0:
@@ -1920,7 +1921,11 @@ class PPORolloutVisualizer:
             ),
             (
                 f"reward={reward:+.4f} cumulative_reward={episode_return:+.4f} "
-                f"value={value_estimate:+.4f}"
+                + (
+                    f"Q1={q_estimate:+.4f}"
+                    if q_estimate is not None
+                    else f"value={value_estimate:+.4f}"
+                )
             ),
             "forward_discounted_return=pending",
             "forward_infraction_reason=pending",

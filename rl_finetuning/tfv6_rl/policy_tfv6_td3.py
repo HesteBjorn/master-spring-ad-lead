@@ -1,0 +1,251 @@
+"""TD3 actor and Q-network classes for TFv6 residual RL.
+
+Both actor and Q-networks receive a shared ``TFv6ResidualBackbone`` instance so
+TFv6 runs only once per forward pass. The design is:
+
+  - Actor *owns* the backbone (it is a registered ``nn.Module`` child), so
+    ``actor.parameters()`` includes ``backbone.residual_cnn`` and
+    ``backbone.residual_status_proj``.
+  - Q-networks hold a *reference* to the backbone (not a child module) so
+    ``qf.parameters()`` only contains ``qf.q_head``. This avoids duplicate
+    parameter registration when actor and Q-networks share one backbone.
+
+Usage pattern (training loop):
+    # Online networks share one backbone.
+    backbone       = TFv6ResidualBackbone(...)
+    actor          = TFv6ResidualActorTD3(backbone, config)
+    qf1            = TFv6ResidualQNetworkTD3(backbone, config)
+    qf2            = TFv6ResidualQNetworkTD3(backbone, config)
+    # Target networks share a separate target_backbone (deepcopy of backbone).
+    target_backbone = deepcopy(backbone)
+    actor_target   = TFv6ResidualActorTD3(target_backbone, config)
+    qf1_target     = TFv6ResidualQNetworkTD3(target_backbone, config)
+    qf2_target     = TFv6ResidualQNetworkTD3(target_backbone, config)
+
+    # Collect step (no_grad):
+    coeff = actor.forward_coeffs(obs)          # sets backbone._last_base_action_mean
+    action = actor.coeffs_to_action(coeff)     # combines base + alpha*correction
+
+    # Critic update:
+    with no_grad():
+        next_coeff = actor_target.forward_coeffs(next_obs)  # sets target_backbone state
+        q1_next = qf1_target(next_obs, next_coeff)           # reuses target_backbone state
+        q2_next = qf2_target(next_obs, next_coeff)           # reuses target_backbone state
+    q1 = qf1(obs, batch_coeff)                  # sets backbone state (via actor's backbone)
+    q2 = qf2(obs, batch_coeff)
+
+    # Actor update:
+    pred_coeff = actor.forward_coeffs(obs)     # sets backbone._last_base_action_mean
+    actor_loss = -qf1.forward_with_cached_backbone(pred_coeff, priv).mean()
+"""
+
+from __future__ import annotations
+
+import torch
+from torch import nn
+
+from rl_finetuning.tfv6_rl.residual_backbone import TFv6ResidualBackbone
+
+
+class TFv6ResidualActorTD3(nn.Module):
+    """Deterministic residual actor for TD3.
+
+    Outputs a full action in normalized space: [route_dim+1].
+    The correction is parameterized in a low-dimensional coefficient space
+    of size ``rank+1`` (route basis coefficients + speed coefficient).
+
+    Key methods:
+        ``forward_coeffs(obs_dict)``    → [B, rank+1]  raw coefficients
+        ``coeffs_to_action(coeffs)``    → [B, route_dim+1]  full action in [-1,1]
+        ``forward(obs_dict)``           → [B, route_dim+1]  chains both
+    """
+
+    def __init__(self, backbone: TFv6ResidualBackbone, rl_config=None) -> None:
+        super().__init__()
+        # Backbone is a registered child: actor owns backbone.residual_cnn +
+        # backbone.residual_status_proj. TFv6 inside backbone is frozen.
+        self.backbone = backbone
+        token_dim = backbone.value_token_dim
+        rank = backbone.residual_route_rank
+        # Output head: [B, 2*token_dim] → [B, rank+1] coefficient means.
+        # Initialized to zero so the actor starts at the TFv6 base policy.
+        self.residual_out = nn.Linear(token_dim * 2, rank + 1)
+        nn.init.zeros_(self.residual_out.weight)
+        nn.init.zeros_(self.residual_out.bias)
+
+    @property
+    def rank(self) -> int:
+        return self.backbone.residual_route_rank
+
+    @property
+    def action_dim(self) -> int:
+        return self.backbone.action_codec.action_dim
+
+    def forward_coeffs(self, obs_dict: dict) -> torch.Tensor:
+        """Run backbone + output head → raw coefficients [B, rank+1].
+
+        Side-effect: sets ``backbone._last_base_action_mean`` and caches TFv6
+        internal state (``bev_features``, ``kv``) for reuse by Q-networks.
+        """
+        _, _, base_action_mean = self.backbone.get_base_action(obs_dict)
+        features = self.backbone.get_residual_features(base_action_mean)
+        return self.residual_out(features)
+
+    def coeffs_to_action(self, coeff_means: torch.Tensor) -> torch.Tensor:
+        """Convert coefficient vector [B, rank+1] to full action [B, route_dim+1].
+
+        Applies: action = base_action + alpha * correction, clamped to [-1, 1].
+        Uses the base action cached by the most recent ``forward_coeffs`` call.
+        """
+        base_action = self.backbone._last_base_action_mean
+        if base_action is None:
+            raise RuntimeError("Call forward_coeffs() before coeffs_to_action().")
+        route_dim = self.backbone.action_codec.route_dim
+        rank = self.rank
+        basis = self.backbone.residual_route_basis.to(
+            device=coeff_means.device, dtype=coeff_means.dtype
+        )
+        disable_route = self.backbone.disable_residual_route
+
+        route_base = base_action[:, :route_dim]
+        speed_base = base_action[:, route_dim:]
+        route_coeff = coeff_means[:, :rank]
+        speed_coeff = coeff_means[:, rank:]
+
+        if disable_route:
+            delta_route = torch.zeros_like(route_base)
+        else:
+            delta_route = self.backbone.residual_alpha * (route_coeff @ basis.t())
+
+        delta_speed = self.backbone.residual_alpha_speed * speed_coeff
+        action = torch.cat([route_base + delta_route, speed_base + delta_speed], dim=1)
+        return action.clamp(-1.0, 1.0)
+
+    def forward(self, obs_dict: dict) -> torch.Tensor:
+        """Full actor forward: obs_dict → full action [B, route_dim+1].
+
+        Chains ``forward_coeffs`` + ``coeffs_to_action``. Used during rollout.
+        """
+        coeff_means = self.forward_coeffs(obs_dict)
+        return self.coeffs_to_action(coeff_means)
+
+
+class TFv6ResidualQNetworkTD3(nn.Module):
+    """Q-network for TD3 residual RL.
+
+    Takes coefficient-space actions [B, rank+1] instead of full actions
+    [B, route_dim+1]. This keeps the Q-function input low-dimensional (2–3
+    dims vs. 21), matching the residual parameterization of the actor.
+
+    The backbone is held as a plain attribute (NOT a registered child module),
+    so ``qf.parameters()`` only contains ``qf.q_head`` weights. The backbone
+    must be shared with the corresponding actor instance — TFv6 must have
+    already been run via ``actor.forward_coeffs()`` before calling this.
+
+    Instantiate two independent instances (qf1, qf2) sharing the same backbone.
+    Q-head architecture mirrors the PPO value_head (LayerNorm + MLP).
+    """
+
+    def __init__(
+        self,
+        backbone: TFv6ResidualBackbone,
+        rl_config=None,
+    ) -> None:
+        super().__init__()
+        # Plain attribute — NOT registered as child module.
+        # backbone.parameters() are owned by the actor, not this Q-network.
+        object.__setattr__(self, "_backbone_ref", backbone)
+
+        token_dim = backbone.value_token_dim
+        rank = backbone.residual_route_rank
+        action_dim = rank + 1
+
+        self.use_privileged_measurements: bool = False
+        self.num_privileged_measurements: int = 0
+        if rl_config is not None:
+            self.use_privileged_measurements = bool(
+                getattr(rl_config, "use_value_measurements", False)
+            )
+            if self.use_privileged_measurements:
+                from rl_finetuning.tfv6_rl.privileged_measurements import (
+                    privileged_measurement_dim,
+                )
+
+                self.num_privileged_measurements = privileged_measurement_dim(rl_config)
+
+        priv_dim = (
+            self.num_privileged_measurements if self.use_privileged_measurements else 0
+        )
+        q_in_dim = token_dim * 2 + action_dim + priv_dim
+
+        # Q-head mirrors PPO value_head: LayerNorm → Linear(256) → LN → ReLU × 2 → 1.
+        self.q_head = nn.Sequential(
+            nn.LayerNorm(q_in_dim),
+            nn.Linear(q_in_dim, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, 1),
+        )
+
+    @property
+    def backbone(self) -> TFv6ResidualBackbone:
+        return object.__getattribute__(self, "_backbone_ref")
+
+    def forward(
+        self,
+        obs_dict: dict,
+        action_coeffs: torch.Tensor,
+        privileged: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute Q(obs, action_coeffs) reusing cached backbone state.
+
+        ``actor.forward_coeffs(obs_dict)`` (or ``actor_target.forward_coeffs``)
+        must have been called first to populate ``backbone._last_base_action_mean``
+        and the TFv6 internal cache (``bev_features``, ``kv``).
+
+        Args:
+            obs_dict:      observation dict (used only to locate backbone — not re-run)
+            action_coeffs: [B, rank+1]  coefficient-space action
+            privileged:    [B, num_priv] optional privileged measurements
+
+        Returns:
+            q_value: [B, 1]
+        """
+        base_action = self.backbone._last_base_action_mean
+        if base_action is None:
+            raise RuntimeError(
+                "Call actor.forward_coeffs() before Q-network forward()."
+            )
+        features = self.backbone.get_residual_features(base_action)
+
+        parts = [features, action_coeffs.float()]
+        if self.use_privileged_measurements and privileged is not None:
+            parts.append(privileged.float())
+        x = torch.cat(parts, dim=1)
+        return self.q_head(x)
+
+    def forward_with_cached_backbone(
+        self,
+        action_coeffs: torch.Tensor,
+        privileged: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Like forward() but without obs_dict, purely from cached backbone state.
+
+        Convenience method for the actor-loss computation where the backbone
+        was already run by ``actor.forward_coeffs()`` in the same step.
+        """
+        base_action = self.backbone._last_base_action_mean
+        if base_action is None:
+            raise RuntimeError(
+                "Call actor.forward_coeffs() before forward_with_cached_backbone()."
+            )
+        features = self.backbone.get_residual_features(base_action)
+
+        parts = [features, action_coeffs.float()]
+        if self.use_privileged_measurements and privileged is not None:
+            parts.append(privileged.float())
+        x = torch.cat(parts, dim=1)
+        return self.q_head(x)

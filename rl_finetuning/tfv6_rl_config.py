@@ -68,3 +68,26 @@ class GlobalConfig(CaRLGlobalConfig):
         self.residual_alpha_speed = (
             0.15  # max speed correction in normalized space (fraction of max_speed)
         )
+
+        # ── TD3 algorithm hyperparameters ─────────────────────────────────
+        # Replay buffer capacity (transitions).
+        self.buffer_size = 100_000
+        # Number of environment steps collected before any learning begins.
+        self.learning_starts = 5_000
+        # TD3 minibatch size sampled from the replay buffer per update.
+        self.td3_batch_size = 256
+        # Polyak averaging coefficient for target network updates.
+        self.tau = 0.005
+        # Actor (and target networks) update every ``policy_delay`` critic steps.
+        self.policy_delay = 2
+        # Std of Gaussian exploration noise added to actor output at rollout.
+        self.exploration_noise = 0.1
+        # Std of target policy smoothing noise (clipped by target_noise_clip).
+        self.target_policy_noise = 0.2
+        # Clip bound for target policy smoothing noise.
+        self.target_noise_clip = 0.5
+        # Critic-only updates before actor training starts (ResFiT-style warmup).
+        self.critic_warmup_steps = 10_000
+        # Separate learning rates for actor and twin critics.
+        self.actor_lr = 1e-4
+        self.critic_lr = 1e-3
