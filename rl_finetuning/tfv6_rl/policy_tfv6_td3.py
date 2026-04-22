@@ -67,11 +67,16 @@ class TFv6ResidualActorTD3(nn.Module):
         self.backbone = backbone
         token_dim = backbone.value_token_dim
         rank = backbone.residual_route_rank
+        hidden_dim = 256
         # Output head: [B, 2*token_dim] → [B, rank+1] coefficient means.
-        # Initialized to zero so the actor starts at the TFv6 base policy.
-        self.residual_out = nn.Linear(token_dim * 2, rank + 1)
-        nn.init.zeros_(self.residual_out.weight)
-        nn.init.zeros_(self.residual_out.bias)
+        # Two-layer MLP; final layer zero-initialized so actor starts at TFv6 base policy.
+        self.residual_out = nn.Sequential(
+            nn.Linear(token_dim * 2, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, rank + 1),
+        )
+        nn.init.zeros_(self.residual_out[-1].weight)
+        nn.init.zeros_(self.residual_out[-1].bias)
 
     @property
     def rank(self) -> int:
@@ -187,15 +192,15 @@ class TFv6ResidualQNetworkTD3(nn.Module):
         )
         q_in_dim = token_dim * 2 + action_dim + priv_dim
 
-        # Q-head mirrors PPO value_head: LayerNorm → Linear(256) → LN → ReLU × 2 → 1.
+        # Q-head mirrors PPO value_head: LayerNorm → Linear(256) → LN → GELU × 2 → 1.
         self.q_head = nn.Sequential(
             nn.LayerNorm(q_in_dim),
             nn.Linear(q_in_dim, 256),
             nn.LayerNorm(256),
-            nn.ReLU(inplace=True),
+            nn.GELU(),
             nn.Linear(256, 256),
             nn.LayerNorm(256),
-            nn.ReLU(inplace=True),
+            nn.GELU(),
             nn.Linear(256, 1),
         )
 
