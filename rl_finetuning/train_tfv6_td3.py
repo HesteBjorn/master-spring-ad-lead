@@ -734,16 +734,23 @@ def main():
 
     coeff_dim = backbone.residual_route_rank + 1
 
-    # actor.parameters() = backbone.residual_cnn + backbone.residual_status_proj + actor.residual_out
+    # Actor: only the linear residual output head. Features are detached before
+    # this head during actor updates (ResFiT / DrQ-v2 style: encoder trained by
+    # critic loss, not actor loss).
     actor_optimizer = optim.Adam(
-        actor.parameters(),
+        actor.residual_out.parameters(),
         lr=args.actor_lr,
         eps=args.adam_eps,
         betas=(args.beta_1, args.beta_2),
     )
-    # Q-networks: only q_head params (backbone not registered as child).
+    # Critic: Q-heads + shared CNN encoder. The encoder trains from critic
+    # gradients starting at learning_starts, giving meaningful features before
+    # actor updates begin at critic_warmup_steps.
     critic_optimizer = optim.Adam(
-        list(qf1.q_head.parameters()) + list(qf2.q_head.parameters()),
+        list(qf1.q_head.parameters())
+        + list(qf2.q_head.parameters())
+        + list(backbone.residual_cnn.parameters())
+        + list(backbone.residual_status_proj.parameters()),
         lr=args.critic_lr,
         eps=args.adam_eps,
         betas=(args.beta_1, args.beta_2),
@@ -1049,7 +1056,10 @@ def main():
             critic_optimizer.zero_grad()
             critic_loss.backward()
             nn.utils.clip_grad_norm_(
-                list(qf1.q_head.parameters()) + list(qf2.q_head.parameters()),
+                list(qf1.q_head.parameters())
+                + list(qf2.q_head.parameters())
+                + list(backbone.residual_cnn.parameters())
+                + list(backbone.residual_status_proj.parameters()),
                 args.max_grad_norm,
             )
             critic_optimizer.step()
@@ -1060,13 +1070,17 @@ def main():
                 global_step >= args.critic_warmup_steps
                 and global_step % args.policy_delay == 0
             ):
-                # Re-run actor on batch obs (backbone state set here for gradient).
-                pred_coeffs = actor.forward_coeffs(batch["obs"])
-                actor_loss = -qf1.forward_with_cached_backbone(pred_coeffs, priv).mean()
+                # Features detached: encoder trained by critic loss only (ResFiT style).
+                pred_coeffs = actor.forward_coeffs(batch["obs"], detach_features=True)
+                actor_loss = -qf1.forward_with_cached_backbone(
+                    pred_coeffs, priv, detach_features=True
+                ).mean()
 
                 actor_optimizer.zero_grad()
                 actor_loss.backward()
-                nn.utils.clip_grad_norm_(actor.parameters(), args.max_grad_norm)
+                nn.utils.clip_grad_norm_(
+                    actor.residual_out.parameters(), args.max_grad_norm
+                )
                 actor_optimizer.step()
                 actor_loss_val = float(actor_loss.item())
 

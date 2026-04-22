@@ -81,14 +81,23 @@ class TFv6ResidualActorTD3(nn.Module):
     def action_dim(self) -> int:
         return self.backbone.action_codec.action_dim
 
-    def forward_coeffs(self, obs_dict: dict) -> torch.Tensor:
+    def forward_coeffs(
+        self, obs_dict: dict, detach_features: bool = False
+    ) -> torch.Tensor:
         """Run backbone + output head → raw coefficients [B, rank+1].
 
         Side-effect: sets ``backbone._last_base_action_mean`` and caches TFv6
         internal state (``bev_features``, ``kv``) for reuse by Q-networks.
+
+        Args:
+            detach_features: if True, stop gradients between the CNN encoder and
+                the residual head. Use during actor updates so the encoder trains
+                from critic loss only (ResFiT / DrQ-v2 pattern).
         """
         _, _, base_action_mean = self.backbone.get_base_action(obs_dict)
         features = self.backbone.get_residual_features(base_action_mean)
+        if detach_features:
+            features = features.detach()
         return self.residual_out(features)
 
     def coeffs_to_action(self, coeff_means: torch.Tensor) -> torch.Tensor:
@@ -231,11 +240,16 @@ class TFv6ResidualQNetworkTD3(nn.Module):
         self,
         action_coeffs: torch.Tensor,
         privileged: torch.Tensor | None = None,
+        detach_features: bool = False,
     ) -> torch.Tensor:
         """Like forward() but without obs_dict, purely from cached backbone state.
 
         Convenience method for the actor-loss computation where the backbone
         was already run by ``actor.forward_coeffs()`` in the same step.
+
+        Args:
+            detach_features: if True, stop gradients from the Q-head back into
+                the CNN encoder. Use during actor updates (ResFiT / DrQ-v2 pattern).
         """
         base_action = self.backbone._last_base_action_mean
         if base_action is None:
@@ -243,6 +257,8 @@ class TFv6ResidualQNetworkTD3(nn.Module):
                 "Call actor.forward_coeffs() before forward_with_cached_backbone()."
             )
         features = self.backbone.get_residual_features(base_action)
+        if detach_features:
+            features = features.detach()
 
         parts = [features, action_coeffs.float()]
         if self.use_privileged_measurements and privileged is not None:
