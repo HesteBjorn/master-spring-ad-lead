@@ -7,7 +7,8 @@ Key algorithmic details:
   - Twin Q-networks (Fujimoto 2018) — min target for Bellman update
   - Delayed actor updates every ``policy_delay`` critic steps
   - Target policy smoothing with clipped Gaussian noise
-  - Critic warmup (ResFiT): actor frozen until ``critic_warmup_steps``
+  - Critic warmup (ResFiT): actor frozen for ``critic_warmup_steps`` critic
+    updates after ``learning_starts``
   - Layer norm in Q-head (RLPD, Ball 2023) — already in PPO value_head arch
   - SB3-style handle_timeout_termination: dones=terminated (not OR truncated)
   - Q-function acts in coefficient space [rank+1], not full action space [21]
@@ -327,7 +328,7 @@ def parse_args(config):
                         help='Clip bound for target policy smoothing noise.')
     parser.add_argument('--critic_warmup_steps', type=int,
                         default=getattr(config, 'critic_warmup_steps', 10_000),
-                        help='Critic-only updates before actor training (ResFiT warmup).')
+                        help='Number of critic-only updates after learning_starts before actor training begins.')
     parser.add_argument('--actor_lr', type=float,
                         default=getattr(config, 'actor_lr', 1e-4))
     parser.add_argument('--critic_lr', type=float,
@@ -727,6 +728,9 @@ def main():
 
     qf1_target = TFv6ResidualQNetworkTD3(target_backbone, config).to(device)
     qf2_target = TFv6ResidualQNetworkTD3(target_backbone, config).to(device)
+    actor_target.load_state_dict(actor.state_dict())
+    qf1_target.q_head.load_state_dict(qf1.q_head.state_dict())
+    qf2_target.q_head.load_state_dict(qf2.q_head.state_dict())
     for p in qf1_target.q_head.parameters():
         p.requires_grad_(False)
     for p in qf2_target.q_head.parameters():
@@ -745,7 +749,7 @@ def main():
     )
     # Critic: Q-heads + shared CNN encoder. The encoder trains from critic
     # gradients starting at learning_starts, giving meaningful features before
-    # actor updates begin at critic_warmup_steps.
+    # actor updates begin after critic_warmup_steps critic-only updates.
     critic_optimizer = optim.Adam(
         list(qf1.q_head.parameters())
         + list(qf2.q_head.parameters())
@@ -1017,6 +1021,7 @@ def main():
             global_step >= args.learning_starts
             and len(replay_buffer) >= args.td3_batch_size
         ):
+            critic_updates_completed = global_step - args.learning_starts + 1
             batch = replay_buffer.sample(args.td3_batch_size)
 
             # ── Critic update ─────────────────────────────────────────────────
@@ -1064,11 +1069,26 @@ def main():
             )
             critic_optimizer.step()
 
+            # Keep critic targets synchronized during critic-only warmup so
+            # Bellman bootstrapping does not rely on stale/random target heads.
+            _polyak_update(
+                backbone.residual_cnn,
+                target_backbone.residual_cnn,
+                args.tau,
+            )
+            _polyak_update(
+                backbone.residual_status_proj,
+                target_backbone.residual_status_proj,
+                args.tau,
+            )
+            _polyak_update(qf1.q_head, qf1_target.q_head, args.tau)
+            _polyak_update(qf2.q_head, qf2_target.q_head, args.tau)
+
             # ── Actor update (delayed + after critic warmup) ──────────────────
             actor_loss_val = float("nan")
             if (
-                global_step >= args.critic_warmup_steps
-                and global_step % args.policy_delay == 0
+                critic_updates_completed > args.critic_warmup_steps
+                and critic_updates_completed % args.policy_delay == 0
             ):
                 # Features detached: encoder trained by critic loss only (ResFiT style).
                 pred_coeffs = actor.forward_coeffs(batch["obs"], detach_features=True)
