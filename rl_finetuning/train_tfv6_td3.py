@@ -892,7 +892,8 @@ def main():
             # Q-estimate for debug viz (optional, before env step).
             q_estimate_for_viz: float | None = None
             if debug_viz is not None and global_step >= args.learning_starts:
-                q1_val = qf1.forward_with_cached_backbone(coeff_tensor)
+                priv_viz = next_obs.get("privileged_measurements")
+                q1_val = qf1.forward_with_cached_backbone(coeff_tensor, priv_viz)
                 q_estimate_for_viz = float(q1_val[0].item())
 
         action_np = action_tensor[0].cpu().numpy()
@@ -1022,8 +1023,9 @@ def main():
                 next_coeffs_smoothed = (next_coeffs + noise).clamp(-1.0, 1.0)
 
                 # Twin Q targets: min of two target Q-networks.
-                q1_next = qf1_target(batch["next_obs"], next_coeffs_smoothed)
-                q2_next = qf2_target(batch["next_obs"], next_coeffs_smoothed)
+                next_priv = batch["next_obs"].get("privileged_measurements")
+                q1_next = qf1_target(batch["next_obs"], next_coeffs_smoothed, next_priv)
+                q2_next = qf2_target(batch["next_obs"], next_coeffs_smoothed, next_priv)
                 min_q_next = torch.min(q1_next, q2_next)
 
                 # Handle timeout termination (SB3-style):
@@ -1038,8 +1040,9 @@ def main():
             # then pass stored batch["action_coeffs"] to the Q-networks.
             # This avoids re-running TFv6 for actor+qf1+qf2 separately.
             _ = actor.forward_coeffs(batch["obs"])  # sets backbone state only
-            q1_pred = qf1.forward_with_cached_backbone(batch["action_coeffs"])
-            q2_pred = qf2.forward_with_cached_backbone(batch["action_coeffs"])
+            priv = batch["obs"].get("privileged_measurements")
+            q1_pred = qf1.forward_with_cached_backbone(batch["action_coeffs"], priv)
+            q2_pred = qf2.forward_with_cached_backbone(batch["action_coeffs"], priv)
 
             critic_loss = F.mse_loss(q1_pred, target_q) + F.mse_loss(q2_pred, target_q)
 
@@ -1059,7 +1062,7 @@ def main():
             ):
                 # Re-run actor on batch obs (backbone state set here for gradient).
                 pred_coeffs = actor.forward_coeffs(batch["obs"])
-                actor_loss = -qf1.forward_with_cached_backbone(pred_coeffs).mean()
+                actor_loss = -qf1.forward_with_cached_backbone(pred_coeffs, priv).mean()
 
                 actor_optimizer.zero_grad()
                 actor_loss.backward()
