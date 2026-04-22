@@ -42,6 +42,12 @@ class _PendingEpisodeInfractionStamp:
     stamp_y: int
 
 
+@dataclass
+class _ScheduledBurstState:
+    remaining: int = 0
+    last_start_global_step: int | None = None
+
+
 class _ClosedLoopControlAdapter:
     """Mirror EnvAgentTFv6 control logic for visualization-only control traces."""
 
@@ -165,6 +171,7 @@ class PPORolloutVisualizer:
         num_envs: int,
         gamma: float = 0.99,
         every_n: int = 1,
+        scheduled_burst_len: int = 1000,
         max_images: int = 0,
         image_scale: int = 3,
         standstill_speed_hold_enabled: bool = False,
@@ -180,6 +187,7 @@ class PPORolloutVisualizer:
         self.output_dir = output_dir
         self.gamma = float(gamma)
         self.every_n = max(1, int(every_n))
+        self.scheduled_burst_len = max(1, int(scheduled_burst_len))
         self.max_images = max(0, int(max_images))
         self.image_scale = max(1, int(image_scale))
         self.standstill_speed_hold_enabled = bool(standstill_speed_hold_enabled)
@@ -200,9 +208,9 @@ class PPORolloutVisualizer:
         self.pending_episode_infraction_stamps: list[
             list[_PendingEpisodeInfractionStamp]
         ] = [[] for _ in range(max(1, num_envs))]
-        self.negative_reward_burst_remaining = [0 for _ in range(max(1, num_envs))]
-        self.negative_reward_burst_len_terminal = 2
-        self.negative_reward_burst_len_non_terminal = 10
+        self.scheduled_burst_states = [
+            _ScheduledBurstState() for _ in range(max(1, num_envs))
+        ]
         self.random_burst_remaining = [0 for _ in range(max(1, num_envs))]
         self.random_burst_len = 10
         self.random_burst_probability = 0.003
@@ -1746,17 +1754,23 @@ class PPORolloutVisualizer:
         q_estimate: float | None = None,
     ) -> None:
         env_slot = env_idx % len(self.episode_returns)
-        if reward < 0.0:
-            is_terminal_transition = bool(done) or bool(truncated)
-            burst_len = (
-                self.negative_reward_burst_len_terminal
-                if is_terminal_transition
-                else self.negative_reward_burst_len_non_terminal
+        scheduled_burst_state = self.scheduled_burst_states[env_slot]
+        should_start_scheduled_burst = (
+            scheduled_burst_state.last_start_global_step is None
+        )
+        if (
+            not should_start_scheduled_burst
+            and global_step > 0
+            and (global_step % self.every_n) == 0
+            and scheduled_burst_state.last_start_global_step != global_step
+        ):
+            should_start_scheduled_burst = True
+        if should_start_scheduled_burst:
+            scheduled_burst_state.remaining = max(
+                scheduled_burst_state.remaining,
+                self.scheduled_burst_len,
             )
-            self.negative_reward_burst_remaining[env_slot] = max(
-                self.negative_reward_burst_remaining[env_slot],
-                burst_len,
-            )
+            scheduled_burst_state.last_start_global_step = global_step
         if self.random_burst_remaining[env_slot] <= 0:
             if np.random.random() < self.random_burst_probability:
                 self.random_burst_remaining[env_slot] = self.random_burst_len
@@ -1773,16 +1787,10 @@ class PPORolloutVisualizer:
                 self.value_burst_len,
             )
 
-        regular_cadence_due = (global_step % self.every_n) == 0
-        burst_due = self.negative_reward_burst_remaining[env_slot] > 0
+        scheduled_burst_due = scheduled_burst_state.remaining > 0
         value_burst_due = self.value_burst_remaining[env_slot] > 0
         random_burst_due = self.random_burst_remaining[env_slot] > 0
-        if (
-            not regular_cadence_due
-            and not burst_due
-            and not value_burst_due
-            and not random_burst_due
-        ):
+        if not scheduled_burst_due and not value_burst_due and not random_burst_due:
             self.prev_values[env_slot] = value_estimate
             return
         if self.max_images > 0 and self.images_written >= self.max_images:
@@ -2081,8 +2089,8 @@ class PPORolloutVisualizer:
             )
         )
 
-        if self.negative_reward_burst_remaining[env_slot] > 0:
-            self.negative_reward_burst_remaining[env_slot] -= 1
+        if scheduled_burst_state.remaining > 0:
+            scheduled_burst_state.remaining -= 1
         if self.value_burst_remaining[env_slot] > 0:
             self.value_burst_remaining[env_slot] -= 1
         if self.random_burst_remaining[env_slot] > 0:

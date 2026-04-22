@@ -83,7 +83,7 @@ bash rl_finetuning/train_tfv6_ppo_parallell.sh \
   outputs/checkpoints/tfv6_resnet34 \
   outputs/rl_logs \
   TFV6_PPO_PARALLEL_LOCAL_newTP_debug3 \
-  --debug 0 --debug_viz --debug_viz_every_n 1 --debug_viz_max_images 1000
+  ---debug 0 --debug_viz --debug_viz_every_n 500000 --debug_viz_burst_len 2000
 ```
 ```bash
 # Carla fork run
@@ -97,7 +97,7 @@ bash rl_finetuning/train_tfv6_ppo_parallell.sh \
   outputs/checkpoints/tfv6_resnet34 \
   outputs/rl_logs \
   TFV6_PPO_LOCAL_only_NSLTEF_warmstart_routedevpenal_terminalwarmupn5 \
-  --debug 0 --debug_viz --debug_viz_every_n 1 --debug_viz_max_images 4000
+  ---debug 0 --debug_viz --debug_viz_every_n 500000 --debug_viz_burst_len 2000
   # RUN_CONFIG_FILE=rl_finetuning/configs/train_parallel_singleGPU.env \
   # TFV6_PPO_PARALLEL_LOCAL_carlafork_newspeedsample_holdspeed_fixTPflip_t1_2 \
 ```
@@ -111,7 +111,7 @@ bash rl_finetuning/train_tfv6_ppo_parallell.sh \
   outputs/checkpoints/tfv6_resnet34 \
   outputs/rl_logs \
   TFV6_LOCAL_RESIDUAL_onlyspeed_newarchitecture_CNN \
-  --debug 0 --debug_viz --debug_viz_every_n 1 --debug_viz_max_images 2000
+  ---debug 0 --debug_viz --debug_viz_every_n 500000 --debug_viz_burst_len 2000
 ```
 #### To continue the newarchitecture_CNN run:
 For the outputs/rl_logs/TFV6_LOCAL_RESIDUAL_onlyspeed_newarchitecture_CNN run.
@@ -120,6 +120,7 @@ Since architecture have been slightly modified in the meantime (std head was cha
 
 ```bash
 # VC06 RESIDUAL
+source ~/.bashrc
 conda activate lead_carla_fork
 export CARLA_ROOT=/data/work/erikhbj/master-spring-ad-lead/3rd_party/fork_export_t1213_fixed/LinuxNoEditor
 unset PYTHONPATH
@@ -128,9 +129,10 @@ bash rl_finetuning/train_tfv6_ppo_parallell.sh \
   outputs/checkpoints/tfv6_resnet34 \
   outputs/rl_logs \
   TFV6_PPO_VC06_RESIDUAL_onlyspeed_CNN_fork \
-  --debug 0 --debug_viz --debug_viz_every_n 1 --debug_viz_max_images 2000
+  ---debug 0 --debug_viz --debug_viz_every_n 500000 --debug_viz_burst_len 2000
 
 # VC06 nofork
+source ~/.bashrc
 conda activate lead
 export CARLA_ROOT=/data/work/erikhbj/master-spring-ad-lead/3rd_party/CARLA_0915
 unset PYTHONPATH
@@ -139,7 +141,7 @@ bash rl_finetuning/train_tfv6_ppo_parallell.sh \
   outputs/checkpoints/tfv6_resnet34 \
   outputs/rl_logs \
   TFV6_PPO_VC06_RESIDUAL_onlyspeed_CNN_nofork \
-  --debug 0 --debug_viz --debug_viz_every_n 1 --debug_viz_max_images 2000
+  --debug 0 --debug_viz --debug_viz_every_n 100000 --debug_viz_burst_len 2000
 ```
 
 ## TD3 Local
@@ -151,8 +153,8 @@ RUN_CONFIG_FILE=rl_finetuning/configs/train_local_residual_td3.env \
 bash rl_finetuning/train_tfv6_td3_parallel.sh \
   outputs/checkpoints/tfv6_resnet34 \
   outputs/rl_logs \
-  TFV6_TD3_LOCAL_RESIDUAL_smoke_3 \
-  --debug 0 --debug_viz --debug_viz_every_n 1 --debug_viz_max_images 2000
+  TFV6_TD3_LOCAL_RESIDUAL_1 \
+  --debug 0 --debug_viz --debug_viz_every_n 20000 --debug_viz_burst_len 2000
 ```
 
 ## Kill all running processes

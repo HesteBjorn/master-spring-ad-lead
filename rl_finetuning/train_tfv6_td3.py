@@ -408,10 +408,16 @@ def parse_args(config):
     parser.add_argument('--run_dir', type=str, default='',
                         help='Concrete run folder. Used for debug artifacts.')
     parser.add_argument('--debug_viz', type=lambda x: bool(strtobool(x)),
-                        default=False, nargs='?', const=True)
-    parser.add_argument('--debug_viz_every_n', type=int, default=1)
-    parser.add_argument('--debug_viz_max_images', type=int, default=0)
-    parser.add_argument('--debug_viz_image_scale', type=int, default=3)
+                        default=False, nargs='?', const=True,
+                        help='If true, dump rollout debug visualizations to run_dir/debug_viz.')
+    parser.add_argument('--debug_viz_every_n', type=int, default=1,
+                        help='Start a full debug-viz burst at startup and every N global steps.')
+    parser.add_argument('--debug_viz_burst_len', type=int, default=1000,
+                        help='Number of consecutive frames to write for each scheduled debug-viz burst.')
+    parser.add_argument('--debug_viz_max_images', type=int, default=0,
+                        help='Maximum number of debug images to write (0 means unlimited).')
+    parser.add_argument('--debug_viz_image_scale', type=int, default=3,
+                        help='Scale factor for BEV rendering in debug visualizations.')
     parser.add_argument('--debug', type=lambda x: bool(strtobool(x)),
                         default=False, nargs='?', const=True)
 
@@ -803,6 +809,7 @@ def main():
             num_envs=len(args.ports),
             gamma=config.gamma,
             every_n=args.debug_viz_every_n,
+            scheduled_burst_len=args.debug_viz_burst_len,
             max_images=args.debug_viz_max_images,
             image_scale=args.debug_viz_image_scale,
             standstill_speed_hold_enabled=getattr(
@@ -822,7 +829,8 @@ def main():
         )
         print(
             f"[td3][debug_viz] enabled path={debug_dir} "
-            f"every_n={args.debug_viz_every_n} max_images={args.debug_viz_max_images}",
+            f"every_n={args.debug_viz_every_n} burst_len={args.debug_viz_burst_len} "
+            f"max_images={args.debug_viz_max_images}",
             flush=True,
         )
 

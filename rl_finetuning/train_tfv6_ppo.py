@@ -374,7 +374,11 @@ def parse_args(config):
     parser.add_argument('--debug_viz_every_n',
                       type=int,
                       default=1,
-                      help='Write one debug visualization every N rollout steps.')
+                      help='Start a full debug-viz burst at startup and every N global steps.')
+    parser.add_argument('--debug_viz_burst_len',
+                      type=int,
+                      default=1000,
+                      help='Number of consecutive frames to write for each scheduled debug-viz burst.')
     parser.add_argument('--debug_viz_max_images',
                       type=int,
                       default=0,
@@ -1572,6 +1576,7 @@ def main():
             num_envs=args.num_envs_per_proc,
             gamma=config.gamma,
             every_n=args.debug_viz_every_n,
+            scheduled_burst_len=args.debug_viz_burst_len,
             max_images=args.debug_viz_max_images,
             image_scale=args.debug_viz_image_scale,
             standstill_speed_hold_enabled=getattr(
@@ -1593,7 +1598,8 @@ def main():
         )
         print(
             f"[debug_viz] enabled path={debug_dir} "
-            f"every_n={args.debug_viz_every_n} max_images={args.debug_viz_max_images}",
+            f"every_n={args.debug_viz_every_n} burst_len={args.debug_viz_burst_len} "
+            f"max_images={args.debug_viz_max_images}",
             flush=True,
         )
 
