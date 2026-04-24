@@ -68,15 +68,19 @@ class TFv6ResidualActorTD3(nn.Module):
         token_dim = backbone.value_token_dim
         rank = backbone.residual_route_rank
         hidden_dim = 256
-        # Output head: [B, 2*token_dim] → [B, rank+1] coefficient means.
-        # Two-layer MLP; final layer zero-initialized so actor starts at TFv6 base policy.
+        # Output head: [B, 2*token_dim] → [B, rank+1] coefficient means in (-1, 1).
+        # Tanh bounds coefficients so alpha*coeff is always within [-alpha, +alpha],
+        # matches the [-1,1] clamp assumed by target policy smoothing, and keeps
+        # gradients alive (no dead zone from action.clamp saturation).
+        # Final linear zero-initialized so actor starts at TFv6 base policy (tanh(0)=0).
         self.residual_out = nn.Sequential(
             nn.Linear(token_dim * 2, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, rank + 1),
+            nn.Tanh(),
         )
-        nn.init.zeros_(self.residual_out[-1].weight)
-        nn.init.zeros_(self.residual_out[-1].bias)
+        nn.init.zeros_(self.residual_out[-2].weight)
+        nn.init.zeros_(self.residual_out[-2].bias)
 
     @property
     def rank(self) -> int:
@@ -108,7 +112,11 @@ class TFv6ResidualActorTD3(nn.Module):
     def coeffs_to_action(self, coeff_means: torch.Tensor) -> torch.Tensor:
         """Convert coefficient vector [B, rank+1] to full action [B, route_dim+1].
 
-        Applies: action = base_action + alpha * correction, clamped to [-1, 1].
+        Applies: action = base_action + alpha * correction.
+        Route is clamped to [-1, 1] (lateral corrections are symmetric).
+        Speed is clamped to [0, 1]: negative target speed and near-zero target speed
+        both trigger full braking in the PID controller, so the entire negative speed
+        range is a behaviorally collapsed dead zone — we exclude it.
         Uses the base action cached by the most recent ``forward_coeffs`` call.
         """
         base_action = self.backbone._last_base_action_mean
@@ -132,8 +140,9 @@ class TFv6ResidualActorTD3(nn.Module):
             delta_route = self.backbone.residual_alpha * (route_coeff @ basis.t())
 
         delta_speed = self.backbone.residual_alpha_speed * speed_coeff
-        action = torch.cat([route_base + delta_route, speed_base + delta_speed], dim=1)
-        return action.clamp(-1.0, 1.0)
+        route_action = (route_base + delta_route).clamp(-1.0, 1.0)
+        speed_action = (speed_base + delta_speed).clamp(0.0, 1.0)
+        return torch.cat([route_action, speed_action], dim=1)
 
     def forward(self, obs_dict: dict) -> torch.Tensor:
         """Full actor forward: obs_dict → full action [B, route_dim+1].
