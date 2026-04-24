@@ -92,6 +92,9 @@ _INFRACTION_TYPES = [
     "off_road_term",
 ]
 
+# Log infraction fracs every N completed episodes — mirrors PPO's per-update logging.
+_INFRACTION_LOG_EVERY_N = 50
+
 
 def _iter_episode_stats(info: dict):
     """Yield (return, length) pairs from completed episode info."""
@@ -803,6 +806,7 @@ def main():
             f"[td3] Resumed from {args.load_file}, global_step={global_step}",
             flush=True,
         )
+        writer.add_scalar("charts/restart", 1, global_step)
 
     # ── Debug visualizer ──────────────────────────────────────────────────────
     debug_viz = None
@@ -858,11 +862,22 @@ def main():
         return result
 
     next_obs = _obs_to_device(reset_obs)
-    avg_returns = deque(maxlen=100)
+    avg_returns = deque(
+        maxlen=900
+    )  # ~100 PPO-update-equivalents at 2048 steps/update, 226 steps/episode
+    recent_rewards = deque(maxlen=1000)
     start_time = time.time()
     num_envs = len(args.ports)
     route_completion_by_env = [0.0] * num_envs
     terminal_infraction_by_env = [""] * num_envs
+
+    # Infraction accumulator — reset each time infractions are logged.
+    infraction_counts: dict[str, int] = {k: 0 for k in _INFRACTION_TYPES}
+    episodes_since_infraction_log: int = 0
+    # Persistent actor loss — retained across steps so logging doesn't miss it.
+    last_actor_loss_val: float = float("nan")
+    # Per-episode (global_step, reward) pairs for debug-viz forward-return stamping.
+    _viz_episode_step_rewards: list[tuple[int, float]] = []
 
     # Precompute exploration-noise log_std arrays for debug viz (constant throughout training).
     # These represent the actual spread of executed actions due to exploration noise.
@@ -968,6 +983,7 @@ def main():
 
         # Debug viz.
         if debug_viz is not None:
+            _viz_episode_step_rewards.append((global_step, reward))
             obs_for_viz = {k: v.cpu().numpy() for k, v in next_obs.items()}
             debug_viz.maybe_write(
                 global_step=global_step,
@@ -994,10 +1010,21 @@ def main():
                 q_estimate=q_estimate_for_viz,
             )
             if terminated or truncated:
+                # Stamp infraction reason on all written frames from this episode.
                 debug_viz.note_episode_outcome(
                     env_idx=0,
                     terminal_infraction_type=terminal_infraction_by_env[0],
                 )
+                # Compute discounted returns backward and stamp written frames.
+                G = 0.0
+                step_to_return: dict[int, float] = {}
+                for gs, r in reversed(_viz_episode_step_rewards):
+                    G = r + args.gamma * G
+                    step_to_return[gs] = G
+                debug_viz.stamp_episode_forward_returns(step_to_return)
+                _viz_episode_step_rewards = []
+
+        recent_rewards.append(reward)
 
         # Episode stats.
         for ep_return, ep_length in _iter_episode_stats(info):
@@ -1010,8 +1037,26 @@ def main():
             writer.add_scalar("charts/episodic_length", ep_length, global_step)
             if avg_returns:
                 writer.add_scalar(
-                    "charts/avg_return_100", np.mean(avg_returns), global_step
+                    "charts/windowed_avg_return", np.mean(avg_returns), global_step
                 )
+            # Infraction tracking (mirrors PPO: every episode gets one type).
+            infraction = terminal_infraction_by_env[0] or "finished_route"
+            if infraction in infraction_counts:
+                infraction_counts[infraction] += 1
+            episodes_since_infraction_log += 1
+            # Log and reset every N episodes — same formula as PPO:
+            # fraction = count_k / total_episodes (sum of all type counts).
+            if episodes_since_infraction_log >= _INFRACTION_LOG_EVERY_N:
+                total_infraction_episodes = sum(infraction_counts.values())
+                if total_infraction_episodes > 0:
+                    for k in _INFRACTION_TYPES:
+                        writer.add_scalar(
+                            f"infractions/{k}",
+                            infraction_counts[k] / total_infraction_episodes,
+                            global_step,
+                        )
+                infraction_counts = {k: 0 for k in _INFRACTION_TYPES}
+                episodes_since_infraction_log = 0
         for rc in _iter_reward_components(info):
             for k in _REWARD_COMPONENT_KEYS:
                 writer.add_scalar(f"reward_components/{k}", rc[k], global_step)
@@ -1051,7 +1096,9 @@ def main():
             # We run actor.forward_coeffs to set backbone._last_base_action_mean,
             # then pass stored batch["action_coeffs"] to the Q-networks.
             # This avoids re-running TFv6 for actor+qf1+qf2 separately.
-            _ = actor.forward_coeffs(batch["obs"])  # sets backbone state only
+            _log_coeffs = actor.forward_coeffs(
+                batch["obs"]
+            )  # sets backbone state; captured for logging
             priv = batch["obs"].get("privileged_measurements")
             q1_pred = qf1.forward_with_cached_backbone(batch["action_coeffs"], priv)
             q2_pred = qf2.forward_with_cached_backbone(batch["action_coeffs"], priv)
@@ -1060,7 +1107,7 @@ def main():
 
             critic_optimizer.zero_grad()
             critic_loss.backward()
-            nn.utils.clip_grad_norm_(
+            critic_grad_norm = nn.utils.clip_grad_norm_(
                 list(qf1.q_head.parameters())
                 + list(qf2.q_head.parameters())
                 + list(backbone.residual_cnn.parameters())
@@ -1085,7 +1132,7 @@ def main():
             _polyak_update(qf2.q_head, qf2_target.q_head, args.tau)
 
             # ── Actor update (delayed + after critic warmup) ──────────────────
-            actor_loss_val = float("nan")
+            actor_grad_norm: float = float("nan")
             if (
                 critic_updates_completed > args.critic_warmup_steps
                 and critic_updates_completed % args.policy_delay == 0
@@ -1098,11 +1145,13 @@ def main():
 
                 actor_optimizer.zero_grad()
                 actor_loss.backward()
-                nn.utils.clip_grad_norm_(
-                    actor.residual_out.parameters(), args.max_grad_norm
+                actor_grad_norm = float(
+                    nn.utils.clip_grad_norm_(
+                        actor.residual_out.parameters(), args.max_grad_norm
+                    )
                 )
                 actor_optimizer.step()
-                actor_loss_val = float(actor_loss.item())
+                last_actor_loss_val = float(actor_loss.item())
 
                 # Polyak update target networks.
                 _polyak_update(actor, actor_target, args.tau)
@@ -1121,14 +1170,79 @@ def main():
                 writer.add_scalar(
                     "losses/q2_value", float(q2_pred.mean().item()), global_step
                 )
+                writer.add_scalar(
+                    "losses/target_q_mean", float(target_q.mean().item()), global_step
+                )
+                writer.add_scalar(
+                    "losses/q_overestimation",
+                    float(q1_pred.mean().item()) - float(target_q.mean().item()),
+                    global_step,
+                )
+                writer.add_scalar(
+                    "grads/critic_grad_norm", float(critic_grad_norm), global_step
+                )
+                _speed_correction = (
+                    backbone.residual_alpha_speed
+                    * _log_coeffs[:, backbone.residual_route_rank].detach()
+                    * backbone.action_codec.speed_scale
+                )
+                writer.add_scalar(
+                    "residual/speed_correction_mean",
+                    float(_speed_correction.mean().item()),
+                    global_step,
+                )
+                writer.add_scalar(
+                    "residual/speed_correction_mean_std",
+                    float(_speed_correction.std().item()),
+                    global_step,
+                )
                 writer.add_scalar("charts/SPS", sps, global_step)
                 writer.add_scalar("charts/buffer_size", len(replay_buffer), global_step)
-                if not np.isnan(actor_loss_val):
-                    writer.add_scalar("losses/actor_loss", actor_loss_val, global_step)
+                writer.add_scalar(
+                    "charts/actor_lr",
+                    actor_optimizer.param_groups[0]["lr"],
+                    global_step,
+                )
+                writer.add_scalar(
+                    "charts/critic_lr",
+                    critic_optimizer.param_groups[0]["lr"],
+                    global_step,
+                )
+                writer.add_scalar("charts/restart", 0, global_step)
+                if recent_rewards:
+                    writer.add_scalar(
+                        "charts/mean_reward", np.mean(recent_rewards), global_step
+                    )
+                if not np.isnan(last_actor_loss_val):
+                    writer.add_scalar(
+                        "losses/actor_loss", last_actor_loss_val, global_step
+                    )
+                if not np.isnan(actor_grad_norm):
+                    writer.add_scalar(
+                        "grads/actor_grad_norm", actor_grad_norm, global_step
+                    )
+                    _rrank = getattr(args, "residual_route_rank", 1)
+                    writer.add_scalar(
+                        "residual/speed_coeff_mean",
+                        float(pred_coeffs[:, _rrank].mean().item()),
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        "residual/speed_coeff_std",
+                        float(pred_coeffs[:, _rrank].std().item()),
+                        global_step,
+                    )
+                    if _rrank > 0 and not backbone.disable_residual_route:
+                        writer.add_scalar(
+                            "residual/route_coeff_mean",
+                            float(pred_coeffs[:, :_rrank].mean().item()),
+                            global_step,
+                        )
+
                 if global_step % 1000 == 0:
                     print(
                         f"[td3] step={global_step} critic_loss={critic_loss.item():.4f} "
-                        f"actor_loss={actor_loss_val:.4f} SPS={sps}",
+                        f"actor_loss={last_actor_loss_val:.4f} SPS={sps}",
                         flush=True,
                     )
 

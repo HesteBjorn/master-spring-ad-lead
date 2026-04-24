@@ -2098,6 +2098,34 @@ class PPORolloutVisualizer:
         self.prev_values[env_slot] = value_estimate
         return
 
+    def stamp_episode_forward_returns(self, step_to_return: dict[int, float]) -> None:
+        """Stamp forward discounted returns for a completed TD3 episode.
+
+        In TD3, update_idx == global_step and there is no batch rollout buffer,
+        so PPO's stamp_forward_returns cannot be used. Call this at episode end
+        with a dict mapping each global_step of the episode to its discounted
+        return to episode end (computed backward). Only steps that have pending
+        stamp records (i.e., frames that were written during that step) are
+        stamped; all others are silently skipped.
+        """
+        for update_idx, forward_return in step_to_return.items():
+            records = self.pending_forward_return_stamps.pop(update_idx, [])
+            for record in records:
+                if not os.path.isfile(record.image_path):
+                    continue
+                image = cv2.imread(record.image_path, cv2.IMREAD_COLOR)
+                if image is None:
+                    continue
+                self._stamp_text_line(
+                    image,
+                    stamp_x=record.stamp_x,
+                    stamp_y=record.stamp_y,
+                    text=f"forward_discounted_return={forward_return:+.4f}",
+                )
+                cv2.imwrite(
+                    record.image_path, image, [int(cv2.IMWRITE_JPEG_QUALITY), 92]
+                )
+
     def stamp_forward_returns(
         self, update_idx: int, forward_returns: np.ndarray
     ) -> None:
