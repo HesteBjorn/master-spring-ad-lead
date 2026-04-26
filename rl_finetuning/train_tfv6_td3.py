@@ -947,6 +947,10 @@ def main():
             if "route_completion" in info
             else 0.0
         )
+        if "infraction_type" in info:
+            infraction_val = np.asarray(info["infraction_type"], dtype=object)[0]
+            if (terminated or truncated) and infraction_val is not None:
+                terminal_infraction_by_env[0] = str(infraction_val or "")
         if "final_info" in info:
             for idx, single_info in enumerate(info["final_info"]):
                 if single_info is not None:
