@@ -109,6 +109,33 @@ class TFv6ResidualActorTD3(nn.Module):
             features = features.detach()
         return self.residual_out(features)
 
+    def forward_coeffs_from_features(
+        self,
+        feature_obs: dict[str, torch.Tensor],
+        detach_features: bool = False,
+    ) -> torch.Tensor:
+        """Like forward_coeffs() but skips the frozen TFv6 forward pass entirely.
+
+        Loads pre-encoded features from the replay buffer via set_feature_cache(),
+        then runs only the trainable residual CNN and output head.
+
+        Args:
+            feature_obs: dict with keys bev, kv_status_mean, base_action_mean
+                         (and optionally privileged_measurements) as batch tensors.
+            detach_features: stop gradients between CNN encoder and output head.
+        """
+        self.backbone.set_feature_cache(
+            feature_obs["bev"],
+            feature_obs["kv_status_mean"],
+            feature_obs["base_action_mean"],
+        )
+        features = self.backbone.get_residual_features(
+            self.backbone._last_base_action_mean
+        )
+        if detach_features:
+            features = features.detach()
+        return self.residual_out(features)
+
     def coeffs_to_action(self, coeff_means: torch.Tensor) -> torch.Tensor:
         """Convert coefficient vector [B, rank+1] to full action [B, route_dim+1].
 

@@ -867,9 +867,11 @@ def main():
     print(f"[td3] critic trainable params={qf_trainable} (2×q_head)", flush=True)
 
     # ── Replay buffer ─────────────────────────────────────────────────────────
+    # Store pre-encoded frozen TFv6 features instead of raw sensor obs.
+    # Reduces per-transition size from ~3.5 MB to ~32 KB (56× reduction).
     replay_buffer = DictReplayBuffer(
         capacity=args.buffer_size,
-        obs_space=env.single_observation_space,
+        obs_space=backbone.feature_obs_space(),
         action_dim=action_dim,
         coeff_dim=coeff_dim,
         device=device,
@@ -1040,7 +1042,12 @@ def main():
             else None
         )
 
-        obs_for_buffer = {k: v[0].cpu().numpy() for k, v in next_obs.items()}
+        # Extract obs features from cache left by actor.forward_coeffs (no extra TFv6 run).
+        obs_features = backbone.encode_obs_to_features()
+        if "privileged_measurements" in next_obs:
+            obs_features["privileged_measurements"] = (
+                next_obs["privileged_measurements"][0].cpu().numpy()
+            )
         _t_fwd += time.perf_counter() - _t0
 
         _t0 = time.perf_counter()
@@ -1068,21 +1075,35 @@ def main():
                     )
 
         next_obs_device = _obs_to_device(next_obs_np)
-        next_obs_for_buffer = {
-            k: v[0].cpu().numpy() for k, v in next_obs_device.items()
-        }
 
-        # Handle truncation: gymnasium resets obs on done, so real next_obs for
-        # truncated episodes is in info["final_observation"].
+        # Determine the obs to encode for next_obs features.
+        # For truncated episodes, gymnasium auto-resets, so next_obs_device is the
+        # reset obs — we need the actual final obs from info["final_observation"].
         if truncated and "final_observation" in info:
-            final_obs = info["final_observation"]
-            for key in next_obs_for_buffer:
-                if key in final_obs:
-                    next_obs_for_buffer[key] = np.asarray(final_obs[key][0])
+            final_obs_np = info["final_observation"]
+            next_obs_for_encode: dict[str, torch.Tensor] = {}
+            for key, space in env.single_observation_space.spaces.items():
+                dtype = torch.uint8 if space.dtype == np.uint8 else torch.float32
+                if key in final_obs_np:
+                    arr = np.asarray(final_obs_np[key][0])
+                    next_obs_for_encode[key] = torch.tensor(
+                        arr, device=device, dtype=dtype
+                    ).unsqueeze(0)
+                else:
+                    next_obs_for_encode[key] = next_obs_device[key][:1]
+        else:
+            next_obs_for_encode = next_obs_device
+
+        with torch.no_grad():
+            next_obs_features = backbone.encode_obs_to_features(next_obs_for_encode)
+        if "privileged_measurements" in next_obs_for_encode:
+            next_obs_features["privileged_measurements"] = (
+                next_obs_for_encode["privileged_measurements"][0].cpu().numpy()
+            )
 
         replay_buffer.add(
-            obs=obs_for_buffer,
-            next_obs=next_obs_for_buffer,
+            obs=obs_features,
+            next_obs=next_obs_features,
             action=action_np,
             action_coeffs=coeff_np,
             base_action=base_action_np,
@@ -1190,7 +1211,9 @@ def main():
             actor.train()
             with torch.no_grad():
                 # Target policy smoothing: clipped Gaussian noise on target actor.
-                next_coeffs = actor_target.forward_coeffs(batch["next_obs"])
+                next_coeffs = actor_target.forward_coeffs_from_features(
+                    batch["next_obs"]
+                )
                 noise = (
                     torch.randn_like(next_coeffs) * args.target_policy_noise
                 ).clamp(-args.target_noise_clip, args.target_noise_clip)
@@ -1213,7 +1236,7 @@ def main():
             # We run actor.forward_coeffs to set backbone._last_base_action_mean,
             # then pass stored batch["action_coeffs"] to the Q-networks.
             # This avoids re-running TFv6 for actor+qf1+qf2 separately.
-            _log_coeffs = actor.forward_coeffs(
+            _log_coeffs = actor.forward_coeffs_from_features(
                 batch["obs"]
             )  # sets backbone state; captured for logging
             priv = batch["obs"].get("privileged_measurements")
@@ -1255,7 +1278,9 @@ def main():
                 and critic_updates_completed % args.policy_delay == 0
             ):
                 # Features detached: encoder trained by critic loss only (ResFiT style).
-                pred_coeffs = actor.forward_coeffs(batch["obs"], detach_features=True)
+                pred_coeffs = actor.forward_coeffs_from_features(
+                    batch["obs"], detach_features=True
+                )
                 actor_loss = -qf1.forward_with_cached_backbone(
                     pred_coeffs, priv, detach_features=True
                 ).mean()

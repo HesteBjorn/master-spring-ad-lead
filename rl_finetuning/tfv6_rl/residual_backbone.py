@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -186,6 +187,15 @@ class TFv6ResidualBackbone(nn.Module):
         self._last_base_action_mean: torch.Tensor | None = None
         # Stored for debug visualization (target_speed_logits from TFv6).
         self._last_target_speed_logits: torch.Tensor | None = None
+        # Pre-encoded kv_status_mean from replay buffer (set by set_feature_cache).
+        # None means live path: get_residual_features reads directly from TFv6 planning_decoder.kv.
+        self._cached_kv_status_mean: torch.Tensor | None = None
+        # BEV grid dimensions and token split (for encode_obs_to_features / feature_obs_space).
+        self._bev_channels: int = bev_channels
+        self._bev_h: int = getattr(self.training_config, "lidar_vert_anchors", 10)
+        self._bev_w: int = getattr(self.training_config, "lidar_horz_anchors", 12)
+        self.n_spatial_tokens: int = self._bev_h * self._bev_w
+        self.rl_config = rl_config
 
     def _extract_tfv6_obs(self, obs_dict: dict) -> dict:
         """Strip privileged measurements — not a TFv6 input."""
@@ -204,6 +214,7 @@ class TFv6ResidualBackbone(nn.Module):
             speed_expected:   [B, 1]            E[categorical speed], normalized
             base_action_mean: [B, route_dim+1]  concatenation (detached)
         """
+        self._cached_kv_status_mean = None  # live TFv6 run — invalidate buffer cache
         with torch.amp.autocast(
             device_type=self.device.type,
             dtype=self.autocast_dtype,
@@ -258,22 +269,109 @@ class TFv6ResidualBackbone(nn.Module):
         bev = getattr(self.tfv6, "bev_features", None)
         if bev is None:
             raise RuntimeError(
-                "bev_features not found on tfv6 — call get_base_action() first."
-            )
-        kv = getattr(self.tfv6.planning_decoder, "kv", None)
-        if kv is None:
-            raise RuntimeError(
-                "Planning decoder context tokens (kv) not found — call get_base_action() first."
+                "bev_features not found on tfv6 — call get_base_action() or set_feature_cache() first."
             )
 
         # Spatial branch: frozen BEV feature map.
-        bev = bev.detach().float()  # (B, C, 10, 12)
+        bev = bev.detach().float()  # (B, C, H, W)
         spatial_ctx = self.residual_cnn(bev)  # (B, token_dim)
 
-        # Status branch: mean of 25 status KV tokens + TFv6's current plan.
-        kv_status = kv.detach().float()[:, 120:].mean(dim=1)  # (B, token_dim)
+        # Status branch: pre-encoded from buffer, or live from planning decoder kv.
+        if self._cached_kv_status_mean is not None:
+            kv_status = self._cached_kv_status_mean
+        else:
+            kv = getattr(self.tfv6.planning_decoder, "kv", None)
+            if kv is None:
+                raise RuntimeError(
+                    "Planning decoder context tokens (kv) not found — call get_base_action() first."
+                )
+            kv_status = (
+                kv.detach().float()[:, self.n_spatial_tokens :].mean(dim=1)
+            )  # (B, token_dim)
         status_ctx = self.residual_status_proj(
             torch.cat([kv_status, base_action_mean.float()], dim=1)
         )  # (B, token_dim)
 
         return torch.cat([spatial_ctx, status_ctx], dim=1).float()  # (B, 2*token_dim)
+
+    def set_feature_cache(
+        self,
+        bev: torch.Tensor,
+        kv_status_mean: torch.Tensor,
+        base_action_mean: torch.Tensor,
+    ) -> None:
+        """Load pre-encoded frozen features so get_residual_features() skips TFv6.
+
+        Called during training updates to restore backbone state from replay buffer
+        features instead of re-running the frozen TFv6 forward pass.
+        """
+        self.tfv6.bev_features = bev
+        self._cached_kv_status_mean = kv_status_mean
+        self._last_base_action_mean = base_action_mean
+
+    def encode_obs_to_features(
+        self, obs_dict: dict | None = None
+    ) -> dict[str, np.ndarray]:
+        """Extract frozen TFv6 outputs as numpy arrays for replay buffer storage.
+
+        If obs_dict is provided, runs TFv6 on it first (use for next_obs encoding).
+        If None, reads from the cache left by the most recent get_base_action() call.
+
+        Returns dict with keys: bev [C,H,W], kv_status_mean [token_dim], base_action_mean [route_dim+1].
+        """
+        if obs_dict is not None:
+            with torch.no_grad():
+                self.get_base_action(obs_dict)
+        bev = self.tfv6.bev_features.detach().float().cpu().numpy()[0]  # (C, H, W)
+        kv = getattr(self.tfv6.planning_decoder, "kv", None)
+        if kv is None:
+            raise RuntimeError(
+                "Planning decoder kv not found — call get_base_action() first."
+            )
+        kv_status_mean = (
+            kv[0, self.n_spatial_tokens :].float().mean(0).cpu().numpy()
+        )  # (token_dim,)
+        base_action_mean = (
+            self._last_base_action_mean[0].float().cpu().numpy()
+        )  # (route_dim+1,)
+        return {
+            "bev": bev,
+            "kv_status_mean": kv_status_mean,
+            "base_action_mean": base_action_mean,
+        }
+
+    def feature_obs_space(self):
+        """Gymnasium Dict space for pre-encoded frozen TFv6 features.
+
+        Used to initialise DictReplayBuffer instead of the raw sensor obs space,
+        reducing per-transition size from ~3.5 MB to ~32 KB.
+        """
+        from gymnasium import spaces
+
+        obs = {
+            "bev": spaces.Box(
+                -np.inf,
+                np.inf,
+                shape=(self._bev_channels, self._bev_h, self._bev_w),
+                dtype=np.float32,
+            ),
+            "kv_status_mean": spaces.Box(
+                -np.inf, np.inf, shape=(self.value_token_dim,), dtype=np.float32
+            ),
+            "base_action_mean": spaces.Box(
+                -np.inf,
+                np.inf,
+                shape=(self.action_codec.route_dim + 1,),
+                dtype=np.float32,
+            ),
+        }
+        if self.rl_config and getattr(self.rl_config, "use_value_measurements", False):
+            from rl_finetuning.tfv6_rl.privileged_measurements import (
+                privileged_measurement_dim,
+            )
+
+            priv_dim = privileged_measurement_dim(self.rl_config)
+            obs["privileged_measurements"] = spaces.Box(
+                -np.inf, np.inf, shape=(priv_dim,), dtype=np.float32
+            )
+        return spaces.Dict(obs)
