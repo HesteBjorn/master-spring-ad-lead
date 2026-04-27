@@ -272,26 +272,28 @@ class DictReplayBuffer:
         """Atomically save buffer state to buffer_latest.npz in folder.
 
         Writes to a .tmp file first, then renames — safe against SIGTERM mid-write.
-        Unfilled slots (zeros) compress well, so file size tracks actual fill level.
+        Saves only filled slots (arr[:fill]) uncompressed — on NVMe this takes ~1-11s
+        for 10K-100K transitions, well within CARLA's 900s ZMQ timeout.
         """
         out_path = os.path.join(folder, "buffer_latest.npz")
         tmp_path = os.path.join(folder, "buffer_latest.tmp.npz")
+        fill = self.capacity if self.full else self.pos
         data: dict[str, np.ndarray] = {
             "_pos": np.array([self.pos], dtype=np.int64),
             "_full": np.array([self.full]),
             "_capacity": np.array([self.capacity], dtype=np.int64),
-            "actions": self.actions,
-            "action_coeffs": self.action_coeffs,
-            "base_actions": self.base_actions,
-            "rewards": self.rewards,
-            "dones": self.dones,
-            "timeouts": self.timeouts,
+            "actions": self.actions[:fill],
+            "action_coeffs": self.action_coeffs[:fill],
+            "base_actions": self.base_actions[:fill],
+            "rewards": self.rewards[:fill],
+            "dones": self.dones[:fill],
+            "timeouts": self.timeouts[:fill],
         }
         for key, arr in self.obs_buf.items():
-            data[f"obs_{key}"] = arr
+            data[f"obs_{key}"] = arr[:fill]
         for key, arr in self.next_obs_buf.items():
-            data[f"next_obs_{key}"] = arr
-        np.savez_compressed(tmp_path, **data)
+            data[f"next_obs_{key}"] = arr[:fill]
+        np.savez(tmp_path, **data)
         os.replace(tmp_path, out_path)
 
     def load(self, folder: str) -> bool:
@@ -336,16 +338,17 @@ class DictReplayBuffer:
         try:
             self.pos = int(d["_pos"][0])
             self.full = bool(d["_full"][0])
+            fill = self.capacity if self.full else self.pos
             for key in self.obs_buf:
-                self.obs_buf[key][:] = d[f"obs_{key}"]
+                self.obs_buf[key][:fill] = d[f"obs_{key}"]
             for key in self.next_obs_buf:
-                self.next_obs_buf[key][:] = d[f"next_obs_{key}"]
-            self.actions[:] = d["actions"]
-            self.action_coeffs[:] = d["action_coeffs"]
-            self.base_actions[:] = d["base_actions"]
-            self.rewards[:] = d["rewards"]
-            self.dones[:] = d["dones"]
-            self.timeouts[:] = d["timeouts"]
+                self.next_obs_buf[key][:fill] = d[f"next_obs_{key}"]
+            self.actions[:fill] = d["actions"]
+            self.action_coeffs[:fill] = d["action_coeffs"]
+            self.base_actions[:fill] = d["base_actions"]
+            self.rewards[:fill] = d["rewards"]
+            self.dones[:fill] = d["dones"]
+            self.timeouts[:fill] = d["timeouts"]
         except Exception as exc:
             # Reset to empty on partial load failure.
             self.pos = 0
