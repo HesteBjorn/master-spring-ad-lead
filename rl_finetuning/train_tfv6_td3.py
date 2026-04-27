@@ -268,6 +268,96 @@ class DictReplayBuffer:
     def __len__(self) -> int:
         return self.capacity if self.full else self.pos
 
+    def save(self, folder: str) -> None:
+        """Atomically save buffer state to buffer_latest.npz in folder.
+
+        Writes to a .tmp file first, then renames — safe against SIGTERM mid-write.
+        Unfilled slots (zeros) compress well, so file size tracks actual fill level.
+        """
+        out_path = os.path.join(folder, "buffer_latest.npz")
+        tmp_path = os.path.join(folder, "buffer_latest.tmp.npz")
+        data: dict[str, np.ndarray] = {
+            "_pos": np.array([self.pos], dtype=np.int64),
+            "_full": np.array([self.full]),
+            "_capacity": np.array([self.capacity], dtype=np.int64),
+            "actions": self.actions,
+            "action_coeffs": self.action_coeffs,
+            "base_actions": self.base_actions,
+            "rewards": self.rewards,
+            "dones": self.dones,
+            "timeouts": self.timeouts,
+        }
+        for key, arr in self.obs_buf.items():
+            data[f"obs_{key}"] = arr
+        for key, arr in self.next_obs_buf.items():
+            data[f"next_obs_{key}"] = arr
+        np.savez_compressed(tmp_path, **data)
+        os.replace(tmp_path, out_path)
+
+    def load(self, folder: str) -> bool:
+        """Load buffer state from buffer_latest.npz in folder.
+
+        Returns True on success, False if file is missing or incompatible
+        (capacity mismatch, unknown obs keys). On failure the buffer stays empty.
+        """
+        path = os.path.join(folder, "buffer_latest.npz")
+        if not os.path.exists(path):
+            return False
+        try:
+            d = np.load(path)
+        except Exception as exc:
+            print(
+                f"[td3] Warning: failed to open buffer file ({exc}); starting empty.",
+                flush=True,
+            )
+            return False
+
+        saved_capacity = int(d["_capacity"][0])
+        if saved_capacity != self.capacity:
+            print(
+                f"[td3] Warning: buffer capacity mismatch "
+                f"(saved={saved_capacity}, current={self.capacity}); starting empty.",
+                flush=True,
+            )
+            return False
+
+        missing = [
+            k
+            for k in list(self.obs_buf) + list(self.next_obs_buf)
+            if f"obs_{k}" not in d or f"next_obs_{k}" not in d
+        ]
+        if missing:
+            print(
+                f"[td3] Warning: buffer missing obs keys {missing}; starting empty.",
+                flush=True,
+            )
+            return False
+
+        try:
+            self.pos = int(d["_pos"][0])
+            self.full = bool(d["_full"][0])
+            for key in self.obs_buf:
+                self.obs_buf[key][:] = d[f"obs_{key}"]
+            for key in self.next_obs_buf:
+                self.next_obs_buf[key][:] = d[f"next_obs_{key}"]
+            self.actions[:] = d["actions"]
+            self.action_coeffs[:] = d["action_coeffs"]
+            self.base_actions[:] = d["base_actions"]
+            self.rewards[:] = d["rewards"]
+            self.dones[:] = d["dones"]
+            self.timeouts[:] = d["timeouts"]
+        except Exception as exc:
+            # Reset to empty on partial load failure.
+            self.pos = 0
+            self.full = False
+            print(
+                f"[td3] Warning: buffer load failed mid-copy ({exc}); starting empty.",
+                flush=True,
+            )
+            return False
+
+        return True
+
 
 def _polyak_update(source: nn.Module, target: nn.Module, tau: float) -> None:
     """Soft-update: target = (1-tau)*target + tau*source for all parameters."""
@@ -807,6 +897,19 @@ def main():
             flush=True,
         )
         writer.add_scalar("charts/restart", 1, global_step)
+        t_buf = time.time()
+        buf_loaded = replay_buffer.load(exp_folder)
+        if buf_loaded:
+            print(
+                f"[td3] Loaded buffer ({len(replay_buffer)} transitions) "
+                f"in {time.time() - t_buf:.1f}s",
+                flush=True,
+            )
+        else:
+            print(
+                "[td3] No compatible buffer checkpoint; starting with empty buffer.",
+                flush=True,
+            )
 
     # ── Debug visualizer ──────────────────────────────────────────────────────
     debug_viz = None
@@ -1275,7 +1378,13 @@ def main():
                 os.path.join(exp_folder, "config.json"), "w", encoding="utf-8"
             ) as f:
                 f.write(jsonpickle.encode(config))
-            print(f"[td3] Saved checkpoint at step {global_step}", flush=True)
+            t_buf = time.time()
+            replay_buffer.save(exp_folder)
+            print(
+                f"[td3] Saved checkpoint + buffer ({len(replay_buffer)} transitions) "
+                f"at step {global_step} in {time.time() - t_buf:.1f}s",
+                flush=True,
+            )
 
     # ── Final checkpoint ──────────────────────────────────────────────────────
     _save_td3_checkpoint(
@@ -1294,6 +1403,7 @@ def main():
         global_step,
         config,
     )
+    replay_buffer.save(exp_folder)
     env.close()
     writer.close()
 
