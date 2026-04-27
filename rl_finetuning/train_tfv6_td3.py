@@ -1000,6 +1000,9 @@ def main():
 
     # ── TD3 training loop ─────────────────────────────────────────────────────
     start_step = global_step
+    _sps_step = start_step
+    _sps_time = start_time
+    _t_fwd = _t_env = _t_buf = _t_train = 0.0
     for global_step in range(start_step, args.total_timesteps):
         # ── COLLECT ──────────────────────────────────────────────────────────
         # Single unified collection path throughout (including warmup).
@@ -1009,6 +1012,7 @@ def main():
         # broken branch that adds noise in full 21-dim action space.
         # disable_residual_route is always respected via coeffs_to_action.
         actor.eval()
+        _t0 = time.perf_counter()
         with torch.no_grad():
             coeff_tensor = actor.forward_coeffs(next_obs)  # sets backbone state
             base_action_mean = backbone._last_base_action_mean
@@ -1037,7 +1041,9 @@ def main():
         )
 
         obs_for_buffer = {k: v[0].cpu().numpy() for k, v in next_obs.items()}
+        _t_fwd += time.perf_counter() - _t0
 
+        _t0 = time.perf_counter()
         step_result = env.step(action_np[None])
         next_obs_np, reward_np, terminated_np, truncated_np, info = step_result
         reward = float(reward_np[0])
@@ -1084,6 +1090,7 @@ def main():
             terminated=terminated,
             truncated=truncated,
         )
+        _t_env += time.perf_counter() - _t0
 
         # Reset obs (SyncVectorEnv auto-resets on done).
         next_obs = next_obs_device
@@ -1174,9 +1181,12 @@ def main():
             and len(replay_buffer) >= args.td3_batch_size
         ):
             critic_updates_completed = global_step - args.learning_starts + 1
+            _t0 = time.perf_counter()
             batch = replay_buffer.sample(args.td3_batch_size)
+            _t_buf += time.perf_counter() - _t0
 
             # ── Critic update ─────────────────────────────────────────────────
+            _t0 = time.perf_counter()
             actor.train()
             with torch.no_grad():
                 # Target policy smoothing: clipped Gaussian noise on target actor.
@@ -1265,9 +1275,19 @@ def main():
                 _polyak_update(qf1.q_head, qf1_target.q_head, args.tau)
                 _polyak_update(qf2.q_head, qf2_target.q_head, args.tau)
 
+            _t_train += time.perf_counter() - _t0
+
             # ── Logging ───────────────────────────────────────────────────────
             if global_step % 100 == 0:
-                sps = int(global_step / (time.time() - start_time + 1e-6))
+                _now = time.time()
+                _window = max(global_step - _sps_step, 1)
+                sps = _window / (_now - _sps_time + 1e-9)
+                _sps_step, _sps_time = global_step, _now
+                writer.add_scalar("timing/fwd_s", _t_fwd / _window, global_step)
+                writer.add_scalar("timing/env_s", _t_env / _window, global_step)
+                writer.add_scalar("timing/buf_s", _t_buf / _window, global_step)
+                writer.add_scalar("timing/train_s", _t_train / _window, global_step)
+                _t_fwd = _t_env = _t_buf = _t_train = 0.0
                 writer.add_scalar(
                     "losses/critic_loss", float(critic_loss.item()), global_step
                 )
@@ -1349,7 +1369,7 @@ def main():
                 if global_step % 1000 == 0:
                     print(
                         f"[td3] step={global_step} critic_loss={critic_loss.item():.4f} "
-                        f"actor_loss={last_actor_loss_val:.4f} SPS={sps}",
+                        f"actor_loss={last_actor_loss_val:.4f} SPS={sps:.3f}",
                         flush=True,
                     )
 
