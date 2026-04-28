@@ -217,20 +217,50 @@ class DictReplayBuffer:
         reward: float,
         terminated: bool,
         truncated: bool,
-    ) -> None:
+    ) -> int:
+        insert_idx = self.pos
         for key in self.obs_buf:
-            self.obs_buf[key][self.pos] = obs[key]
-            self.next_obs_buf[key][self.pos] = next_obs[key]
-        self.actions[self.pos] = action
-        self.action_coeffs[self.pos] = action_coeffs
-        self.base_actions[self.pos] = base_action
-        self.rewards[self.pos] = reward
+            self.obs_buf[key][insert_idx] = obs[key]
+            self.next_obs_buf[key][insert_idx] = next_obs[key]
+        self.actions[insert_idx] = action
+        self.action_coeffs[insert_idx] = action_coeffs
+        self.base_actions[insert_idx] = base_action
+        self.rewards[insert_idx] = reward
         # SB3-style: done = terminated only (not truncated), timeout = truncated.
-        self.dones[self.pos] = float(terminated)
-        self.timeouts[self.pos] = float(truncated)
+        self.dones[insert_idx] = float(terminated)
+        self.timeouts[insert_idx] = float(truncated)
         self.pos = (self.pos + 1) % self.capacity
         if self.pos == 0:
             self.full = True
+        return insert_idx
+
+    def apply_terminal_penalty_warmup(
+        self,
+        *,
+        terminal_idx: int,
+        terminal_hint: float,
+        warmup_n: int,
+    ) -> None:
+        """Mirror PPO's pre-terminal reward ramp for online TD3 replay.
+
+        At step T-k: add -terminal_hint * (N-k)/N. Stops at episode boundaries
+        so only transitions from the same just-finished episode are shaped.
+        """
+        if warmup_n <= 0 or terminal_hint <= 0.0:
+            return
+        max_idx = self.capacity if self.full else self.pos
+        if max_idx <= 1:
+            return
+        for k in range(1, warmup_n + 1):
+            if not self.full and terminal_idx - k < 0:
+                break
+            idx = (terminal_idx - k) % self.capacity
+            if idx >= max_idx:
+                break
+            if self.dones[idx, 0] > 0.5 or self.timeouts[idx, 0] > 0.5:
+                break
+            fraction = float(warmup_n - k) / float(warmup_n)
+            self.rewards[idx, 0] -= terminal_hint * fraction
 
     def sample(self, batch_size: int):
         """Sample a random minibatch, return tensors on self.device."""
@@ -1106,7 +1136,7 @@ def main():
                 next_obs_for_encode["privileged_measurements"][0].cpu().numpy()
             )
 
-        replay_buffer.add(
+        transition_idx = replay_buffer.add(
             obs=obs_features,
             next_obs=next_obs_features,
             action=action_np,
@@ -1116,6 +1146,16 @@ def main():
             terminated=terminated,
             truncated=truncated,
         )
+        # Terminal penalty warmup: same ramp as PPO, applied retroactively to
+        # the N replay transitions preceding a penalized terminal frame.
+        if args.terminal_penalty_warmup_n > 0 and args.terminal_hint > 0.0:
+            collision_threshold = -0.5 * args.terminal_hint
+            if terminated and reward < collision_threshold:
+                replay_buffer.apply_terminal_penalty_warmup(
+                    terminal_idx=transition_idx,
+                    terminal_hint=args.terminal_hint,
+                    warmup_n=args.terminal_penalty_warmup_n,
+                )
         _t_env += time.perf_counter() - _t0
 
         # Reset obs (SyncVectorEnv auto-resets on done).
