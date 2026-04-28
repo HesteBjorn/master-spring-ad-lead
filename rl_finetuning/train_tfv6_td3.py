@@ -1343,10 +1343,10 @@ def main():
                 last_actor_loss_val = float(actor_loss.item())
                 last_actor_grad_norm = float(actor_grad_norm)
 
-                # Polyak update target networks.
-                _polyak_update(actor, actor_target, args.tau)
-                _polyak_update(qf1.q_head, qf1_target.q_head, args.tau)
-                _polyak_update(qf2.q_head, qf2_target.q_head, args.tau)
+                # Actor target owns a backbone structurally, but the actor
+                # optimizer only updates residual_out. Keep backbone/Q targets
+                # on the critic-step update schedule above.
+                _polyak_update(actor.residual_out, actor_target.residual_out, args.tau)
 
             _t_train += time.perf_counter() - _t0
 
