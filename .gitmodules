@@ -1,3 +1,6 @@
 [submodule "3rd_party/CaRL"]
 	path = 3rd_party/CaRL
 	url = https://github.com/HesteBjorn/CaRL.git
+[submodule "3rd_party/residual-offpolicy-rl-ankile"]
+	path = 3rd_party/residual-offpolicy-rl-ankile
+	url = https://github.com/amazon-far/residual-offpolicy-rl
