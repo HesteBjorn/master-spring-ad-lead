@@ -834,7 +834,7 @@ def main():
     for p in qf2_target.q_head.parameters():
         p.requires_grad_(False)
 
-    coeff_dim = backbone.residual_route_rank + 1
+    coeff_dim = actor.effective_rank + 1
 
     # Actor: only the linear residual output head. Features are detached before
     # this head during actor updates (ResFiT / DrQ-v2 style: encoder trained by
@@ -1340,7 +1340,7 @@ def main():
                 )
                 _speed_correction = (
                     backbone.residual_alpha_speed
-                    * _log_coeffs[:, backbone.residual_route_rank].detach()
+                    * _log_coeffs[:, actor.effective_rank].detach()
                     * backbone.action_codec.speed_scale
                 )
                 writer.add_scalar(
@@ -1378,21 +1378,21 @@ def main():
                     writer.add_scalar(
                         "grads/actor_grad_norm", actor_grad_norm, global_step
                     )
-                    _rrank = getattr(args, "residual_route_rank", 1)
+                    _eff_rank = actor.effective_rank
                     writer.add_scalar(
                         "residual/speed_coeff_mean",
-                        float(pred_coeffs[:, _rrank].mean().item()),
+                        float(pred_coeffs[:, _eff_rank].mean().item()),
                         global_step,
                     )
                     writer.add_scalar(
                         "residual/speed_coeff_std",
-                        float(pred_coeffs[:, _rrank].std().item()),
+                        float(pred_coeffs[:, _eff_rank].std().item()),
                         global_step,
                     )
-                    if _rrank > 0 and not backbone.disable_residual_route:
+                    if _eff_rank > 0:
                         writer.add_scalar(
                             "residual/route_coeff_mean",
-                            float(pred_coeffs[:, :_rrank].mean().item()),
+                            float(pred_coeffs[:, :_eff_rank].mean().item()),
                             global_step,
                         )
 

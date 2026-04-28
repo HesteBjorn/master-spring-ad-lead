@@ -68,7 +68,11 @@ class TFv6ResidualActorTD3(nn.Module):
         token_dim = backbone.value_token_dim
         rank = backbone.residual_route_rank
         hidden_dim = 256
-        # Output head: [B, 2*token_dim] → [B, rank+1] coefficient means in (-1, 1).
+        # When route correction is disabled, output only the speed scalar.
+        # This drops the route coefficient entirely so it cannot introduce noisy
+        # gradients into the shared hidden layer during actor/critic updates.
+        eff_rank = 0 if backbone.disable_residual_route else rank
+        # Output head: [B, 2*token_dim] → [B, eff_rank+1] coefficient means in (-1, 1).
         # Tanh bounds coefficients so alpha*coeff is always within [-alpha, +alpha],
         # matches the [-1,1] clamp assumed by target policy smoothing, and keeps
         # gradients alive (no dead zone from action.clamp saturation).
@@ -76,7 +80,7 @@ class TFv6ResidualActorTD3(nn.Module):
         self.residual_out = nn.Sequential(
             nn.Linear(token_dim * 2, hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, rank + 1),
+            nn.Linear(hidden_dim, eff_rank + 1),
             nn.Tanh(),
         )
         nn.init.zeros_(self.residual_out[-2].weight)
@@ -85,6 +89,11 @@ class TFv6ResidualActorTD3(nn.Module):
     @property
     def rank(self) -> int:
         return self.backbone.residual_route_rank
+
+    @property
+    def effective_rank(self) -> int:
+        """Route rank actually used: 0 when route correction is disabled."""
+        return 0 if self.backbone.disable_residual_route else self.rank
 
     @property
     def action_dim(self) -> int:
@@ -150,7 +159,7 @@ class TFv6ResidualActorTD3(nn.Module):
         if base_action is None:
             raise RuntimeError("Call forward_coeffs() before coeffs_to_action().")
         route_dim = self.backbone.action_codec.route_dim
-        rank = self.rank
+        eff_rank = self.effective_rank
         basis = self.backbone.residual_route_basis.to(
             device=coeff_means.device, dtype=coeff_means.dtype
         )
@@ -158,8 +167,8 @@ class TFv6ResidualActorTD3(nn.Module):
 
         route_base = base_action[:, :route_dim]
         speed_base = base_action[:, route_dim:]
-        route_coeff = coeff_means[:, :rank]
-        speed_coeff = coeff_means[:, rank:]
+        route_coeff = coeff_means[:, :eff_rank]
+        speed_coeff = coeff_means[:, eff_rank:]
 
         if disable_route:
             delta_route = torch.zeros_like(route_base)
@@ -208,7 +217,8 @@ class TFv6ResidualQNetworkTD3(nn.Module):
 
         token_dim = backbone.value_token_dim
         rank = backbone.residual_route_rank
-        action_dim = rank + 1
+        eff_rank = 0 if backbone.disable_residual_route else rank
+        action_dim = eff_rank + 1
 
         self.use_privileged_measurements: bool = False
         self.num_privileged_measurements: int = 0
