@@ -1160,13 +1160,13 @@ class PPORolloutVisualizer:
 
         row_h = max(12, (plot_y1 - plot_y0) // n)
 
-        # --- Auto x-axis range: cover mean ± 2σ for all coefficients ---
-        max_abs = float(np.max(np.abs(means) + 2.0 * stds))
-        max_abs = max(max_abs, 0.3)
-        axis_range = max_abs * 1.15
+        # TD3 residual coefficients are tanh-bounded, so keep the visual scale
+        # fixed across frames instead of rescaling to the current uncertainty.
+        axis_min = -1.0
+        axis_max = 1.0
 
         def val_to_px(v: float) -> int:
-            alpha = (float(v) + axis_range) / (2.0 * axis_range)
+            alpha = (float(v) - axis_min) / (axis_max - axis_min)
             return int(round(plot_x0 + alpha * (plot_x1 - plot_x0)))
 
         zero_px = val_to_px(0.0)
@@ -1272,7 +1272,7 @@ class PPORolloutVisualizer:
         # --- X-axis ---
         axis_y = rows_bottom
         cv2.line(panel, (plot_x0, axis_y), (plot_x1, axis_y), (120, 120, 120), 1)
-        for tv in [-axis_range, -axis_range / 2.0, 0.0, axis_range / 2.0, axis_range]:
+        for tv in [axis_min, -0.5, 0.0, 0.5, axis_max]:
             tx = val_to_px(tv)
             if plot_x0 <= tx <= plot_x1:
                 cv2.line(panel, (tx, axis_y), (tx, axis_y + 4), (80, 80, 80), 1)
