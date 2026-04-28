@@ -1056,7 +1056,7 @@ def main():
             coeff_tensor = actor.forward_coeffs(next_obs)  # sets backbone state
             base_action_mean = backbone._last_base_action_mean
             noise = torch.randn_like(coeff_tensor) * args.exploration_noise
-            coeff_tensor_noisy = coeff_tensor + noise
+            coeff_tensor_noisy = (coeff_tensor + noise).clamp(-1.0, 1.0)
             action_tensor = actor.coeffs_to_action(coeff_tensor_noisy)
             clean_coeff_tensor = coeff_tensor  # deterministic (no noise) for viz
             coeff_tensor = coeff_tensor_noisy
