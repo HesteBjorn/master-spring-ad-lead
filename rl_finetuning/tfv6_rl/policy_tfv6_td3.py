@@ -67,7 +67,7 @@ class TFv6ResidualActorTD3(nn.Module):
         self.backbone = backbone
         token_dim = backbone.value_token_dim
         rank = backbone.residual_route_rank
-        hidden_dim = 256
+        hidden_dim = 512
         # When route correction is disabled, output only the speed scalar.
         # This drops the route coefficient entirely so it cannot introduce noisy
         # gradients into the shared hidden layer during actor/critic updates.
@@ -238,16 +238,17 @@ class TFv6ResidualQNetworkTD3(nn.Module):
         )
         q_in_dim = token_dim * 2 + action_dim + priv_dim
 
-        # Q-head mirrors PPO value_head: LayerNorm → Linear(256) → LN → GELU × 2 → 1.
+        q_hidden_dim = 512
+        # Q-head mirrors PPO value_head, but uses a wider TD3 critic head.
         self.q_head = nn.Sequential(
             nn.LayerNorm(q_in_dim),
-            nn.Linear(q_in_dim, 256),
-            nn.LayerNorm(256),
+            nn.Linear(q_in_dim, q_hidden_dim),
+            nn.LayerNorm(q_hidden_dim),
             nn.GELU(),
-            nn.Linear(256, 256),
-            nn.LayerNorm(256),
+            nn.Linear(q_hidden_dim, q_hidden_dim),
+            nn.LayerNorm(q_hidden_dim),
             nn.GELU(),
-            nn.Linear(256, 1),
+            nn.Linear(q_hidden_dim, 1),
         )
 
     @property
