@@ -497,6 +497,8 @@ def parse_args(config):
 
     # ── Infrastructure ───────────────────────────────────────────────────────
     parser.add_argument('--logdir', type=str, default=config.logdir)
+    parser.add_argument('--save_every', type=int, default=getattr(config, 'save_every', 10_000),
+                        help='Save model checkpoint and replay buffer every N global steps.')
     parser.add_argument('--load_file', type=none_or_str, nargs='?', default=config.load_file,
                         help='TD3 checkpoint file to resume from (model_latest_*.pth).')
     parser.add_argument('--ports', nargs='+', default=config.ports, type=int,
@@ -1402,8 +1404,7 @@ def main():
                     )
 
         # ── Checkpoint save ────────────────────────────────────────────────────
-        save_every = 10_000
-        if global_step > 0 and global_step % save_every == 0:
+        if global_step > 0 and global_step % args.save_every == 0:
             step_str = f"latest_{global_step:012d}"
             _save_td3_checkpoint(
                 exp_folder,
