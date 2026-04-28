@@ -1014,8 +1014,10 @@ def main():
     # Infraction accumulator — reset each time infractions are logged.
     infraction_counts: dict[str, int] = {k: 0 for k in _INFRACTION_TYPES}
     episodes_since_infraction_log: int = 0
-    # Persistent actor loss — retained across steps so logging doesn't miss it.
+    # Persistent actor scalars — retained across steps so logging doesn't miss them
+    # (actor updates on odd global steps; logging fires on even multiples of 100).
     last_actor_loss_val: float = float("nan")
+    last_actor_grad_norm: float = float("nan")
     # Per-episode (global_step, reward) pairs for debug-viz forward-return stamping.
     _viz_episode_step_rewards: list[tuple[int, float]] = []
 
@@ -1339,6 +1341,7 @@ def main():
                 )
                 actor_optimizer.step()
                 last_actor_loss_val = float(actor_loss.item())
+                last_actor_grad_norm = float(actor_grad_norm)
 
                 # Polyak update target networks.
                 _polyak_update(actor, actor_target, args.tau)
@@ -1414,9 +1417,9 @@ def main():
                     writer.add_scalar(
                         "losses/actor_loss", last_actor_loss_val, global_step
                     )
-                if not np.isnan(actor_grad_norm):
+                if not np.isnan(last_actor_grad_norm):
                     writer.add_scalar(
-                        "grads/actor_grad_norm", actor_grad_norm, global_step
+                        "grads/actor_grad_norm", last_actor_grad_norm, global_step
                     )
                     _eff_rank = actor.effective_rank
                     writer.add_scalar(
