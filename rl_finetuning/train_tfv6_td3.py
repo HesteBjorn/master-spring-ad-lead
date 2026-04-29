@@ -982,6 +982,7 @@ def main():
             speed_temperature=backbone.speed_temperature,
             use_residual_policy=True,
         )
+        debug_viz.random_burst_probability = 0.0  # disable random bursts in TD3
         print(
             f"[td3][debug_viz] enabled path={debug_dir} "
             f"every_n={args.debug_viz_every_n} burst_len={args.debug_viz_burst_len} "
