@@ -735,7 +735,7 @@ def _load_td3_checkpoint(
                 flush=True,
             )
 
-    global_step = int(ckpt.get("global_step", 0)) + 1
+    global_step = int(ckpt.get("global_step", 0))
     return global_step
 
 
@@ -936,7 +936,7 @@ def main():
             actor_optimizer,
             critic_optimizer,
             device,
-        )
+        ) + len(args.ports)
         print(
             f"[td3] Resumed from {args.load_file}, global_step={global_step}",
             flush=True,
@@ -1131,13 +1131,22 @@ def main():
 
         next_obs_device = _obs_to_device(next_obs_np)
 
-        # Encode next_obs features: run TFv6 once on all envs, then re-run only for
-        # truncated envs which need their true final obs (gymnasium auto-reset overwrites).
+        # Encode next_obs features: run TFv6 once on all envs to populate the cache,
+        # extract all envs from that cache, then override truncated envs with their
+        # true final obs. The two loops must be separate: encoding a truncated env's
+        # final obs overwrites the cache, corrupting subsequent non-truncated extractions.
         with torch.no_grad():
             backbone.encode_obs_to_features(
                 next_obs_device, env_idx=0
             )  # caches all envs
         next_obs_features_batch = []
+        for i in range(num_envs):
+            feats = backbone.encode_obs_to_features(env_idx=i)
+            if "privileged_measurements" in next_obs_device:
+                feats["privileged_measurements"] = (
+                    next_obs_device["privileged_measurements"][i].cpu().numpy()
+                )
+            next_obs_features_batch.append(feats)
         for i in range(num_envs):
             if truncated_np[i] and "final_observation" in info:
                 final_obs_np = info["final_observation"]
@@ -1157,13 +1166,7 @@ def main():
                     feats["privileged_measurements"] = (
                         final_obs_i["privileged_measurements"][0].cpu().numpy()
                     )
-            else:
-                feats = backbone.encode_obs_to_features(env_idx=i)
-                if "privileged_measurements" in next_obs_device:
-                    feats["privileged_measurements"] = (
-                        next_obs_device["privileged_measurements"][i].cpu().numpy()
-                    )
-            next_obs_features_batch.append(feats)
+                next_obs_features_batch[i] = feats
 
         for i in range(num_envs):
             transition_idx = replay_buffer.add(
@@ -1239,50 +1242,54 @@ def main():
 
         recent_rewards.extend(reward_np.tolist())
 
-        # Episode stats — per-env from final_info for correct infraction attribution.
-        if "final_info" in info:
-            for env_idx_ep, single_info in enumerate(info["final_info"]):
-                if single_info is None:
-                    continue
-                episode_info = single_info.get("episode") or single_info.get(
-                    "tfv6_episode"
+        # Episode stats — use _iter_episode_stats which handles both gymnasium info
+        # formats (final_info per-env dict and legacy top-level info["episode"]).
+        # Infraction is attributed to whichever env has a non-empty infraction string;
+        # simultaneous multi-env episode endings are rare so this is accurate enough.
+        for ep_return, ep_length in _iter_episode_stats(info):
+            avg_returns.append(ep_return)
+            print(
+                f"[td3] global_step={global_step} episodic_return={ep_return:.4f}",
+                flush=True,
+            )
+            writer.add_scalar("charts/episodic_return", ep_return, global_step)
+            writer.add_scalar("charts/episodic_length", ep_length, global_step)
+            if avg_returns:
+                writer.add_scalar(
+                    "charts/windowed_avg_return", np.mean(avg_returns), global_step
                 )
-                if episode_info is None:
-                    continue
-                ep_return = float(np.asarray(episode_info["r"]).item())
-                ep_length = int(np.asarray(episode_info["l"]).item())
-                avg_returns.append(ep_return)
-                print(
-                    f"[td3] global_step={global_step} episodic_return={ep_return:.4f}",
-                    flush=True,
-                )
-                writer.add_scalar("charts/episodic_return", ep_return, global_step)
-                writer.add_scalar("charts/episodic_length", ep_length, global_step)
-                if avg_returns:
-                    writer.add_scalar(
-                        "charts/windowed_avg_return", np.mean(avg_returns), global_step
-                    )
-                # Infraction tracking (mirrors PPO: every episode gets one type).
-                infraction = terminal_infraction_by_env[env_idx_ep] or "finished_route"
-                if infraction in infraction_counts:
-                    infraction_counts[infraction] += 1
-                episodes_since_infraction_log += 1
-                # Log and reset every N episodes — same formula as PPO:
-                # fraction = count_k / total_episodes (sum of all type counts).
-                if episodes_since_infraction_log >= _INFRACTION_LOG_EVERY_N:
-                    total_infraction_episodes = sum(infraction_counts.values())
-                    if total_infraction_episodes > 0:
-                        for k in _INFRACTION_TYPES:
-                            writer.add_scalar(
-                                f"infractions/{k}",
-                                infraction_counts[k] / total_infraction_episodes,
-                                global_step,
-                            )
-                    infraction_counts = {k: 0 for k in _INFRACTION_TYPES}
-                    episodes_since_infraction_log = 0
+            infraction = next(
+                (
+                    terminal_infraction_by_env[i]
+                    for i in range(num_envs)
+                    if terminal_infraction_by_env[i]
+                ),
+                "finished_route",
+            )
+            if infraction in infraction_counts:
+                infraction_counts[infraction] += 1
+            episodes_since_infraction_log += 1
+            # Log and reset every N episodes — same formula as PPO:
+            # fraction = count_k / total_episodes (sum of all type counts).
+            if episodes_since_infraction_log >= _INFRACTION_LOG_EVERY_N:
+                total_infraction_episodes = sum(infraction_counts.values())
+                if total_infraction_episodes > 0:
+                    for k in _INFRACTION_TYPES:
+                        writer.add_scalar(
+                            f"infractions/{k}",
+                            infraction_counts[k] / total_infraction_episodes,
+                            global_step,
+                        )
+                infraction_counts = {k: 0 for k in _INFRACTION_TYPES}
+                episodes_since_infraction_log = 0
         for rc in _iter_reward_components(info):
             for k in _REWARD_COMPONENT_KEYS:
                 writer.add_scalar(f"reward_components/{k}", rc[k], global_step)
+
+        # Clear per-env infraction state so it doesn't bleed into future episodes.
+        for i in range(num_envs):
+            if terminated_np[i] or truncated_np[i]:
+                terminal_infraction_by_env[i] = ""
 
         # ── UPDATE ────────────────────────────────────────────────────────────
         if (
@@ -1402,7 +1409,7 @@ def main():
                 _t_train += time.perf_counter() - _t0
 
             # ── Logging ───────────────────────────────────────────────────────
-            if global_step % 100 == 0:
+            if global_step // 100 > (global_step - num_envs) // 100:
                 _now = time.time()
                 _window = max(global_step - _sps_step, 1)
                 sps = _window / (_now - _sps_time + 1e-9)
@@ -1490,7 +1497,7 @@ def main():
                             global_step,
                         )
 
-                if global_step % 1000 == 0:
+                if global_step // 1000 > (global_step - num_envs) // 1000:
                     print(
                         f"[td3] step={global_step} critic_loss={critic_loss.item():.4f} "
                         f"actor_loss={last_actor_loss_val:.4f} SPS={sps:.3f}",
@@ -1498,7 +1505,11 @@ def main():
                     )
 
         # ── Checkpoint save ────────────────────────────────────────────────────
-        if global_step > 0 and global_step % args.save_every == 0:
+        if (
+            global_step > 0
+            and global_step // args.save_every
+            > (global_step - num_envs) // args.save_every
+        ):
             step_str = f"latest_{global_step:012d}"
             _save_td3_checkpoint(
                 exp_folder,
