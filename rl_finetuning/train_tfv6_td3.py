@@ -1000,7 +1000,7 @@ def main():
 
     # ── Initial observation ───────────────────────────────────────────────────
     print("[td3] Waiting for first observation...", flush=True)
-    reset_obs, _ = env.reset(seed=[args.seed])
+    reset_obs, _ = env.reset(seed=[args.seed + i for i in range(len(args.ports))])
     print("[td3] Received first observation. Starting TD3 loop.", flush=True)
 
     def _obs_to_device(obs_np: dict) -> dict[str, torch.Tensor]:
@@ -1028,7 +1028,10 @@ def main():
     last_actor_loss_val: float = float("nan")
     last_actor_grad_norm: float = float("nan")
     # Per-episode (global_step, reward) pairs for debug-viz forward-return stamping.
-    _viz_episode_step_rewards: list[tuple[int, float]] = []
+    # One list per env so returns are stamped independently.
+    _viz_episode_step_rewards: list[list[tuple[int, float]]] = [
+        [] for _ in range(num_envs)
+    ]
 
     # Precompute exploration-noise log_std arrays for debug viz (constant throughout training).
     # These represent the actual spread of executed actions due to exploration noise.
@@ -1052,7 +1055,8 @@ def main():
     _sps_time = start_time
     _t_fwd = _t_env = _t_buf = _t_train = 0.0
     critic_updates_done = max(0, start_step - args.learning_starts) * args.utd_ratio
-    for global_step in range(start_step, args.total_timesteps):
+    global_step = start_step
+    while global_step < args.total_timesteps:
         # ── COLLECT ──────────────────────────────────────────────────────────
         # Single unified collection path throughout (including warmup).
         # The zero-initialized actor produces coeff ≈ 0 before training starts,
@@ -1063,7 +1067,9 @@ def main():
         actor.eval()
         _t0 = time.perf_counter()
         with torch.no_grad():
-            coeff_tensor = actor.forward_coeffs(next_obs)  # sets backbone state
+            coeff_tensor = actor.forward_coeffs(
+                next_obs
+            )  # sets backbone state; (num_envs, coeff_dim)
             base_action_mean = backbone._last_base_action_mean
             noise = torch.randn_like(coeff_tensor) * args.exploration_noise
             coeff_tensor_noisy = (coeff_tensor + noise).clamp(-1.0, 1.0)
@@ -1071,49 +1077,51 @@ def main():
             clean_coeff_tensor = coeff_tensor  # deterministic (no noise) for viz
             coeff_tensor = coeff_tensor_noisy
 
-            # Q-estimate for debug viz (optional, before env step).
+            # Q-estimate for debug viz (env 0 only).
             q_estimate_for_viz: float | None = None
             if debug_viz is not None and global_step >= args.learning_starts:
                 priv_viz = next_obs.get("privileged_measurements")
                 q1_val = qf1.forward_with_cached_backbone(coeff_tensor, priv_viz)
                 q_estimate_for_viz = float(q1_val[0].item())
 
-        action_np = action_tensor[0].cpu().numpy()
-        coeff_np = coeff_tensor[0].cpu().numpy()
-        clean_coeff_np = clean_coeff_tensor[0].cpu().numpy()
-        base_action_np = base_action_mean[0].cpu().numpy()
-        mean_action_np = actor.coeffs_to_action(clean_coeff_tensor)[0].cpu().numpy()
+        action_np = action_tensor.cpu().numpy()  # (num_envs, action_dim)
+        coeff_np = coeff_tensor.cpu().numpy()  # (num_envs, coeff_dim)
+        clean_coeff_np = clean_coeff_tensor.cpu().numpy()  # (num_envs, coeff_dim)
+        base_action_np = base_action_mean.cpu().numpy()  # (num_envs, action_dim)
+        mean_action_np = actor.coeffs_to_action(clean_coeff_tensor).cpu().numpy()
         target_speed_logits_np = (
-            backbone._last_target_speed_logits[0].cpu().numpy()
+            backbone._last_target_speed_logits.cpu().numpy()
             if backbone._last_target_speed_logits is not None
             else None
-        )
+        )  # (num_envs, num_speed_bins) or None
 
         # Extract obs features from cache left by actor.forward_coeffs (no extra TFv6 run).
-        obs_features = backbone.encode_obs_to_features()
-        if "privileged_measurements" in next_obs:
-            obs_features["privileged_measurements"] = (
-                next_obs["privileged_measurements"][0].cpu().numpy()
-            )
+        obs_features_batch = []
+        for i in range(num_envs):
+            feats = backbone.encode_obs_to_features(env_idx=i)
+            if "privileged_measurements" in next_obs:
+                feats["privileged_measurements"] = (
+                    next_obs["privileged_measurements"][i].cpu().numpy()
+                )
+            obs_features_batch.append(feats)
         _t_fwd += time.perf_counter() - _t0
 
         _t0 = time.perf_counter()
-        step_result = env.step(action_np[None])
+        step_result = env.step(action_np)
         next_obs_np, reward_np, terminated_np, truncated_np, info = step_result
-        reward = float(reward_np[0])
-        terminated = bool(terminated_np[0])
-        truncated = bool(truncated_np[0])
 
-        # Extract route completion and infraction for logging/viz.
-        route_completion_by_env[0] = float(
-            info.get("route_completion", [0.0])[0]
-            if "route_completion" in info
-            else 0.0
-        )
+        # Extract route completion and infraction for all envs.
+        if "route_completion" in info:
+            rc_arr = info["route_completion"]
+            for i in range(num_envs):
+                route_completion_by_env[i] = float(rc_arr[i])
         if "infraction_type" in info:
-            infraction_val = np.asarray(info["infraction_type"], dtype=object)[0]
-            if (terminated or truncated) and infraction_val is not None:
-                terminal_infraction_by_env[0] = str(infraction_val or "")
+            infraction_arr = np.asarray(info["infraction_type"], dtype=object)
+            for i in range(num_envs):
+                if (terminated_np[i] or truncated_np[i]) and infraction_arr[
+                    i
+                ] is not None:
+                    terminal_infraction_by_env[i] = str(infraction_arr[i] or "")
         if "final_info" in info:
             for idx, single_info in enumerate(info["final_info"]):
                 if single_info is not None:
@@ -1123,132 +1131,155 @@ def main():
 
         next_obs_device = _obs_to_device(next_obs_np)
 
-        # Determine the obs to encode for next_obs features.
-        # For truncated episodes, gymnasium auto-resets, so next_obs_device is the
-        # reset obs — we need the actual final obs from info["final_observation"].
-        if truncated and "final_observation" in info:
-            final_obs_np = info["final_observation"]
-            next_obs_for_encode: dict[str, torch.Tensor] = {}
-            for key, space in env.single_observation_space.spaces.items():
-                dtype = torch.uint8 if space.dtype == np.uint8 else torch.float32
-                if key in final_obs_np:
-                    arr = np.asarray(final_obs_np[key][0])
-                    next_obs_for_encode[key] = torch.tensor(
-                        arr, device=device, dtype=dtype
-                    ).unsqueeze(0)
-                else:
-                    next_obs_for_encode[key] = next_obs_device[key][:1]
-        else:
-            next_obs_for_encode = next_obs_device
-
+        # Encode next_obs features: run TFv6 once on all envs, then re-run only for
+        # truncated envs which need their true final obs (gymnasium auto-reset overwrites).
         with torch.no_grad():
-            next_obs_features = backbone.encode_obs_to_features(next_obs_for_encode)
-        if "privileged_measurements" in next_obs_for_encode:
-            next_obs_features["privileged_measurements"] = (
-                next_obs_for_encode["privileged_measurements"][0].cpu().numpy()
-            )
+            backbone.encode_obs_to_features(
+                next_obs_device, env_idx=0
+            )  # caches all envs
+        next_obs_features_batch = []
+        for i in range(num_envs):
+            if truncated_np[i] and "final_observation" in info:
+                final_obs_np = info["final_observation"]
+                final_obs_i: dict[str, torch.Tensor] = {}
+                for key, space in env.single_observation_space.spaces.items():
+                    dtype = torch.uint8 if space.dtype == np.uint8 else torch.float32
+                    if key in final_obs_np:
+                        arr = np.asarray(final_obs_np[key][i])
+                        final_obs_i[key] = torch.tensor(
+                            arr, device=device, dtype=dtype
+                        ).unsqueeze(0)
+                    else:
+                        final_obs_i[key] = next_obs_device[key][i : i + 1]
+                with torch.no_grad():
+                    feats = backbone.encode_obs_to_features(final_obs_i, env_idx=0)
+                if "privileged_measurements" in final_obs_i:
+                    feats["privileged_measurements"] = (
+                        final_obs_i["privileged_measurements"][0].cpu().numpy()
+                    )
+            else:
+                feats = backbone.encode_obs_to_features(env_idx=i)
+                if "privileged_measurements" in next_obs_device:
+                    feats["privileged_measurements"] = (
+                        next_obs_device["privileged_measurements"][i].cpu().numpy()
+                    )
+            next_obs_features_batch.append(feats)
 
-        transition_idx = replay_buffer.add(
-            obs=obs_features,
-            next_obs=next_obs_features,
-            action=action_np,
-            action_coeffs=coeff_np,
-            base_action=base_action_np,
-            reward=reward,
-            terminated=terminated,
-            truncated=truncated,
-        )
-        # Terminal penalty warmup: same ramp as PPO, applied retroactively to
-        # the N replay transitions preceding a penalized terminal frame.
-        if args.terminal_penalty_warmup_n > 0 and args.terminal_hint > 0.0:
-            collision_threshold = -0.5 * args.terminal_hint
-            if terminated and reward < collision_threshold:
-                replay_buffer.apply_terminal_penalty_warmup(
-                    terminal_idx=transition_idx,
-                    terminal_hint=args.terminal_hint,
-                    warmup_n=args.terminal_penalty_warmup_n,
-                )
+        for i in range(num_envs):
+            transition_idx = replay_buffer.add(
+                obs=obs_features_batch[i],
+                next_obs=next_obs_features_batch[i],
+                action=action_np[i],
+                action_coeffs=coeff_np[i],
+                base_action=base_action_np[i],
+                reward=float(reward_np[i]),
+                terminated=bool(terminated_np[i]),
+                truncated=bool(truncated_np[i]),
+            )
+            # Terminal penalty warmup: same ramp as PPO, applied retroactively to
+            # the N replay transitions preceding a penalized terminal frame.
+            if args.terminal_penalty_warmup_n > 0 and args.terminal_hint > 0.0:
+                collision_threshold = -0.5 * args.terminal_hint
+                if terminated_np[i] and reward_np[i] < collision_threshold:
+                    replay_buffer.apply_terminal_penalty_warmup(
+                        terminal_idx=transition_idx,
+                        terminal_hint=args.terminal_hint,
+                        warmup_n=args.terminal_penalty_warmup_n,
+                    )
         _t_env += time.perf_counter() - _t0
 
         # Reset obs (SyncVectorEnv auto-resets on done).
         next_obs = next_obs_device
 
-        # Debug viz.
+        # Debug viz — one pass per env.
         if debug_viz is not None:
-            _viz_episode_step_rewards.append((global_step, reward))
             obs_for_viz = {k: v.cpu().numpy() for k, v in next_obs.items()}
-            debug_viz.maybe_write(
-                global_step=global_step,
-                rollout_step=global_step,
-                update_idx=global_step,
-                env_idx=0,
-                obs={k: v[0] for k, v in obs_for_viz.items()},
-                reward=reward,
-                done=terminated,
-                truncated=truncated,
-                sampled_action=np.clip(action_np, -1.0, 1.0),
-                mean_action=np.clip(mean_action_np, -1.0, 1.0),
-                base_mean_action=np.clip(base_action_np, -1.0, 1.0),
-                target_speed_logits=target_speed_logits_np,
-                residual_coeff_preds=np.concatenate(
-                    [clean_coeff_np, _viz_coeff_log_std]
-                ),
-                residual_attention_weights=None,
-                log_std=_viz_action_log_std,
-                value_estimate=0.0,
-                route_completion=route_completion_by_env[0],
-                speed_hold_frames=0,
-                speed_hold_target_speed=None,
-                q_estimate=q_estimate_for_viz,
-            )
-            if terminated or truncated:
-                # Stamp infraction reason on all written frames from this episode.
-                debug_viz.note_episode_outcome(
-                    env_idx=0,
-                    terminal_infraction_type=terminal_infraction_by_env[0],
+            for i in range(num_envs):
+                _viz_episode_step_rewards[i].append((global_step, float(reward_np[i])))
+                debug_viz.maybe_write(
+                    global_step=global_step,
+                    rollout_step=global_step,
+                    update_idx=global_step,
+                    env_idx=i,
+                    obs={k: v[i] for k, v in obs_for_viz.items()},
+                    reward=float(reward_np[i]),
+                    done=bool(terminated_np[i]),
+                    truncated=bool(truncated_np[i]),
+                    sampled_action=np.clip(action_np[i], -1.0, 1.0),
+                    mean_action=np.clip(mean_action_np[i], -1.0, 1.0),
+                    base_mean_action=np.clip(base_action_np[i], -1.0, 1.0),
+                    target_speed_logits=(
+                        target_speed_logits_np[i]
+                        if target_speed_logits_np is not None
+                        else None
+                    ),
+                    residual_coeff_preds=np.concatenate(
+                        [clean_coeff_np[i], _viz_coeff_log_std]
+                    ),
+                    residual_attention_weights=None,
+                    log_std=_viz_action_log_std,
+                    value_estimate=0.0,
+                    route_completion=route_completion_by_env[i],
+                    speed_hold_frames=0,
+                    speed_hold_target_speed=None,
+                    q_estimate=q_estimate_for_viz if i == 0 else None,
                 )
-                # Compute discounted returns backward and stamp written frames.
-                G = 0.0
-                step_to_return: dict[int, float] = {}
-                for gs, r in reversed(_viz_episode_step_rewards):
-                    G = r + args.gamma * G
-                    step_to_return[gs] = G
-                debug_viz.stamp_episode_forward_returns(step_to_return)
-                _viz_episode_step_rewards = []
+                if terminated_np[i] or truncated_np[i]:
+                    debug_viz.note_episode_outcome(
+                        env_idx=i,
+                        terminal_infraction_type=terminal_infraction_by_env[i],
+                    )
+                    G = 0.0
+                    step_to_return: dict[int, float] = {}
+                    for gs, r in reversed(_viz_episode_step_rewards[i]):
+                        G = r + args.gamma * G
+                        step_to_return[gs] = G
+                    debug_viz.stamp_episode_forward_returns(step_to_return)
+                    _viz_episode_step_rewards[i] = []
 
-        recent_rewards.append(reward)
+        recent_rewards.extend(reward_np.tolist())
 
-        # Episode stats.
-        for ep_return, ep_length in _iter_episode_stats(info):
-            avg_returns.append(ep_return)
-            print(
-                f"[td3] global_step={global_step} episodic_return={ep_return:.4f}",
-                flush=True,
-            )
-            writer.add_scalar("charts/episodic_return", ep_return, global_step)
-            writer.add_scalar("charts/episodic_length", ep_length, global_step)
-            if avg_returns:
-                writer.add_scalar(
-                    "charts/windowed_avg_return", np.mean(avg_returns), global_step
+        # Episode stats — per-env from final_info for correct infraction attribution.
+        if "final_info" in info:
+            for env_idx_ep, single_info in enumerate(info["final_info"]):
+                if single_info is None:
+                    continue
+                episode_info = single_info.get("episode") or single_info.get(
+                    "tfv6_episode"
                 )
-            # Infraction tracking (mirrors PPO: every episode gets one type).
-            infraction = terminal_infraction_by_env[0] or "finished_route"
-            if infraction in infraction_counts:
-                infraction_counts[infraction] += 1
-            episodes_since_infraction_log += 1
-            # Log and reset every N episodes — same formula as PPO:
-            # fraction = count_k / total_episodes (sum of all type counts).
-            if episodes_since_infraction_log >= _INFRACTION_LOG_EVERY_N:
-                total_infraction_episodes = sum(infraction_counts.values())
-                if total_infraction_episodes > 0:
-                    for k in _INFRACTION_TYPES:
-                        writer.add_scalar(
-                            f"infractions/{k}",
-                            infraction_counts[k] / total_infraction_episodes,
-                            global_step,
-                        )
-                infraction_counts = {k: 0 for k in _INFRACTION_TYPES}
-                episodes_since_infraction_log = 0
+                if episode_info is None:
+                    continue
+                ep_return = float(np.asarray(episode_info["r"]).item())
+                ep_length = int(np.asarray(episode_info["l"]).item())
+                avg_returns.append(ep_return)
+                print(
+                    f"[td3] global_step={global_step} episodic_return={ep_return:.4f}",
+                    flush=True,
+                )
+                writer.add_scalar("charts/episodic_return", ep_return, global_step)
+                writer.add_scalar("charts/episodic_length", ep_length, global_step)
+                if avg_returns:
+                    writer.add_scalar(
+                        "charts/windowed_avg_return", np.mean(avg_returns), global_step
+                    )
+                # Infraction tracking (mirrors PPO: every episode gets one type).
+                infraction = terminal_infraction_by_env[env_idx_ep] or "finished_route"
+                if infraction in infraction_counts:
+                    infraction_counts[infraction] += 1
+                episodes_since_infraction_log += 1
+                # Log and reset every N episodes — same formula as PPO:
+                # fraction = count_k / total_episodes (sum of all type counts).
+                if episodes_since_infraction_log >= _INFRACTION_LOG_EVERY_N:
+                    total_infraction_episodes = sum(infraction_counts.values())
+                    if total_infraction_episodes > 0:
+                        for k in _INFRACTION_TYPES:
+                            writer.add_scalar(
+                                f"infractions/{k}",
+                                infraction_counts[k] / total_infraction_episodes,
+                                global_step,
+                            )
+                    infraction_counts = {k: 0 for k in _INFRACTION_TYPES}
+                    episodes_since_infraction_log = 0
         for rc in _iter_reward_components(info):
             for k in _REWARD_COMPONENT_KEYS:
                 writer.add_scalar(f"reward_components/{k}", rc[k], global_step)
@@ -1497,6 +1528,8 @@ def main():
                 f"at step {global_step} in {time.time() - t_buf:.1f}s",
                 flush=True,
             )
+
+        global_step += num_envs
 
     # ── Final checkpoint ──────────────────────────────────────────────────────
     _save_td3_checkpoint(

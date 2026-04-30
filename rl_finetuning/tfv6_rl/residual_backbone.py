@@ -310,29 +310,34 @@ class TFv6ResidualBackbone(nn.Module):
         self._last_base_action_mean = base_action_mean
 
     def encode_obs_to_features(
-        self, obs_dict: dict | None = None
+        self, obs_dict: dict | None = None, env_idx: int = 0
     ) -> dict[str, np.ndarray]:
         """Extract frozen TFv6 outputs as numpy arrays for replay buffer storage.
 
         If obs_dict is provided, runs TFv6 on it first (use for next_obs encoding).
         If None, reads from the cache left by the most recent get_base_action() call.
 
+        env_idx selects which element of the batch to extract. Default 0 is backward
+        compatible with all single-env call sites.
+
         Returns dict with keys: bev [C,H,W], kv_status_mean [token_dim], base_action_mean [route_dim+1].
         """
         if obs_dict is not None:
             with torch.no_grad():
                 self.get_base_action(obs_dict)
-        bev = self.tfv6.bev_features.detach().float().cpu().numpy()[0]  # (C, H, W)
+        bev = (
+            self.tfv6.bev_features.detach().float().cpu().numpy()[env_idx]
+        )  # (C, H, W)
         kv = getattr(self.tfv6.planning_decoder, "kv", None)
         if kv is None:
             raise RuntimeError(
                 "Planning decoder kv not found — call get_base_action() first."
             )
         kv_status_mean = (
-            kv[0, self.n_spatial_tokens :].float().mean(0).cpu().numpy()
+            kv[env_idx, self.n_spatial_tokens :].float().mean(0).cpu().numpy()
         )  # (token_dim,)
         base_action_mean = (
-            self._last_base_action_mean[0].float().cpu().numpy()
+            self._last_base_action_mean[env_idx].float().cpu().numpy()
         )  # (route_dim+1,)
         return {
             "bev": bev,
