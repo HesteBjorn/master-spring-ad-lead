@@ -833,9 +833,13 @@ def main():
     print("[td3] Sent CONFIG to env(s)", flush=True)
 
     # ── Environment ──────────────────────────────────────────────────────────
-    env = gym.vector.SyncVectorEnv(
-        [make_env(args.gym_id, args, run_name, port, config) for port in args.ports]
-    )
+    _env_factories = [
+        make_env(args.gym_id, args, run_name, port, config) for port in args.ports
+    ]
+    if len(args.ports) > 1:
+        env = gym.vector.AsyncVectorEnv(_env_factories)
+    else:
+        env = gym.vector.SyncVectorEnv(_env_factories)
     assert isinstance(env.single_action_space, gym.spaces.Box)
     action_dim = env.single_action_space.shape[0]
 
@@ -1191,7 +1195,7 @@ def main():
                     )
         _t_env += time.perf_counter() - _t0
 
-        # Reset obs (SyncVectorEnv auto-resets on done).
+        # Reset obs (VectorEnv auto-resets on done).
         next_obs = next_obs_device
 
         # Debug viz — one pass per env.
