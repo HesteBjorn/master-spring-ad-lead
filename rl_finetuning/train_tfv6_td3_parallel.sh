@@ -106,6 +106,7 @@ CRITIC_WARMUP_STEPS="${CRITIC_WARMUP_STEPS:-10000}"
 ACTOR_LR="${ACTOR_LR:-1e-4}"
 CRITIC_LR="${CRITIC_LR:-1e-3}"
 SAVE_EVERY="${SAVE_EVERY:-10000}"
+UTD_RATIO="${UTD_RATIO:-1}"
 
 EXTRA_TRAIN_ARGS=()
 if [[ -n "${TRAINER_EXTRA_ARGS:-}" ]]; then
@@ -160,6 +161,7 @@ python -u "${REPO_ROOT}/rl_finetuning/train_parallel_tfv6_td3.py" \
   --actor_lr "${ACTOR_LR}" \
   --critic_lr "${CRITIC_LR}" \
   --save_every "${SAVE_EVERY}" \
+  --utd_ratio "${UTD_RATIO}" \
   --reward_type simple_reward \
   "${EXTRA_TRAIN_ARGS[@]}" \
   "$@"

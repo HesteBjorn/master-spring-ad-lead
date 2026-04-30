@@ -91,3 +91,5 @@ class GlobalConfig(CaRLGlobalConfig):
         # Separate learning rates for actor and twin critics.
         self.actor_lr = 1e-4
         self.critic_lr = 1e-3
+        # Gradient updates per environment step (Update-To-Data ratio).
+        self.utd_ratio = 1

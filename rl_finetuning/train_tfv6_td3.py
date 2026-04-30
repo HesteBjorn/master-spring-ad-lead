@@ -465,6 +465,9 @@ def parse_args(config):
     parser.add_argument('--critic_lr', type=float,
                         default=getattr(config, 'critic_lr', 1e-3))
     parser.add_argument('--max_grad_norm', type=float, default=config.max_grad_norm)
+    parser.add_argument('--utd_ratio', type=int,
+                        default=getattr(config, 'utd_ratio', 1),
+                        help='Gradient updates per environment step (Update-To-Data ratio).')
 
     # ── Residual policy ──────────────────────────────────────────────────────
     parser.add_argument('--use_residual_policy', type=lambda x: bool(strtobool(x)),
@@ -1048,6 +1051,7 @@ def main():
     _sps_step = start_step
     _sps_time = start_time
     _t_fwd = _t_env = _t_buf = _t_train = 0.0
+    critic_updates_done = max(0, start_step - args.learning_starts) * args.utd_ratio
     for global_step in range(start_step, args.total_timesteps):
         # ── COLLECT ──────────────────────────────────────────────────────────
         # Single unified collection path throughout (including warmup).
@@ -1254,107 +1258,117 @@ def main():
             global_step >= args.learning_starts
             and len(replay_buffer) >= args.td3_batch_size
         ):
-            critic_updates_completed = global_step - args.learning_starts + 1
-            _t0 = time.perf_counter()
-            batch = replay_buffer.sample(args.td3_batch_size)
-            _t_buf += time.perf_counter() - _t0
+            for _utd in range(args.utd_ratio):
+                critic_updates_done += 1
+                _t0 = time.perf_counter()
+                batch = replay_buffer.sample(args.td3_batch_size)
+                _t_buf += time.perf_counter() - _t0
 
-            # ── Critic update ─────────────────────────────────────────────────
-            _t0 = time.perf_counter()
-            actor.train()
-            with torch.no_grad():
-                # Target policy smoothing: clipped Gaussian noise on target actor.
-                next_coeffs = actor_target.forward_coeffs_from_features(
-                    batch["next_obs"]
-                )
-                noise = (
-                    torch.randn_like(next_coeffs) * args.target_policy_noise
-                ).clamp(-args.target_noise_clip, args.target_noise_clip)
-                next_coeffs_smoothed = (next_coeffs + noise).clamp(-1.0, 1.0)
-
-                # Twin Q targets: min of two target Q-networks.
-                next_priv = batch["next_obs"].get("privileged_measurements")
-                q1_next = qf1_target(batch["next_obs"], next_coeffs_smoothed, next_priv)
-                q2_next = qf2_target(batch["next_obs"], next_coeffs_smoothed, next_priv)
-                min_q_next = torch.min(q1_next, q2_next)
-
-                # Handle timeout termination (SB3-style):
-                # For truncated episodes (timeouts) the episode is not truly terminal,
-                # so we still bootstrap. dones=terminated handles this correctly.
-                target_q = (
-                    batch["rewards"] + (1.0 - batch["dones"]) * args.gamma * min_q_next
-                )
-
-            # Run online Q-networks (actor forward sets backbone state).
-            # We run actor.forward_coeffs to set backbone._last_base_action_mean,
-            # then pass stored batch["action_coeffs"] to the Q-networks.
-            # This avoids re-running TFv6 for actor+qf1+qf2 separately.
-            _log_coeffs = actor.forward_coeffs_from_features(
-                batch["obs"]
-            )  # sets backbone state; captured for logging
-            priv = batch["obs"].get("privileged_measurements")
-            q1_pred = qf1.forward_with_cached_backbone(batch["action_coeffs"], priv)
-            q2_pred = qf2.forward_with_cached_backbone(batch["action_coeffs"], priv)
-
-            critic_loss = F.mse_loss(q1_pred, target_q) + F.mse_loss(q2_pred, target_q)
-
-            critic_optimizer.zero_grad()
-            critic_loss.backward()
-            critic_grad_norm = nn.utils.clip_grad_norm_(
-                list(qf1.q_head.parameters())
-                + list(qf2.q_head.parameters())
-                + list(backbone.residual_cnn.parameters())
-                + list(backbone.residual_status_proj.parameters()),
-                args.max_grad_norm,
-            )
-            critic_optimizer.step()
-
-            # Keep critic targets synchronized during critic-only warmup so
-            # Bellman bootstrapping does not rely on stale/random target heads.
-            _polyak_update(
-                backbone.residual_cnn,
-                target_backbone.residual_cnn,
-                args.tau,
-            )
-            _polyak_update(
-                backbone.residual_status_proj,
-                target_backbone.residual_status_proj,
-                args.tau,
-            )
-            _polyak_update(qf1.q_head, qf1_target.q_head, args.tau)
-            _polyak_update(qf2.q_head, qf2_target.q_head, args.tau)
-
-            # ── Actor update (delayed + after critic warmup) ──────────────────
-            actor_grad_norm: float = float("nan")
-            if (
-                critic_updates_completed > args.critic_warmup_steps
-                and critic_updates_completed % args.policy_delay == 0
-            ):
-                # Features detached: encoder trained by critic loss only (ResFiT style).
-                pred_coeffs = actor.forward_coeffs_from_features(
-                    batch["obs"], detach_features=True
-                )
-                actor_loss = -qf1.forward_with_cached_backbone(
-                    pred_coeffs, priv, detach_features=True
-                ).mean()
-
-                actor_optimizer.zero_grad()
-                actor_loss.backward()
-                actor_grad_norm = float(
-                    nn.utils.clip_grad_norm_(
-                        actor.residual_out.parameters(), args.max_grad_norm
+                # ── Critic update ─────────────────────────────────────────────────
+                _t0 = time.perf_counter()
+                actor.train()
+                with torch.no_grad():
+                    # Target policy smoothing: clipped Gaussian noise on target actor.
+                    next_coeffs = actor_target.forward_coeffs_from_features(
+                        batch["next_obs"]
                     )
+                    noise = (
+                        torch.randn_like(next_coeffs) * args.target_policy_noise
+                    ).clamp(-args.target_noise_clip, args.target_noise_clip)
+                    next_coeffs_smoothed = (next_coeffs + noise).clamp(-1.0, 1.0)
+
+                    # Twin Q targets: min of two target Q-networks.
+                    next_priv = batch["next_obs"].get("privileged_measurements")
+                    q1_next = qf1_target(
+                        batch["next_obs"], next_coeffs_smoothed, next_priv
+                    )
+                    q2_next = qf2_target(
+                        batch["next_obs"], next_coeffs_smoothed, next_priv
+                    )
+                    min_q_next = torch.min(q1_next, q2_next)
+
+                    # Handle timeout termination (SB3-style):
+                    # For truncated episodes (timeouts) the episode is not truly terminal,
+                    # so we still bootstrap. dones=terminated handles this correctly.
+                    target_q = (
+                        batch["rewards"]
+                        + (1.0 - batch["dones"]) * args.gamma * min_q_next
+                    )
+
+                # Run online Q-networks (actor forward sets backbone state).
+                # We run actor.forward_coeffs to set backbone._last_base_action_mean,
+                # then pass stored batch["action_coeffs"] to the Q-networks.
+                # This avoids re-running TFv6 for actor+qf1+qf2 separately.
+                _log_coeffs = actor.forward_coeffs_from_features(
+                    batch["obs"]
+                )  # sets backbone state; captured for logging
+                priv = batch["obs"].get("privileged_measurements")
+                q1_pred = qf1.forward_with_cached_backbone(batch["action_coeffs"], priv)
+                q2_pred = qf2.forward_with_cached_backbone(batch["action_coeffs"], priv)
+
+                critic_loss = F.mse_loss(q1_pred, target_q) + F.mse_loss(
+                    q2_pred, target_q
                 )
-                actor_optimizer.step()
-                last_actor_loss_val = float(actor_loss.item())
-                last_actor_grad_norm = float(actor_grad_norm)
 
-                # Actor target owns a backbone structurally, but the actor
-                # optimizer only updates residual_out. Keep backbone/Q targets
-                # on the critic-step update schedule above.
-                _polyak_update(actor.residual_out, actor_target.residual_out, args.tau)
+                critic_optimizer.zero_grad()
+                critic_loss.backward()
+                critic_grad_norm = nn.utils.clip_grad_norm_(
+                    list(qf1.q_head.parameters())
+                    + list(qf2.q_head.parameters())
+                    + list(backbone.residual_cnn.parameters())
+                    + list(backbone.residual_status_proj.parameters()),
+                    args.max_grad_norm,
+                )
+                critic_optimizer.step()
 
-            _t_train += time.perf_counter() - _t0
+                # Keep critic targets synchronized during critic-only warmup so
+                # Bellman bootstrapping does not rely on stale/random target heads.
+                _polyak_update(
+                    backbone.residual_cnn,
+                    target_backbone.residual_cnn,
+                    args.tau,
+                )
+                _polyak_update(
+                    backbone.residual_status_proj,
+                    target_backbone.residual_status_proj,
+                    args.tau,
+                )
+                _polyak_update(qf1.q_head, qf1_target.q_head, args.tau)
+                _polyak_update(qf2.q_head, qf2_target.q_head, args.tau)
+
+                # ── Actor update (delayed + after critic warmup) ──────────────────
+                actor_grad_norm: float = float("nan")
+                if (
+                    critic_updates_done > args.critic_warmup_steps
+                    and critic_updates_done % args.policy_delay == 0
+                ):
+                    # Features detached: encoder trained by critic loss only (ResFiT style).
+                    pred_coeffs = actor.forward_coeffs_from_features(
+                        batch["obs"], detach_features=True
+                    )
+                    actor_loss = -qf1.forward_with_cached_backbone(
+                        pred_coeffs, priv, detach_features=True
+                    ).mean()
+
+                    actor_optimizer.zero_grad()
+                    actor_loss.backward()
+                    actor_grad_norm = float(
+                        nn.utils.clip_grad_norm_(
+                            actor.residual_out.parameters(), args.max_grad_norm
+                        )
+                    )
+                    actor_optimizer.step()
+                    last_actor_loss_val = float(actor_loss.item())
+                    last_actor_grad_norm = float(actor_grad_norm)
+
+                    # Actor target owns a backbone structurally, but the actor
+                    # optimizer only updates residual_out. Keep backbone/Q targets
+                    # on the critic-step update schedule above.
+                    _polyak_update(
+                        actor.residual_out, actor_target.residual_out, args.tau
+                    )
+
+                _t_train += time.perf_counter() - _t0
 
             # ── Logging ───────────────────────────────────────────────────────
             if global_step % 100 == 0:
