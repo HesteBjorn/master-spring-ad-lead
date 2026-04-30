@@ -196,7 +196,12 @@ class DictReplayBuffer:
         self.obs_buf: dict[str, np.ndarray] = {}
         self.next_obs_buf: dict[str, np.ndarray] = {}
         for key, space in obs_space.spaces.items():
-            dtype = np.uint8 if space.dtype == np.uint8 else np.float32
+            if space.dtype == np.uint8:
+                dtype = np.uint8
+            elif int(np.prod(space.shape)) > 10_000:
+                dtype = np.float16  # large feature maps (e.g. bev: 512×10×12) stored as fp16 to halve RAM
+            else:
+                dtype = np.float32
             self.obs_buf[key] = np.zeros((capacity,) + space.shape, dtype=dtype)
             self.next_obs_buf[key] = np.zeros((capacity,) + space.shape, dtype=dtype)
 
