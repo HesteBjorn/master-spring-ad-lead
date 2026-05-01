@@ -239,34 +239,6 @@ class DictReplayBuffer:
             self.full = True
         return insert_idx
 
-    def apply_terminal_penalty_warmup(
-        self,
-        *,
-        terminal_idx: int,
-        terminal_hint: float,
-        warmup_n: int,
-    ) -> None:
-        """Mirror PPO's pre-terminal reward ramp for online TD3 replay.
-
-        At step T-k: add -terminal_hint * (N-k)/N. Stops at episode boundaries
-        so only transitions from the same just-finished episode are shaped.
-        """
-        if warmup_n <= 0 or terminal_hint <= 0.0:
-            return
-        max_idx = self.capacity if self.full else self.pos
-        if max_idx <= 1:
-            return
-        for k in range(1, warmup_n + 1):
-            if not self.full and terminal_idx - k < 0:
-                break
-            idx = (terminal_idx - k) % self.capacity
-            if idx >= max_idx:
-                break
-            if self.dones[idx, 0] > 0.5 or self.timeouts[idx, 0] > 0.5:
-                break
-            fraction = float(warmup_n - k) / float(warmup_n)
-            self.rewards[idx, 0] -= terminal_hint * fraction
-
     def sample(self, batch_size: int):
         """Sample a random minibatch, return tensors on self.device."""
         max_idx = self.capacity if self.full else self.pos
@@ -1020,6 +992,12 @@ def main():
     num_envs = len(args.ports)
     route_completion_by_env = [0.0] * num_envs
     terminal_infraction_by_env = [""] * num_envs
+    # Per-env history of replay buffer indices for terminal_penalty_warmup.
+    # With num_envs>1 the buffer interleaves transitions from different envs, so
+    # walking back by raw index would contaminate the wrong env's transitions.
+    _env_buf_history: list[deque] = [
+        deque(maxlen=max(1, args.terminal_penalty_warmup_n)) for _ in range(num_envs)
+    ]
 
     # Infraction accumulator — reset each time infractions are logged.
     infraction_counts: dict[str, int] = {k: 0 for k in _INFRACTION_TYPES}
@@ -1418,16 +1396,24 @@ def main():
                 terminated=bool(terminated_np[i]),
                 truncated=bool(truncated_np[i]),
             )
-            # Terminal penalty warmup: same ramp as PPO, applied retroactively to
-            # the N replay transitions preceding a penalized terminal frame.
+            _env_buf_history[i].append(transition_idx)
+            # Terminal penalty warmup: ramp applied retroactively to the N transitions
+            # preceding a penalized terminal frame, using per-env index history so that
+            # interleaved multi-env buffer positions don't contaminate other envs.
             if args.terminal_penalty_warmup_n > 0 and args.terminal_hint > 0.0:
                 collision_threshold = -0.5 * args.terminal_hint
                 if terminated_np[i] and reward_np[i] < collision_threshold:
-                    replay_buffer.apply_terminal_penalty_warmup(
-                        terminal_idx=transition_idx,
-                        terminal_hint=args.terminal_hint,
-                        warmup_n=args.terminal_penalty_warmup_n,
-                    )
+                    history = list(
+                        _env_buf_history[i]
+                    )  # oldest … terminal (last entry)
+                    warmup_n = args.terminal_penalty_warmup_n
+                    for k, idx in enumerate(reversed(history[:-1]), start=1):
+                        fraction = float(warmup_n - k) / float(warmup_n)
+                        if fraction <= 0.0:
+                            break
+                        replay_buffer.rewards[idx, 0] -= args.terminal_hint * fraction
+            if terminated_np[i] or truncated_np[i]:
+                _env_buf_history[i].clear()
 
         # Kick off the next CARLA render before Python housekeeping.
         env.step_async(action_np)
