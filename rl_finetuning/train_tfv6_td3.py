@@ -267,13 +267,18 @@ class DictReplayBuffer:
         Must be called from the main thread to avoid CUDA context contention.
         """
 
-        def _t(arr: np.ndarray) -> torch.Tensor:
-            dtype = torch.uint8 if arr.dtype == np.uint8 else torch.float32
+        def _t(arr: np.ndarray, key: str | None = None) -> torch.Tensor:
+            if arr.dtype == np.uint8:
+                dtype = torch.uint8
+            elif key == "bev" and arr.dtype == np.float16:
+                dtype = torch.float16
+            else:
+                dtype = torch.float32
             return torch.tensor(arr, dtype=dtype, device=self.device)
 
         return {
-            "obs": {k: _t(v) for k, v in np_batch["obs"].items()},
-            "next_obs": {k: _t(v) for k, v in np_batch["next_obs"].items()},
+            "obs": {k: _t(v, k) for k, v in np_batch["obs"].items()},
+            "next_obs": {k: _t(v, k) for k, v in np_batch["next_obs"].items()},
             "actions": _t(np_batch["actions"]),
             "action_coeffs": _t(np_batch["action_coeffs"]),
             "base_actions": _t(np_batch["base_actions"]),
