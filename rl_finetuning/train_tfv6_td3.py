@@ -23,6 +23,7 @@ import pathlib
 import random
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 
 try:
@@ -239,38 +240,51 @@ class DictReplayBuffer:
             self.full = True
         return insert_idx
 
-    def sample(self, batch_size: int):
-        """Sample a random minibatch, return tensors on self.device."""
+    def sample_numpy(self, batch_size: int) -> dict:
+        """CPU-only: draw random indices and fancy-index all arrays into contiguous numpy chunks.
+
+        Sorting the indices improves cache locality on large BEV arrays (ascending
+        memory reads are friendlier to the hardware prefetcher than random jumps).
+        Safe to call from a background thread — reads only, no writes.
+        """
         max_idx = self.capacity if self.full else self.pos
         indices = np.random.randint(0, max_idx, size=batch_size)
+        indices.sort()
+        return {
+            "obs": {k: self.obs_buf[k][indices] for k in self.obs_buf},
+            "next_obs": {k: self.next_obs_buf[k][indices] for k in self.next_obs_buf},
+            "actions": self.actions[indices],
+            "action_coeffs": self.action_coeffs[indices],
+            "base_actions": self.base_actions[indices],
+            "rewards": self.rewards[indices],
+            "dones": self.dones[indices],
+            "timeouts": self.timeouts[indices],
+        }
 
-        obs_tensors: dict[str, torch.Tensor] = {}
-        next_obs_tensors: dict[str, torch.Tensor] = {}
-        for key in self.obs_buf:
-            dtype = (
-                torch.uint8 if self.obs_buf[key].dtype == np.uint8 else torch.float32
-            )
-            obs_tensors[key] = torch.tensor(
-                self.obs_buf[key][indices], dtype=dtype, device=self.device
-            )
-            next_obs_tensors[key] = torch.tensor(
-                self.next_obs_buf[key][indices], dtype=dtype, device=self.device
-            )
+    def numpy_to_tensors(self, np_batch: dict) -> dict:
+        """GPU part: move a numpy batch returned by sample_numpy to self.device.
+
+        Must be called from the main thread to avoid CUDA context contention.
+        """
+
+        def _t(arr: np.ndarray) -> torch.Tensor:
+            dtype = torch.uint8 if arr.dtype == np.uint8 else torch.float32
+            return torch.tensor(arr, dtype=dtype, device=self.device)
 
         return {
-            "obs": obs_tensors,
-            "next_obs": next_obs_tensors,
-            "actions": torch.tensor(self.actions[indices], device=self.device),
-            "action_coeffs": torch.tensor(
-                self.action_coeffs[indices], device=self.device
-            ),
-            "base_actions": torch.tensor(
-                self.base_actions[indices], device=self.device
-            ),
-            "rewards": torch.tensor(self.rewards[indices], device=self.device),
-            "dones": torch.tensor(self.dones[indices], device=self.device),
-            "timeouts": torch.tensor(self.timeouts[indices], device=self.device),
+            "obs": {k: _t(v) for k, v in np_batch["obs"].items()},
+            "next_obs": {k: _t(v) for k, v in np_batch["next_obs"].items()},
+            "actions": _t(np_batch["actions"]),
+            "action_coeffs": _t(np_batch["action_coeffs"]),
+            "base_actions": _t(np_batch["base_actions"]),
+            "rewards": _t(np_batch["rewards"]),
+            "dones": _t(np_batch["dones"]),
+            "timeouts": _t(np_batch["timeouts"]),
         }
+
+    def sample(self, batch_size: int) -> dict:
+        """Sample a random minibatch, return tensors on self.device."""
+        return self.numpy_to_tensors(self.sample_numpy(batch_size))
 
     def __len__(self) -> int:
         return self.capacity if self.full else self.pos
@@ -1061,6 +1075,12 @@ def main():
         obs_features_pending.append(_feats)
     env.step_async(action_np_pending)
 
+    # ── Buffer prefetch pool ──────────────────────────────────────────────────
+    # One worker per UTD slot — all batches are sampled in parallel during the
+    # CARLA render window so every GPU training iteration starts with zero wait.
+    _buf_prefetch_pool = ThreadPoolExecutor(max_workers=args.utd_ratio)
+    _buf_prefetch_futures: list = [None] * args.utd_ratio
+
     # ── TD3 training loop ─────────────────────────────────────────────────────
     start_step = global_step
     _sps_step = start_step
@@ -1074,10 +1094,20 @@ def main():
             global_step >= args.learning_starts
             and len(replay_buffer) >= args.td3_batch_size
         ):
-            for _utd in range(args.utd_ratio):
+            for utd_idx in range(args.utd_ratio):
                 critic_updates_done += 1
                 _t0 = time.perf_counter()
-                batch = replay_buffer.sample(args.td3_batch_size)
+                _future = _buf_prefetch_futures[utd_idx]
+                _np_batch = (
+                    _future.result()
+                    if _future is not None
+                    else replay_buffer.sample_numpy(args.td3_batch_size)
+                )
+                # Refill this slot immediately; it will be ready for the next cycle.
+                _buf_prefetch_futures[utd_idx] = _buf_prefetch_pool.submit(
+                    replay_buffer.sample_numpy, args.td3_batch_size
+                )
+                batch = replay_buffer.numpy_to_tensors(_np_batch)
                 _t_buf += time.perf_counter() - _t0
 
                 # ── Critic update ─────────────────────────────────────────────────
@@ -1417,6 +1447,17 @@ def main():
 
         # Kick off the next CARLA render before Python housekeeping.
         env.step_async(action_np)
+        # All UTD slots were refilled by the loop above, so in steady state this
+        # is a no-op. It only fires on the very first entry or after a skipped UPDATE.
+        if (
+            global_step >= args.learning_starts
+            and len(replay_buffer) >= args.td3_batch_size
+        ):
+            for _slot in range(args.utd_ratio):
+                if _buf_prefetch_futures[_slot] is None:
+                    _buf_prefetch_futures[_slot] = _buf_prefetch_pool.submit(
+                        replay_buffer.sample_numpy, args.td3_batch_size
+                    )
         _t_fwd += time.perf_counter() - _t0
 
         # Advance pending state for the next cycle.
@@ -1569,6 +1610,7 @@ def main():
         env.step_wait()
     except Exception:
         pass
+    _buf_prefetch_pool.shutdown(wait=False, cancel_futures=True)
 
     # ── Final checkpoint ──────────────────────────────────────────────────────
     _save_td3_checkpoint(
