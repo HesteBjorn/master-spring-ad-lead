@@ -77,6 +77,16 @@ class ObsCodec:
                 )
             )
 
+        _speed_history_len = (
+            int(getattr(rl_config, "speed_history_len", 0))
+            if rl_config is not None
+            else 0
+        )
+        if _speed_history_len > 0:
+            self.specs.append(
+                ObsSpec("speed_history", (_speed_history_len,), np.float32)
+            )
+
         self._spec_map = {spec.key: spec for spec in self.specs}
 
     @property

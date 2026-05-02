@@ -145,6 +145,11 @@ class TFv6ResidualBackbone(nn.Module):
                     rl_config, "disable_residual_route", self.disable_residual_route
                 )
             )
+        self.speed_history_len: int = (
+            int(getattr(rl_config, "speed_history_len", 0))
+            if rl_config is not None
+            else 0
+        )
 
         # ── Buffers (non-persistent: computed at init, not saved in state_dict) ─
         self.value_token_dim: int = self.training_config.transfuser_token_dim
@@ -198,8 +203,9 @@ class TFv6ResidualBackbone(nn.Module):
         self.rl_config = rl_config
 
     def _extract_tfv6_obs(self, obs_dict: dict) -> dict:
-        """Strip privileged measurements — not a TFv6 input."""
-        return {k: v for k, v in obs_dict.items() if k != "privileged_measurements"}
+        """Strip RL-only keys that are not TFv6 sensor inputs."""
+        _skip = {"privileged_measurements", "speed_history"}
+        return {k: v for k, v in obs_dict.items() if k not in _skip}
 
     def get_base_action(
         self, obs_dict: dict
@@ -378,5 +384,9 @@ class TFv6ResidualBackbone(nn.Module):
             priv_dim = privileged_measurement_dim(self.rl_config)
             obs["privileged_measurements"] = spaces.Box(
                 -np.inf, np.inf, shape=(priv_dim,), dtype=np.float32
+            )
+        if self.speed_history_len > 0:
+            obs["speed_history"] = spaces.Box(
+                -np.inf, np.inf, shape=(self.speed_history_len,), dtype=np.float32
             )
         return spaces.Dict(obs)

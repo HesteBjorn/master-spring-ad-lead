@@ -483,6 +483,9 @@ def parse_args(config):
                         nargs='?', const=True)
     parser.add_argument('--num_value_measurements', type=int,
                         default=getattr(config, 'num_value_measurements', 0))
+    parser.add_argument('--speed_history_len', type=int,
+                        default=getattr(config, 'speed_history_len', 0),
+                        help='Number of recent speed values appended to actor+critic inputs (0=disabled).')
 
     # ── Reward ───────────────────────────────────────────────────────────────
     parser.add_argument('--reward_type', type=str, default=config.reward_type)
@@ -1077,6 +1080,8 @@ def main():
             _feats["privileged_measurements"] = (
                 next_obs["privileged_measurements"][_i].cpu().numpy()
             )
+        if "speed_history" in next_obs:
+            _feats["speed_history"] = next_obs["speed_history"][_i].cpu().numpy()
         obs_features_pending.append(_feats)
     env.step_async(action_np_pending)
 
@@ -1130,11 +1135,18 @@ def main():
 
                     # Twin Q targets: min of two target Q-networks.
                     next_priv = batch["next_obs"].get("privileged_measurements")
+                    next_speed_hist = batch["next_obs"].get("speed_history")
                     q1_next = qf1_target(
-                        batch["next_obs"], next_coeffs_smoothed, next_priv
+                        batch["next_obs"],
+                        next_coeffs_smoothed,
+                        next_priv,
+                        next_speed_hist,
                     )
                     q2_next = qf2_target(
-                        batch["next_obs"], next_coeffs_smoothed, next_priv
+                        batch["next_obs"],
+                        next_coeffs_smoothed,
+                        next_priv,
+                        next_speed_hist,
                     )
                     min_q_next = torch.min(q1_next, q2_next)
 
@@ -1154,8 +1166,13 @@ def main():
                     batch["obs"]
                 )  # sets backbone state; captured for logging
                 priv = batch["obs"].get("privileged_measurements")
-                q1_pred = qf1.forward_with_cached_backbone(batch["action_coeffs"], priv)
-                q2_pred = qf2.forward_with_cached_backbone(batch["action_coeffs"], priv)
+                speed_hist = batch["obs"].get("speed_history")
+                q1_pred = qf1.forward_with_cached_backbone(
+                    batch["action_coeffs"], priv, speed_history=speed_hist
+                )
+                q2_pred = qf2.forward_with_cached_backbone(
+                    batch["action_coeffs"], priv, speed_history=speed_hist
+                )
 
                 critic_loss = F.mse_loss(q1_pred, target_q) + F.mse_loss(
                     q2_pred, target_q
@@ -1198,7 +1215,10 @@ def main():
                         batch["obs"], detach_features=True
                     )
                     actor_loss = -qf1.forward_with_cached_backbone(
-                        pred_coeffs, priv, detach_features=True
+                        pred_coeffs,
+                        priv,
+                        detach_features=True,
+                        speed_history=speed_hist,
                     ).mean()
 
                     actor_optimizer.zero_grad()
@@ -1365,7 +1385,10 @@ def main():
             q_estimate_for_viz: float | None = None
             if debug_viz is not None and global_step >= args.learning_starts:
                 priv_viz = next_obs.get("privileged_measurements")
-                q1_val = qf1.forward_with_cached_backbone(coeff_tensor, priv_viz)
+                speed_hist_viz = next_obs.get("speed_history")
+                q1_val = qf1.forward_with_cached_backbone(
+                    coeff_tensor, priv_viz, speed_history=speed_hist_viz
+                )
                 q_estimate_for_viz = float(q1_val[0].item())
 
         action_np = action_tensor.cpu().numpy()  # (num_envs, action_dim)
@@ -1390,6 +1413,8 @@ def main():
                 feats["privileged_measurements"] = (
                     next_obs["privileged_measurements"][i].cpu().numpy()
                 )
+            if "speed_history" in next_obs:
+                feats["speed_history"] = next_obs["speed_history"][i].cpu().numpy()
             obs_features_next.append(feats)
 
         # Build next_obs_features_batch: start from the cache-extracted features,
@@ -1415,6 +1440,10 @@ def main():
                 if "privileged_measurements" in final_obs_i:
                     feats["privileged_measurements"] = (
                         final_obs_i["privileged_measurements"][0].cpu().numpy()
+                    )
+                if "speed_history" in final_obs_i:
+                    feats["speed_history"] = (
+                        final_obs_i["speed_history"][0].cpu().numpy()
                     )
                 next_obs_features_batch[i] = feats
 

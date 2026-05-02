@@ -6,6 +6,7 @@ from __future__ import annotations
 import math
 import os
 import pathlib
+from collections import deque
 
 import carla
 import cv2
@@ -223,6 +224,7 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         self.standstill_speed_hold_reward_accumulator = 0.0
         self.pending_speed_hold_frames = 0
         self.pending_speed_hold_target_speed = None
+        self._speed_history: deque | None = None
         # Route-local state must be reset each route. The leaderboard reuses the
         # same agent instance across route repetitions.
         self.initialized_route = False
@@ -371,6 +373,11 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
 
         self.pending_speed_hold_frames = 0
         self.pending_speed_hold_target_speed = None
+
+        _n = int(getattr(self.rl_config, "speed_history_len", 0))
+        if _n > 0:
+            self._speed_history = deque([0.0] * _n, maxlen=_n)
+
         self.initialized_route = True
 
     def get_waypoint_route(self):
@@ -705,6 +712,10 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
             obs["privileged_measurements"] = self._build_privileged_measurements(
                 timestamp, waypoint_route
             )
+
+        if self._speed_history is not None:
+            obs["speed_history"] = np.array(self._speed_history, dtype=np.float32)
+            self._speed_history.append(float(obs["speed"][0]))
 
         return {
             "observation": obs,

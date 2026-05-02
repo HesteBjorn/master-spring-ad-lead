@@ -68,6 +68,10 @@ class GlobalConfig(CaRLGlobalConfig):
         self.residual_alpha_speed = (
             0.15  # max speed correction in normalized space (fraction of max_speed)
         )
+        # Speed history: append N recent ego-speed scalars to actor and critic inputs
+        # to break the Markov violation at stop signs. 0 = disabled.
+        # Set to e.g. 10 for 1 s of history at 10 Hz.
+        self.speed_history_len = 0
 
         # ── TD3 algorithm hyperparameters ─────────────────────────────────
         # Replay buffer capacity (transitions).

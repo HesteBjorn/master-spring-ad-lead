@@ -78,7 +78,7 @@ class TFv6ResidualActorTD3(nn.Module):
         # gradients alive (no dead zone from action.clamp saturation).
         # Final linear zero-initialized so actor starts at TFv6 base policy (tanh(0)=0).
         self.residual_out = nn.Sequential(
-            nn.Linear(token_dim * 2, hidden_dim),
+            nn.Linear(token_dim * 2 + backbone.speed_history_len, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, eff_rank + 1),
             nn.Tanh(),
@@ -116,6 +116,8 @@ class TFv6ResidualActorTD3(nn.Module):
         features = self.backbone.get_residual_features(base_action_mean)
         if detach_features:
             features = features.detach()
+        if self.backbone.speed_history_len > 0 and "speed_history" in obs_dict:
+            features = torch.cat([features, obs_dict["speed_history"].float()], dim=1)
         return self.residual_out(features)
 
     def forward_coeffs_from_features(
@@ -143,6 +145,10 @@ class TFv6ResidualActorTD3(nn.Module):
         )
         if detach_features:
             features = features.detach()
+        if self.backbone.speed_history_len > 0 and "speed_history" in feature_obs:
+            features = torch.cat(
+                [features, feature_obs["speed_history"].float()], dim=1
+            )
         return self.residual_out(features)
 
     def coeffs_to_action(self, coeff_means: torch.Tensor) -> torch.Tensor:
@@ -236,7 +242,8 @@ class TFv6ResidualQNetworkTD3(nn.Module):
         priv_dim = (
             self.num_privileged_measurements if self.use_privileged_measurements else 0
         )
-        q_in_dim = token_dim * 2 + action_dim + priv_dim
+        self.speed_history_len: int = backbone.speed_history_len
+        q_in_dim = token_dim * 2 + action_dim + priv_dim + self.speed_history_len
 
         q_hidden_dim = 512
         # Q-head mirrors PPO value_head, but uses a wider TD3 critic head.
@@ -260,6 +267,7 @@ class TFv6ResidualQNetworkTD3(nn.Module):
         obs_dict: dict,
         action_coeffs: torch.Tensor,
         privileged: torch.Tensor | None = None,
+        speed_history: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute Q(obs, action_coeffs) reusing cached backbone state.
 
@@ -271,6 +279,7 @@ class TFv6ResidualQNetworkTD3(nn.Module):
             obs_dict:      observation dict (used only to locate backbone — not re-run)
             action_coeffs: [B, rank+1]  coefficient-space action
             privileged:    [B, num_priv] optional privileged measurements
+            speed_history: [B, speed_history_len] optional recent ego speeds
 
         Returns:
             q_value: [B, 1]
@@ -285,6 +294,8 @@ class TFv6ResidualQNetworkTD3(nn.Module):
         parts = [features, action_coeffs.float()]
         if self.use_privileged_measurements and privileged is not None:
             parts.append(privileged.float())
+        if self.speed_history_len > 0 and speed_history is not None:
+            parts.append(speed_history.float())
         x = torch.cat(parts, dim=1)
         return self.q_head(x)
 
@@ -293,6 +304,7 @@ class TFv6ResidualQNetworkTD3(nn.Module):
         action_coeffs: torch.Tensor,
         privileged: torch.Tensor | None = None,
         detach_features: bool = False,
+        speed_history: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Like forward() but without obs_dict, purely from cached backbone state.
 
@@ -302,6 +314,7 @@ class TFv6ResidualQNetworkTD3(nn.Module):
         Args:
             detach_features: if True, stop gradients from the Q-head back into
                 the CNN encoder. Use during actor updates (ResFiT / DrQ-v2 pattern).
+            speed_history: [B, speed_history_len] optional recent ego speeds.
         """
         base_action = self.backbone._last_base_action_mean
         if base_action is None:
@@ -315,5 +328,7 @@ class TFv6ResidualQNetworkTD3(nn.Module):
         parts = [features, action_coeffs.float()]
         if self.use_privileged_measurements and privileged is not None:
             parts.append(privileged.float())
+        if self.speed_history_len > 0 and speed_history is not None:
+            parts.append(speed_history.float())
         x = torch.cat(parts, dim=1)
         return self.q_head(x)
