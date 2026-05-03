@@ -97,3 +97,5 @@ class GlobalConfig(CaRLGlobalConfig):
         self.critic_lr = 1e-3
         # Gradient updates per environment step (Update-To-Data ratio).
         self.utd_ratio = 1
+        # N-step return horizon. 1 = standard 1-step TD (default, backward-compatible).
+        self.n_step_returns = 1

@@ -212,6 +212,9 @@ class DictReplayBuffer:
         self.rewards = np.zeros((capacity, 1), dtype=np.float32)
         self.dones = np.zeros((capacity, 1), dtype=np.float32)
         self.timeouts = np.zeros((capacity, 1), dtype=np.float32)
+        self.n_step_gammas = np.ones(
+            (capacity, 1), dtype=np.float32
+        )  # overwritten by add()
 
     def add(
         self,
@@ -223,6 +226,7 @@ class DictReplayBuffer:
         reward: float,
         terminated: bool,
         truncated: bool,
+        n_step_gamma: float = 0.0,
     ) -> int:
         insert_idx = self.pos
         for key in self.obs_buf:
@@ -235,6 +239,7 @@ class DictReplayBuffer:
         # SB3-style: done = terminated only (not truncated), timeout = truncated.
         self.dones[insert_idx] = float(terminated)
         self.timeouts[insert_idx] = float(truncated)
+        self.n_step_gammas[insert_idx] = n_step_gamma
         self.pos = (self.pos + 1) % self.capacity
         if self.pos == 0:
             self.full = True
@@ -259,6 +264,7 @@ class DictReplayBuffer:
             "rewards": self.rewards[indices],
             "dones": self.dones[indices],
             "timeouts": self.timeouts[indices],
+            "n_step_gamma": self.n_step_gammas[indices],
         }
 
     def numpy_to_tensors(self, np_batch: dict) -> dict:
@@ -285,6 +291,7 @@ class DictReplayBuffer:
             "rewards": _t(np_batch["rewards"]),
             "dones": _t(np_batch["dones"]),
             "timeouts": _t(np_batch["timeouts"]),
+            "n_step_gamma": _t(np_batch["n_step_gamma"]),
         }
 
     def sample(self, batch_size: int) -> dict:
@@ -314,6 +321,7 @@ class DictReplayBuffer:
             "rewards": self.rewards[:fill],
             "dones": self.dones[:fill],
             "timeouts": self.timeouts[:fill],
+            "n_step_gammas": self.n_step_gammas[:fill],
         }
         for key, arr in self.obs_buf.items():
             data[f"obs_{key}"] = arr[:fill]
@@ -322,11 +330,13 @@ class DictReplayBuffer:
         np.savez(tmp_path, **data)
         os.replace(tmp_path, out_path)
 
-    def load(self, folder: str) -> bool:
+    def load(self, folder: str, default_gamma: float = 0.99) -> bool:
         """Load buffer state from buffer_latest.npz in folder.
 
         Returns True on success, False if file is missing or incompatible
         (capacity mismatch, unknown obs keys). On failure the buffer stays empty.
+        ``default_gamma`` is used to fill n_step_gammas for old buffers that were
+        saved before n_step_gammas was added (gives correct 1-step TD behavior).
         """
         path = os.path.join(folder, "buffer_latest.npz")
         if not os.path.exists(path):
@@ -375,6 +385,10 @@ class DictReplayBuffer:
             self.rewards[:fill] = d["rewards"]
             self.dones[:fill] = d["dones"]
             self.timeouts[:fill] = d["timeouts"]
+            if "n_step_gammas" in d:
+                self.n_step_gammas[:fill] = d["n_step_gammas"]
+            else:
+                self.n_step_gammas[:fill] = default_gamma
         except Exception as exc:
             # Reset to empty on partial load failure.
             self.pos = 0
@@ -393,6 +407,63 @@ def _polyak_update(source: nn.Module, target: nn.Module, tau: float) -> None:
     with torch.no_grad():
         for p_src, p_tgt in zip(source.parameters(), target.parameters(), strict=True):
             p_tgt.data.mul_(1.0 - tau).add_(p_src.data, alpha=tau)
+
+
+# ── N-step accumulator ────────────────────────────────────────────────────────
+
+
+class NStepAccumulator:
+    """Per-env n-step return accumulator for TD3.
+
+    Maintains a sliding window of n consecutive transitions. Once the window
+    is full, the oldest transition is flushed with an accumulated n-step reward
+    and n-step next_obs. At episode end (terminated or truncated) all pending
+    transitions are flushed with their available lookahead.
+
+    With n=1, push() is a transparent pass-through: the transition is returned
+    immediately with n_step_gamma = gamma, identical to standard 1-step TD.
+    """
+
+    def __init__(self, n: int, gamma: float) -> None:
+        self.n = n
+        self.gamma = gamma
+        self._pending: deque = deque()
+
+    def push(self, transition: dict) -> list[dict]:
+        """Add a transition; return a list of transitions ready for the buffer.
+
+        Each returned dict has all original keys plus ``n_step_gamma``
+        (gamma^k where k is the actual lookahead used, i.e. gamma^n in the
+        steady state and gamma^k < gamma^n near episode boundaries).
+        """
+        self._pending.append(transition)
+        if transition["terminated"] or transition["truncated"]:
+            return self._flush_all()
+        if len(self._pending) >= self.n:
+            return [self._flush_oldest()]
+        return []
+
+    def _flush_oldest(self) -> dict:
+        """Flush the oldest pending transition with accumulated n-step reward."""
+        result = dict(self._pending[0])
+        n_step_reward = 0.0
+        discount = 1.0
+        for trans in self._pending:
+            n_step_reward += discount * trans["reward"]
+            discount *= self.gamma
+        result["reward"] = n_step_reward
+        result["next_obs"] = self._pending[-1]["next_obs"]
+        result["terminated"] = self._pending[-1]["terminated"]
+        result["truncated"] = self._pending[-1]["truncated"]
+        result["n_step_gamma"] = discount  # gamma^n normally, gamma^k at boundaries
+        self._pending.popleft()
+        return result
+
+    def _flush_all(self) -> list[dict]:
+        results = []
+        while self._pending:
+            results.append(self._flush_oldest())
+        return results
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -459,6 +530,9 @@ def parse_args(config):
     parser.add_argument('--utd_ratio', type=int,
                         default=getattr(config, 'utd_ratio', 1),
                         help='Gradient updates per environment step (Update-To-Data ratio).')
+    parser.add_argument('--n_step_returns', type=int,
+                        default=getattr(config, 'n_step_returns', 1),
+                        help='N-step return horizon. 1=standard 1-step TD (default).')
 
     # ── Residual policy ──────────────────────────────────────────────────────
     parser.add_argument('--use_residual_policy', type=lambda x: bool(strtobool(x)),
@@ -938,7 +1012,7 @@ def main():
         )
         writer.add_scalar("charts/restart", 1, global_step)
         t_buf = time.time()
-        buf_loaded = replay_buffer.load(exp_folder)
+        buf_loaded = replay_buffer.load(exp_folder, default_gamma=args.gamma)
         if buf_loaded:
             print(
                 f"[td3] Loaded buffer ({len(replay_buffer)} transitions) "
@@ -1018,7 +1092,13 @@ def main():
     # With num_envs>1 the buffer interleaves transitions from different envs, so
     # walking back by raw index would contaminate the wrong env's transitions.
     _env_buf_history: list[deque] = [
-        deque(maxlen=max(1, args.terminal_penalty_warmup_n)) for _ in range(num_envs)
+        deque(maxlen=max(1, args.terminal_penalty_warmup_n + args.n_step_returns - 1))
+        for _ in range(num_envs)
+    ]
+    # Per-env n-step accumulators. With n_step_returns=1 these are pass-throughs.
+    nstep_accumulators = [
+        NStepAccumulator(n=args.n_step_returns, gamma=args.gamma)
+        for _ in range(num_envs)
     ]
 
     # Infraction accumulator — reset each time infractions are logged.
@@ -1153,9 +1233,11 @@ def main():
                     # Handle timeout termination (SB3-style):
                     # For truncated episodes (timeouts) the episode is not truly terminal,
                     # so we still bootstrap. dones=terminated handles this correctly.
+                    # n_step_gamma = gamma^n in the steady state; gamma^k at episode
+                    # boundaries where k < n transitions were available.
                     target_q = (
                         batch["rewards"]
-                        + (1.0 - batch["dones"]) * args.gamma * min_q_next
+                        + (1.0 - batch["dones"]) * batch["n_step_gamma"] * min_q_next
                     )
 
                 # Run online Q-networks (actor forward sets backbone state).
@@ -1447,20 +1529,33 @@ def main():
                     )
                 next_obs_features_batch[i] = feats
 
-        # Buffer add: store the pending transition (obs/action from previous step,
-        # reward/done from step_wait just returned).
+        # Buffer add: pass each pending transition through the n-step accumulator
+        # before committing to the replay buffer. With n_step_returns=1 the
+        # accumulator is a transparent pass-through.
         for i in range(num_envs):
-            transition_idx = replay_buffer.add(
-                obs=obs_features_pending[i],
-                next_obs=next_obs_features_batch[i],
-                action=action_np_pending[i],
-                action_coeffs=coeff_np_pending[i],
-                base_action=base_action_np_pending[i],
-                reward=float(reward_np[i]),
-                terminated=bool(terminated_np[i]),
-                truncated=bool(truncated_np[i]),
-            )
-            _env_buf_history[i].append(transition_idx)
+            transition = {
+                "obs": obs_features_pending[i],
+                "next_obs": next_obs_features_batch[i],
+                "action": action_np_pending[i],
+                "action_coeffs": coeff_np_pending[i],
+                "base_action": base_action_np_pending[i],
+                "reward": float(reward_np[i]),
+                "terminated": bool(terminated_np[i]),
+                "truncated": bool(truncated_np[i]),
+            }
+            for flush_dict in nstep_accumulators[i].push(transition):
+                transition_idx = replay_buffer.add(
+                    obs=flush_dict["obs"],
+                    next_obs=flush_dict["next_obs"],
+                    action=flush_dict["action"],
+                    action_coeffs=flush_dict["action_coeffs"],
+                    base_action=flush_dict["base_action"],
+                    reward=flush_dict["reward"],
+                    terminated=flush_dict["terminated"],
+                    truncated=flush_dict["truncated"],
+                    n_step_gamma=flush_dict["n_step_gamma"],
+                )
+                _env_buf_history[i].append(transition_idx)
             # Terminal penalty warmup: ramp applied retroactively to the N transitions
             # preceding a penalized terminal frame, using per-env index history so that
             # interleaved multi-env buffer positions don't contaminate other envs.
