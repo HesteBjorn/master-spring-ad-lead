@@ -527,6 +527,12 @@ def parse_args(config):
     parser.add_argument('--critic_lr', type=float,
                         default=getattr(config, 'critic_lr', 1e-3))
     parser.add_argument('--max_grad_norm', type=float, default=config.max_grad_norm)
+    parser.add_argument('--bc_regularization_coeff', type=float,
+                        default=getattr(config, 'bc_regularization_coeff', 0.0),
+                        help='L2 regularization weight on actor coefficients (TD3+BC-style). '
+                             'reg_loss = gamma * |Q̄| * coeff².mean(). gamma is the maximum '
+                             'fraction of Q the reg can cost (achieved when coeff=±1 everywhere). '
+                             'Recommended: 0.1.')
     parser.add_argument('--utd_ratio', type=int,
                         default=getattr(config, 'utd_ratio', 1),
                         help='Gradient updates per environment step (Update-To-Data ratio).')
@@ -1107,6 +1113,8 @@ def main():
     # Persistent actor scalars — retained across steps so logging doesn't miss them
     # (actor updates on odd global steps; logging fires on even multiples of 100).
     last_actor_loss_val: float = float("nan")
+    last_actor_policy_loss_val: float = float("nan")
+    last_actor_reg_loss_val: float = float("nan")
     last_actor_grad_norm: float = float("nan")
     # Per-episode (global_step, reward) pairs for debug-viz forward-return stamping.
     # One list per env so returns are stamped independently.
@@ -1296,12 +1304,21 @@ def main():
                     pred_coeffs = actor.forward_coeffs_from_features(
                         batch["obs"], detach_features=True
                     )
-                    actor_loss = -qf1.forward_with_cached_backbone(
+                    actor_policy_loss = -qf1.forward_with_cached_backbone(
                         pred_coeffs,
                         priv,
                         detach_features=True,
                         speed_history=speed_hist,
                     ).mean()
+                    q_scale = (
+                        actor_policy_loss.detach().abs()
+                    )  # |Q̄| from current batch, no grad
+                    actor_reg_loss = (
+                        args.bc_regularization_coeff
+                        * q_scale
+                        * pred_coeffs.pow(2).mean()
+                    )
+                    actor_loss = actor_policy_loss + actor_reg_loss
 
                     actor_optimizer.zero_grad()
                     actor_loss.backward()
@@ -1312,6 +1329,8 @@ def main():
                     )
                     actor_optimizer.step()
                     last_actor_loss_val = float(actor_loss.item())
+                    last_actor_policy_loss_val = float(actor_policy_loss.item())
+                    last_actor_reg_loss_val = float(actor_reg_loss.item())
                     last_actor_grad_norm = float(actor_grad_norm)
 
                     # Actor target owns a backbone structurally, but the actor
@@ -1389,6 +1408,14 @@ def main():
                 if not np.isnan(last_actor_loss_val):
                     writer.add_scalar(
                         "losses/actor_loss", last_actor_loss_val, global_step
+                    )
+                    writer.add_scalar(
+                        "losses/actor_policy_loss",
+                        last_actor_policy_loss_val,
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        "losses/actor_reg_loss", last_actor_reg_loss_val, global_step
                     )
                 if not np.isnan(last_actor_grad_norm):
                     writer.add_scalar(
