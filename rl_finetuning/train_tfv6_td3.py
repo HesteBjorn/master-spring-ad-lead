@@ -1633,6 +1633,11 @@ def main():
                             float(pred_coeffs[:, :_eff_rank].mean().item()),
                             global_step,
                         )
+                        writer.add_scalar(
+                            "residual/route_coeff_std",
+                            float(pred_coeffs[:, :_eff_rank].std().item()),
+                            global_step,
+                        )
 
                 if global_step // 1000 > (global_step - num_envs) // 1000:
                     print(
