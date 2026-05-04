@@ -82,8 +82,8 @@ class GlobalConfig(CaRLGlobalConfig):
         self.td3_batch_size = 256
         # Polyak averaging coefficient for target network updates.
         self.tau = 0.005
-        # Actor (and target networks) update every ``policy_delay`` critic steps.
-        self.policy_delay = 2
+        # Actor updates per collected environment step.
+        self.utd_actor = 0.5
         # Std of Gaussian exploration noise added to actor output at rollout.
         self.exploration_noise = 0.1
         # Std of target policy smoothing noise (clipped by target_noise_clip).
@@ -95,7 +95,8 @@ class GlobalConfig(CaRLGlobalConfig):
         # Separate learning rates for actor and twin critics.
         self.actor_lr = 1e-4
         self.critic_lr = 1e-3
-        # Gradient updates per environment step (Update-To-Data ratio).
+        # Critic updates per collected environment step (Update-To-Data ratio).
+        # The TD3 trainer multiplies this by num_envs internally.
         self.utd_ratio = 1
         # N-step return horizon. 1 = standard 1-step TD (default, backward-compatible).
         self.n_step_returns = 1

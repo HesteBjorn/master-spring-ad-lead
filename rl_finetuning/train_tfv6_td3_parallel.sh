@@ -98,7 +98,7 @@ LEARNING_STARTS="${LEARNING_STARTS:-5000}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-10000000}"
 TAU="${TAU:-0.005}"
-POLICY_DELAY="${POLICY_DELAY:-2}"
+UTD_ACTOR="${UTD_ACTOR:-0.5}"
 EXPLORATION_NOISE="${EXPLORATION_NOISE:-0.1}"
 TARGET_POLICY_NOISE="${TARGET_POLICY_NOISE:-0.2}"
 TARGET_NOISE_CLIP="${TARGET_NOISE_CLIP:-0.5}"
@@ -120,7 +120,7 @@ echo "[train-tfv6-td3-parallel] exp_name=${EXP_NAME}"
 echo "[train-tfv6-td3-parallel] carla_root=${CARLA_ROOT}"
 echo "[train-tfv6-td3-parallel] num_envs_per_node=${NUM_ENVS_PER_NODE} num_envs_per_gpu=${NUM_ENVS_PER_GPU}"
 echo "[train-tfv6-td3-parallel] buffer_size=${BUFFER_SIZE} batch_size=${BATCH_SIZE} learning_starts=${LEARNING_STARTS} total_timesteps=${TOTAL_TIMESTEPS}"
-echo "[train-tfv6-td3-parallel] tau=${TAU} policy_delay=${POLICY_DELAY} critic_warmup_steps=${CRITIC_WARMUP_STEPS}"
+echo "[train-tfv6-td3-parallel] tau=${TAU} utd_ratio=${UTD_RATIO} utd_actor=${UTD_ACTOR} critic_warmup_steps=${CRITIC_WARMUP_STEPS}"
 
 python -u "${REPO_ROOT}/rl_finetuning/train_parallel_tfv6_td3.py" \
   --repo_root "${REPO_ROOT}" \
@@ -153,7 +153,7 @@ python -u "${REPO_ROOT}/rl_finetuning/train_parallel_tfv6_td3.py" \
   --td3_batch_size "${BATCH_SIZE}" \
   --total_timesteps "${TOTAL_TIMESTEPS}" \
   --tau "${TAU}" \
-  --policy_delay "${POLICY_DELAY}" \
+  --utd_actor "${UTD_ACTOR}" \
   --exploration_noise "${EXPLORATION_NOISE}" \
   --target_policy_noise "${TARGET_POLICY_NOISE}" \
   --target_noise_clip "${TARGET_NOISE_CLIP}" \

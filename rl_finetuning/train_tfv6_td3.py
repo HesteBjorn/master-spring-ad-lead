@@ -5,7 +5,7 @@ ResFiT (Ankile et al. 2024, amazon-science/residual-offpolicy-rl).
 
 Key algorithmic details:
   - Twin Q-networks (Fujimoto 2018) — min target for Bellman update
-  - Delayed actor updates every ``policy_delay`` critic steps
+  - Delayed actor updates from ``utd_actor`` relative to critic UTD
   - Target policy smoothing with clipped Gaussian noise
   - Critic warmup (ResFiT): actor frozen for ``critic_warmup_steps`` critic
     updates after ``learning_starts``
@@ -507,9 +507,11 @@ def parse_args(config):
     parser.add_argument('--tau', type=float,
                         default=getattr(config, 'tau', 0.005),
                         help='Polyak averaging coefficient for target networks.')
-    parser.add_argument('--policy_delay', type=int,
-                        default=getattr(config, 'policy_delay', 2),
-                        help='Actor updated every policy_delay critic steps.')
+    parser.add_argument('--utd_actor', type=float,
+                        default=getattr(config, 'utd_actor', 0.5),
+                        help='Actor updates per collected environment step. '
+                             'For UTD=1 and UTD_ACTOR=0.5, actor updates every '
+                             '2 critic updates independent of num_envs.')
     parser.add_argument('--exploration_noise', type=float,
                         default=getattr(config, 'exploration_noise', 0.1),
                         help='Std of Gaussian exploration noise added to actor output at rollout.')
@@ -533,9 +535,10 @@ def parse_args(config):
                              'reg_loss = gamma * |Q̄| * coeff².mean(). gamma is the maximum '
                              'fraction of Q the reg can cost (achieved when coeff=±1 everywhere). '
                              'Recommended: 0.1.')
-    parser.add_argument('--utd_ratio', type=int,
+    parser.add_argument('--utd_ratio', type=float,
                         default=getattr(config, 'utd_ratio', 1),
-                        help='Gradient updates per environment step (Update-To-Data ratio).')
+                        help='Critic updates per collected environment step (Update-To-Data ratio). '
+                             'The trainer multiplies this by num_envs internally.')
     parser.add_argument('--n_step_returns', type=int,
                         default=getattr(config, 'n_step_returns', 1),
                         help='N-step return horizon. 1=standard 1-step TD (default).')
@@ -885,6 +888,13 @@ def main():
                 loaded_config = jsonpickle.decode(f.read())
             config.__dict__.update(loaded_config.__dict__)
 
+    if args.utd_ratio <= 0:
+        raise ValueError("--utd_ratio must be > 0")
+    if args.utd_actor <= 0:
+        raise ValueError("--utd_actor must be > 0")
+    if args.utd_actor > args.utd_ratio:
+        raise ValueError("--utd_actor must be <= --utd_ratio")
+
     config.initialize(**vars(args))
 
     # Write config for this run.
@@ -1092,6 +1102,16 @@ def main():
     recent_rewards = deque(maxlen=1000)
     start_time = time.time()
     num_envs = len(args.ports)
+    critic_updates_per_step = int(round(args.utd_ratio * num_envs))
+    actor_update_period = int(round(args.utd_ratio / args.utd_actor))
+    if critic_updates_per_step <= 0:
+        raise ValueError("utd_ratio * num_envs must be >= 1")
+    if abs(critic_updates_per_step - args.utd_ratio * num_envs) > 1e-6:
+        raise ValueError("utd_ratio * num_envs must be an integer")
+    if actor_update_period <= 0:
+        raise ValueError("utd_ratio / utd_actor must be >= 1")
+    if abs(actor_update_period - args.utd_ratio / args.utd_actor) > 1e-6:
+        raise ValueError("utd_ratio / utd_actor must be an integer")
     route_completion_by_env = [0.0] * num_envs
     terminal_infraction_by_env = [""] * num_envs
     # Per-env history of replay buffer indices for terminal_penalty_warmup.
@@ -1176,15 +1196,18 @@ def main():
     # ── Buffer prefetch pool ──────────────────────────────────────────────────
     # One worker per UTD slot — all batches are sampled in parallel during the
     # CARLA render window so every GPU training iteration starts with zero wait.
-    _buf_prefetch_pool = ThreadPoolExecutor(max_workers=args.utd_ratio)
-    _buf_prefetch_futures: list = [None] * args.utd_ratio
+    _buf_prefetch_pool = ThreadPoolExecutor(max_workers=critic_updates_per_step)
+    _buf_prefetch_futures: list = [None] * critic_updates_per_step
 
     # ── TD3 training loop ─────────────────────────────────────────────────────
     start_step = global_step
     _sps_step = start_step
     _sps_time = start_time
     _t_fwd = _t_env = _t_buf = _t_train = 0.0
-    critic_updates_done = max(0, start_step - args.learning_starts) * args.utd_ratio
+    critic_updates_done = (
+        max(0, (start_step - args.learning_starts) // num_envs)
+        * critic_updates_per_step
+    )
     global_step = start_step
     while global_step < args.total_timesteps:
         # ── UPDATE (while CARLA renders from previous step_async) ─────────────
@@ -1192,7 +1215,7 @@ def main():
             global_step >= args.learning_starts
             and len(replay_buffer) >= args.td3_batch_size
         ):
-            for utd_idx in range(args.utd_ratio):
+            for utd_idx in range(critic_updates_per_step):
                 critic_updates_done += 1
                 _t0 = time.perf_counter()
                 _future = _buf_prefetch_futures[utd_idx]
@@ -1298,7 +1321,7 @@ def main():
                 actor_grad_norm: float = float("nan")
                 if (
                     critic_updates_done > args.critic_warmup_steps
-                    and critic_updates_done % args.policy_delay == 0
+                    and critic_updates_done % actor_update_period == 0
                 ):
                     # Features detached: encoder trained by critic loss only (ResFiT style).
                     pred_coeffs = actor.forward_coeffs_from_features(
@@ -1609,7 +1632,7 @@ def main():
             global_step >= args.learning_starts
             and len(replay_buffer) >= args.td3_batch_size
         ):
-            for _slot in range(args.utd_ratio):
+            for _slot in range(critic_updates_per_step):
                 if _buf_prefetch_futures[_slot] is None:
                     _buf_prefetch_futures[_slot] = _buf_prefetch_pool.submit(
                         replay_buffer.sample_numpy, args.td3_batch_size
