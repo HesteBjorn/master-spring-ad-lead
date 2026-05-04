@@ -1026,7 +1026,9 @@ def main():
             f"[td3] Resumed from {args.load_file}, global_step={global_step}",
             flush=True,
         )
-        writer.add_scalar("charts/restart", 1, global_step)
+        if global_step > 0:
+            writer.add_scalar("charts/restart", 1, global_step)
+            writer.flush()
         t_buf = time.time()
         buf_loaded = replay_buffer.load(exp_folder, default_gamma=args.gamma)
         if buf_loaded:
@@ -1776,9 +1778,10 @@ def main():
                 f.write(jsonpickle.encode(config))
             t_buf = time.time()
             replay_buffer.save(exp_folder)
+            buffer_save_s = time.time() - t_buf
             print(
                 f"[td3] Saved checkpoint + buffer ({len(replay_buffer)} transitions) "
-                f"at step {global_step} in {time.time() - t_buf:.1f}s",
+                f"at step {global_step}; saving buffer to file took {buffer_save_s:.1f}s",
                 flush=True,
             )
 
