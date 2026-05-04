@@ -1641,6 +1641,204 @@ class PPORolloutVisualizer:
         )
         return blended
 
+    def _overlay_signed_cnn_heatmap(
+        self,
+        bev_col: np.ndarray,
+        cnn_heatmap: np.ndarray,
+        alpha: float = 0.48,
+    ) -> np.ndarray:
+        """Overlay signed residual CNN Grad-CAM on an already-prepared BEV column.
+
+        Positive values support increasing the TD3 residual speed coefficient;
+        negative values support decreasing it. The heatmap is expected to be a
+        per-frame 2D array aligned with the BEV feature grid, normally 10x12.
+        """
+        hmap = np.asarray(cnn_heatmap, dtype=np.float32)
+        if hmap.ndim != 2 or hmap.size == 0:
+            return bev_col
+
+        max_abs = float(np.max(np.abs(hmap)))
+        if not np.isfinite(max_abs) or max_abs <= 1e-8:
+            return bev_col
+        hmap = np.clip(hmap / max_abs, -1.0, 1.0)
+
+        hmap_full = cv2.resize(
+            hmap, (self.bev_w, self.bev_h), interpolation=cv2.INTER_LINEAR
+        )
+        hmap_rot = np.rot90(hmap_full, k=1)
+        hmap_rot = np.ascontiguousarray(hmap_rot)
+        crop = int(0.08 * hmap_rot.shape[1])
+        if 2 * crop < hmap_rot.shape[1] - 20:
+            hmap_rot = hmap_rot[:, crop:-crop]
+        hmap_resized = cv2.resize(
+            hmap_rot,
+            (bev_col.shape[1], bev_col.shape[0]),
+            interpolation=cv2.INTER_LINEAR,
+        )
+
+        pos_color = np.array([0.0, 60.0, 255.0], dtype=np.float32)  # red/orange
+        neg_color = np.array([255.0, 210.0, 0.0], dtype=np.float32)  # cyan/blue
+        t = hmap_resized.astype(np.float32)
+        strength = np.abs(t)
+        colors = np.where(
+            (t[..., None] >= 0.0),
+            pos_color.reshape(1, 1, 3),
+            neg_color.reshape(1, 1, 3),
+        )
+        alpha_map = (strength * alpha)[:, :, np.newaxis]
+        blended = (
+            (bev_col.astype(np.float32) * (1.0 - alpha_map) + colors * alpha_map)
+            .clip(0, 255)
+            .astype(np.uint8)
+        )
+
+        bar_w, bar_h = 14, min(120, blended.shape[0] - 48)
+        bar_x, bar_y = 6, 32
+        vals = np.linspace(1.0, -1.0, bar_h, dtype=np.float32)
+        bar_strength = np.abs(vals).reshape(bar_h, 1, 1)
+        bar_colors = np.where(
+            (vals.reshape(bar_h, 1, 1) >= 0.0),
+            pos_color.reshape(1, 1, 3),
+            neg_color.reshape(1, 1, 3),
+        )
+        bg = np.full((bar_h, 1, 3), 128, dtype=np.float32)
+        bar = (bg * (1.0 - bar_strength) + bar_colors * bar_strength).astype(np.uint8)
+        bar = np.repeat(bar, bar_w, axis=1)
+        blended[bar_y : bar_y + bar_h, bar_x : bar_x + bar_w] = bar
+
+        cv2.putText(
+            blended,
+            "+speed",
+            (bar_x + bar_w + 4, bar_y + 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.36,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            blended,
+            "-speed",
+            (bar_x + bar_w + 4, bar_y + bar_h),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.36,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            blended,
+            "CNN speed",
+            (bar_x, bar_y - 6),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.40,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        return blended
+
+    def _overlay_feature_importance_bars(
+        self, bev_col: np.ndarray, feature_importance: np.ndarray
+    ) -> np.ndarray:
+        """Draw residual speed feature-importance strengths at the bottom of BEV."""
+        values = np.asarray(feature_importance, dtype=np.float32).reshape(-1)
+        if values.size < 4:
+            return bev_col
+        values = values[:4]
+        if not np.all(np.isfinite(values)):
+            return bev_col
+        max_value = float(np.max(values))
+        if max_value <= 1e-12:
+            return bev_col
+
+        labels = ["BEV", "kv/status", "base route", "base speed"]
+        colors = [
+            (60, 180, 255),
+            (190, 120, 230),
+            (80, 210, 120),
+            (70, 120, 255),
+        ]
+
+        panel_w = min(bev_col.shape[1] - 16, 330)
+        panel_h = 118
+        x0 = 8
+        y0 = max(8, bev_col.shape[0] - panel_h - 10)
+
+        overlay = bev_col.copy()
+        cv2.rectangle(
+            overlay,
+            (x0, y0),
+            (x0 + panel_w, y0 + panel_h),
+            (245, 245, 245),
+            -1,
+        )
+        blended = cv2.addWeighted(overlay, 0.62, bev_col, 0.38, 0.0)
+        cv2.rectangle(
+            blended,
+            (x0, y0),
+            (x0 + panel_w, y0 + panel_h),
+            (210, 210, 210),
+            1,
+        )
+        cv2.putText(
+            blended,
+            "speed coeff feature strength",
+            (x0 + 8, y0 + 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.43,
+            (30, 30, 30),
+            1,
+            cv2.LINE_AA,
+        )
+
+        label_w = 78
+        bar_x = x0 + label_w + 10
+        bar_w = max(40, panel_w - label_w - 76)
+        row_y = y0 + 38
+        row_h = 19
+        for idx, (label, value, color) in enumerate(
+            zip(labels, values, colors, strict=True)
+        ):
+            y = row_y + idx * row_h
+            cv2.putText(
+                blended,
+                label,
+                (x0 + 8, y + 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.36,
+                (35, 35, 35),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.rectangle(
+                blended,
+                (bar_x, y),
+                (bar_x + bar_w, y + 10),
+                (225, 225, 225),
+                -1,
+            )
+            filled_w = int(round(bar_w * float(value / max_value)))
+            if filled_w > 0:
+                cv2.rectangle(
+                    blended,
+                    (bar_x, y),
+                    (bar_x + filled_w, y + 10),
+                    color,
+                    -1,
+                )
+            cv2.putText(
+                blended,
+                f"{float(value):.2e}",
+                (bar_x + bar_w + 6, y + 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.32,
+                (35, 35, 35),
+                1,
+                cv2.LINE_AA,
+            )
+        return blended
+
     def _put_text_lines(
         self, panel: np.ndarray, lines: list[str], start_y: int = 210
     ) -> None:
@@ -1746,6 +1944,8 @@ class PPORolloutVisualizer:
         target_speed_logits: np.ndarray | None = None,
         residual_coeff_preds: np.ndarray | None = None,
         residual_attention_weights: np.ndarray | None = None,
+        cnn_heatmap: np.ndarray | None = None,
+        feature_importance: np.ndarray | None = None,
         log_std: np.ndarray,
         value_estimate: float,
         route_completion: float | None,
@@ -1868,6 +2068,10 @@ class PPORolloutVisualizer:
             bev_col = self._overlay_attention_heatmap(
                 bev_col, residual_attention_weights
             )
+        if cnn_heatmap is not None:
+            bev_col = self._overlay_signed_cnn_heatmap(bev_col, cnn_heatmap)
+        if feature_importance is not None:
+            bev_col = self._overlay_feature_importance_bars(bev_col, feature_importance)
         self._overlay_legend_on_bev(bev_col)
 
         scalar_w = int(round(right_w * 0.56))

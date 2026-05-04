@@ -71,6 +71,115 @@ def none_or_str(value):
     return value
 
 
+def _td3_actor_forward_with_optional_speed_heatmap(
+    actor: TFv6ResidualActorTD3,
+    obs: dict[str, torch.Tensor],
+    *,
+    activate_cnn_heatmap: bool,
+) -> tuple[torch.Tensor, np.ndarray | None, np.ndarray | None]:
+    """Return clean actor coeffs and optional signed Grad-CAM over the residual CNN.
+
+    The heatmap targets only the deterministic residual speed coefficient. Positive
+    values support increasing the TFv6 target speed; negative values support
+    decreasing it. Route coefficients are ignored.
+    """
+    if not activate_cnn_heatmap:
+        with torch.no_grad():
+            return actor.forward_coeffs(obs), None, None
+
+    last_conv = None
+    for module in actor.backbone.residual_cnn:
+        if isinstance(module, nn.Conv2d):
+            last_conv = module
+    if last_conv is None:
+        with torch.no_grad():
+            return actor.forward_coeffs(obs), None, None
+
+    activation: torch.Tensor | None = None
+    cnn_input: torch.Tensor | None = None
+    status_input: torch.Tensor | None = None
+
+    def _save_activation(_module, _inputs, output):
+        nonlocal activation
+        activation = output
+        output.retain_grad()
+
+    def _capture_cnn_input(_module, inputs):
+        nonlocal cnn_input
+        x = inputs[0].detach().requires_grad_(True)
+        cnn_input = x
+        return (x,)
+
+    def _capture_status_input(_module, inputs):
+        nonlocal status_input
+        x = inputs[0].detach().requires_grad_(True)
+        status_input = x
+        return (x,)
+
+    actor.zero_grad(set_to_none=True)
+    handles = [
+        actor.backbone.residual_cnn.register_forward_pre_hook(_capture_cnn_input),
+        actor.backbone.residual_status_proj.register_forward_pre_hook(
+            _capture_status_input
+        ),
+        last_conv.register_forward_hook(_save_activation),
+    ]
+    try:
+        with torch.enable_grad():
+            coeffs = actor.forward_coeffs(obs)
+            speed_coeff = coeffs[:, actor.effective_rank].sum()
+            speed_coeff.backward()
+
+        heatmap_np = None
+        feature_importance_np = None
+        if activation is not None and activation.grad is not None:
+            acts = activation.detach().float()
+            grads = activation.grad.detach().float()
+            weights = grads.mean(dim=(2, 3), keepdim=True)
+            cam = (weights * acts).sum(dim=1)
+            max_abs = cam.abs().amax(dim=(1, 2), keepdim=True)
+            valid = max_abs > 1e-8
+            cam = torch.where(
+                valid, cam / max_abs.clamp_min(1e-8), torch.zeros_like(cam)
+            )
+            heatmap_np = cam.detach().cpu().numpy().astype(np.float32)
+
+        if (
+            cnn_input is not None
+            and cnn_input.grad is not None
+            and status_input is not None
+            and status_input.grad is not None
+        ):
+            bev_strength = (
+                (cnn_input.grad.detach().float() * cnn_input.detach().float())
+                .abs()
+                .flatten(1)
+                .mean(dim=1)
+            )
+            status_attr = (
+                status_input.grad.detach().float() * status_input.detach().float()
+            ).abs()
+            token_dim = actor.backbone.value_token_dim
+            route_dim = actor.backbone.action_codec.route_dim
+            kv_strength = status_attr[:, :token_dim].mean(dim=1)
+            route_strength = status_attr[:, token_dim : token_dim + route_dim].mean(
+                dim=1
+            )
+            speed_strength = status_attr[:, token_dim + route_dim :].mean(dim=1)
+            feature_importance = torch.stack(
+                [bev_strength, kv_strength, route_strength, speed_strength], dim=1
+            )
+            feature_importance_np = (
+                feature_importance.detach().cpu().numpy().astype(np.float32)
+            )
+    finally:
+        for handle in handles:
+            handle.remove()
+        actor.zero_grad(set_to_none=True)
+
+    return coeffs.detach(), heatmap_np, feature_importance_np
+
+
 # ── Reward / episode stat helpers (mirrored from train_tfv6_ppo.py) ──────────
 
 _REWARD_COMPONENT_KEYS = [
@@ -635,6 +744,10 @@ def parse_args(config):
                         help='Maximum number of debug images to write (0 means unlimited).')
     parser.add_argument('--debug_viz_image_scale', type=int, default=3,
                         help='Scale factor for BEV rendering in debug visualizations.')
+    parser.add_argument('--activate_cnn_heatmap', type=lambda x: bool(strtobool(x)),
+                        default=False, nargs='?', const=True,
+                        help='If true, overlay signed Grad-CAM and feature strengths '
+                             'for the TD3 residual actor speed coefficient in debug_viz.')
     parser.add_argument('--debug', type=lambda x: bool(strtobool(x)),
                         default=False, nargs='?', const=True)
 
@@ -1212,8 +1325,16 @@ def main():
     # Run the first actor forward and fire step_async before the loop so that
     # the first iteration can immediately overlap UPDATE with CARLA rendering.
     actor.eval()
+    (
+        _prime_coeff,
+        _prime_cnn_heatmap,
+        _prime_feature_importance,
+    ) = _td3_actor_forward_with_optional_speed_heatmap(
+        actor,
+        next_obs,
+        activate_cnn_heatmap=args.debug_viz and args.activate_cnn_heatmap,
+    )
     with torch.no_grad():
-        _prime_coeff = actor.forward_coeffs(next_obs)
         _prime_base_action = backbone._last_base_action_mean
         _prime_noise = torch.randn_like(_prime_coeff) * args.exploration_noise
         _prime_coeff_noisy = (_prime_coeff + _prime_noise).clamp(-1.0, 1.0)
@@ -1230,6 +1351,8 @@ def main():
         if backbone._last_target_speed_logits is not None
         else None
     )
+    cnn_heatmap_np_pending = _prime_cnn_heatmap
+    feature_importance_np_pending = _prime_feature_importance
     obs_features_pending = []
     for _i in range(num_envs):
         _feats = backbone.encode_obs_to_features(env_idx=_i)
@@ -1551,10 +1674,16 @@ def main():
         # cache so obs_features_next can be extracted without an extra TFv6 pass.
         _t0 = time.perf_counter()
         actor.eval()
+        (
+            coeff_tensor,
+            cnn_heatmap_np,
+            feature_importance_np,
+        ) = _td3_actor_forward_with_optional_speed_heatmap(
+            actor,
+            next_obs,
+            activate_cnn_heatmap=args.debug_viz and args.activate_cnn_heatmap,
+        )
         with torch.no_grad():
-            coeff_tensor = actor.forward_coeffs(
-                next_obs
-            )  # sets backbone state; (num_envs, coeff_dim)
             base_action_mean = backbone._last_base_action_mean
             noise = torch.randn_like(coeff_tensor) * args.exploration_noise
             coeff_tensor_noisy = (coeff_tensor + noise).clamp(-1.0, 1.0)
@@ -1696,6 +1825,8 @@ def main():
         base_action_np_pending = base_action_np
         mean_action_np_pending = mean_action_np
         target_speed_logits_np_pending = target_speed_logits_np
+        cnn_heatmap_np_pending = cnn_heatmap_np
+        feature_importance_np_pending = feature_importance_np
 
         # Debug viz — one pass per env.
         # Action variables use *_pending (the action that caused the current reward).
@@ -1724,6 +1855,16 @@ def main():
                         [clean_coeff_np_pending[i], _viz_coeff_log_std]
                     ),
                     residual_attention_weights=None,
+                    cnn_heatmap=(
+                        cnn_heatmap_np_pending[i]
+                        if cnn_heatmap_np_pending is not None
+                        else None
+                    ),
+                    feature_importance=(
+                        feature_importance_np_pending[i]
+                        if feature_importance_np_pending is not None
+                        else None
+                    ),
                     log_std=_viz_action_log_std,
                     value_estimate=0.0,
                     route_completion=route_completion_by_env[i],
