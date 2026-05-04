@@ -53,7 +53,14 @@ from rl_finetuning.tfv6_rl.policy_tfv6_td3 import (  # noqa: E402
     TFv6ResidualActorTD3,
     TFv6ResidualQNetworkTD3,
 )
+from rl_finetuning.tfv6_rl.policy_tfv6_transformer import (  # noqa: E402
+    TFv6TransformerActorTD3,
+    TFv6TransformerQNetworkTD3,
+)
 from rl_finetuning.tfv6_rl.residual_backbone import TFv6ResidualBackbone  # noqa: E402
+from rl_finetuning.tfv6_rl.transformer_backbone import (  # noqa: E402
+    TFv6TransformerBackbone,
+)
 from rl_finetuning.tfv6_rl_config import GlobalConfig  # noqa: E402
 
 jsonpickle_numpy.register_handlers()
@@ -88,9 +95,12 @@ def _td3_actor_forward_with_optional_speed_heatmap(
             return actor.forward_coeffs(obs), None, None
 
     last_conv = None
-    for module in actor.backbone.residual_cnn:
-        if isinstance(module, nn.Conv2d):
-            last_conv = module
+    try:
+        for module in actor.backbone.residual_cnn:
+            if isinstance(module, nn.Conv2d):
+                last_conv = module
+    except TypeError:
+        pass  # residual_cnn is not iterable (transformer architecture)
     if last_conv is None:
         with torch.no_grad():
             return actor.forward_coeffs(obs), None, None
@@ -679,6 +689,9 @@ def parse_args(config):
     parser.add_argument('--speed_history_len', type=int,
                         default=getattr(config, 'speed_history_len', 0),
                         help='Number of recent speed values appended to actor+critic inputs (0=disabled).')
+    parser.add_argument('--architecture', type=str, default='cnn',
+                        choices=['cnn', 'transformer'],
+                        help='Residual encoder architecture: cnn (default) or transformer.')
 
     # ── Reward ───────────────────────────────────────────────────────────────
     parser.add_argument('--reward_type', type=str, default=config.reward_type)
@@ -1085,7 +1098,16 @@ def main():
     action_dim = env.single_action_space.shape[0]
 
     # ── Networks ─────────────────────────────────────────────────────────────
-    backbone = TFv6ResidualBackbone(
+    if args.architecture == "transformer":
+        BackboneCls = TFv6TransformerBackbone
+        ActorCls = TFv6TransformerActorTD3
+        QNetCls = TFv6TransformerQNetworkTD3
+    else:
+        BackboneCls = TFv6ResidualBackbone
+        ActorCls = TFv6ResidualActorTD3
+        QNetCls = TFv6ResidualQNetworkTD3
+
+    backbone = BackboneCls(
         tfv6_checkpoint=args.tfv6_checkpoint,
         tfv6_prefix=args.tfv6_prefix,
         device=device,
@@ -1098,17 +1120,17 @@ def main():
     for p in target_backbone.parameters():
         p.requires_grad_(False)
 
-    actor = TFv6ResidualActorTD3(backbone, config).to(device)
-    qf1 = TFv6ResidualQNetworkTD3(backbone, config).to(device)
-    qf2 = TFv6ResidualQNetworkTD3(backbone, config).to(device)
+    actor = ActorCls(backbone, config).to(device)
+    qf1 = QNetCls(backbone, config).to(device)
+    qf2 = QNetCls(backbone, config).to(device)
 
-    actor_target = TFv6ResidualActorTD3(target_backbone, config).to(device)
+    actor_target = ActorCls(target_backbone, config).to(device)
     actor_target.eval()
     for p in actor_target.parameters():
         p.requires_grad_(False)
 
-    qf1_target = TFv6ResidualQNetworkTD3(target_backbone, config).to(device)
-    qf2_target = TFv6ResidualQNetworkTD3(target_backbone, config).to(device)
+    qf1_target = QNetCls(target_backbone, config).to(device)
+    qf2_target = QNetCls(target_backbone, config).to(device)
     actor_target.load_state_dict(actor.state_dict())
     qf1_target.q_head.load_state_dict(qf1.q_head.state_dict())
     qf2_target.q_head.load_state_dict(qf2.q_head.state_dict())
