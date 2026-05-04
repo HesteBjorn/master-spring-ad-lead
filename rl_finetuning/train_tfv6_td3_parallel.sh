@@ -106,6 +106,7 @@ CRITIC_WARMUP_STEPS="${CRITIC_WARMUP_STEPS:-10000}"
 ACTOR_LR="${ACTOR_LR:-1e-4}"
 CRITIC_LR="${CRITIC_LR:-1e-3}"
 SAVE_EVERY="${SAVE_EVERY:-10000}"
+KEEP_EVERY="${KEEP_EVERY:-100000}"
 UTD_RATIO="${UTD_RATIO:-1}"
 
 EXTRA_TRAIN_ARGS=()
@@ -121,6 +122,7 @@ echo "[train-tfv6-td3-parallel] carla_root=${CARLA_ROOT}"
 echo "[train-tfv6-td3-parallel] num_envs_per_node=${NUM_ENVS_PER_NODE} num_envs_per_gpu=${NUM_ENVS_PER_GPU}"
 echo "[train-tfv6-td3-parallel] buffer_size=${BUFFER_SIZE} batch_size=${BATCH_SIZE} learning_starts=${LEARNING_STARTS} total_timesteps=${TOTAL_TIMESTEPS}"
 echo "[train-tfv6-td3-parallel] tau=${TAU} utd_ratio=${UTD_RATIO} utd_actor=${UTD_ACTOR} critic_warmup_steps=${CRITIC_WARMUP_STEPS}"
+echo "[train-tfv6-td3-parallel] save_every=${SAVE_EVERY} keep_every=${KEEP_EVERY}"
 
 python -u "${REPO_ROOT}/rl_finetuning/train_parallel_tfv6_td3.py" \
   --repo_root "${REPO_ROOT}" \
@@ -161,6 +163,7 @@ python -u "${REPO_ROOT}/rl_finetuning/train_parallel_tfv6_td3.py" \
   --actor_lr "${ACTOR_LR}" \
   --critic_lr "${CRITIC_LR}" \
   --save_every "${SAVE_EVERY}" \
+  --keep_every "${KEEP_EVERY}" \
   --utd_ratio "${UTD_RATIO}" \
   --reward_type simple_reward \
   "${EXTRA_TRAIN_ARGS[@]}" \

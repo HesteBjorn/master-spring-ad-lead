@@ -21,6 +21,7 @@ import argparse
 import os
 import pathlib
 import random
+import re
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -614,6 +615,8 @@ def parse_args(config):
     parser.add_argument('--logdir', type=str, default=config.logdir)
     parser.add_argument('--save_every', type=int, default=getattr(config, 'save_every', 10_000),
                         help='Save model checkpoint and replay buffer every N global steps.')
+    parser.add_argument('--keep_every', type=int, default=getattr(config, 'keep_every', 100_000),
+                        help='Keep every Nth saved checkpoint; prune older non-kept latest checkpoints.')
     parser.add_argument('--load_file', type=none_or_str, nargs='?', default=config.load_file,
                         help='TD3 checkpoint file to resume from (model_latest_*.pth).')
     parser.add_argument('--ports', nargs='+', default=config.ports, type=int,
@@ -767,6 +770,50 @@ def _save_td3_checkpoint(
         },
         optimizer_path,
     )
+
+
+def _is_keep_checkpoint_step(step: int, save_every: int, keep_every: int) -> bool:
+    """Return True for save steps that crossed a keep_every boundary."""
+    if keep_every <= 0:
+        return False
+    previous_save_floor = max(0, step - max(1, save_every))
+    return step // keep_every > previous_save_floor // keep_every
+
+
+def _prune_transient_td3_checkpoints(
+    folder: str,
+    current_step: int,
+    save_every: int,
+    keep_every: int,
+) -> int:
+    """Delete old non-keep model_latest/optimizer_latest checkpoints.
+
+    The current checkpoint is always kept. Older checkpoints whose save interval
+    crossed a keep_every boundary are kept as sparse historical anchors.
+    """
+    removed = 0
+    pattern = re.compile(r"^model_latest_(\d+)\.pth$")
+    for file_name in os.listdir(folder):
+        match = pattern.match(file_name)
+        if match is None:
+            continue
+        step = int(match.group(1))
+        if step == current_step:
+            continue
+        if _is_keep_checkpoint_step(step, save_every, keep_every):
+            continue
+
+        model_path = os.path.join(folder, file_name)
+        optimizer_path = os.path.join(
+            folder, file_name.replace("model_", "optimizer_", 1)
+        )
+        for path in (model_path, optimizer_path):
+            try:
+                os.remove(path)
+                removed += 1
+            except FileNotFoundError:
+                pass
+    return removed
 
 
 def _load_td3_checkpoint(
@@ -1779,9 +1826,16 @@ def main():
             t_buf = time.time()
             replay_buffer.save(exp_folder)
             buffer_save_s = time.time() - t_buf
+            pruned_files = _prune_transient_td3_checkpoints(
+                exp_folder,
+                current_step=global_step,
+                save_every=args.save_every,
+                keep_every=args.keep_every,
+            )
             print(
                 f"[td3] Saved checkpoint + buffer ({len(replay_buffer)} transitions) "
-                f"at step {global_step}; saving buffer to file took {buffer_save_s:.1f}s",
+                f"at step {global_step}; saving buffer to file took {buffer_save_s:.1f}s; "
+                f"pruned {pruned_files} transient checkpoint files",
                 flush=True,
             )
 

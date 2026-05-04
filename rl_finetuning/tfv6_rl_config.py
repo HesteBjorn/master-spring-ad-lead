@@ -100,3 +100,5 @@ class GlobalConfig(CaRLGlobalConfig):
         self.utd_ratio = 1
         # N-step return horizon. 1 = standard 1-step TD (default, backward-compatible).
         self.n_step_returns = 1
+        # Keep sparse historical TD3 checkpoints while pruning transient save_every checkpoints.
+        self.keep_every = 100_000
