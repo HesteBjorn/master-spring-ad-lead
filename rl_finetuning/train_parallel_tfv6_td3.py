@@ -301,7 +301,7 @@ if __name__ == "__main__":
 
         current_port = args.start_port + 5000 * args.node_id
         skip_next_route = "False"
-        max_startup_retries = 3
+        max_startup_retries = 7
 
         while training:
             if args.debug:
