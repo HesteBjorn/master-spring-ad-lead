@@ -118,9 +118,11 @@ class StatusTokenEncoder(nn.Module):
         status = (
             self.proj(status_tokens) + self.status_pos_embedding
         )  # [B, N_status, D]
-        route_tok = self.route_encoder(base_route).unsqueeze(1)  # [B, 1, D]
-        speed_tok = self.speed_encoder(base_speed).unsqueeze(1)  # [B, 1, D]
-        return torch.cat([status, route_tok, speed_tok], dim=1)  # [B, N_status+2, D]
+        base_route_tok = self.route_encoder(base_route).unsqueeze(1)  # [B, 1, D]
+        base_speed_tok = self.speed_encoder(base_speed).unsqueeze(1)  # [B, 1, D]
+        return torch.cat(
+            [status, base_route_tok, base_speed_tok], dim=1
+        )  # [B, N_status+2, D]
 
 
 # ── Backbone ──────────────────────────────────────────────────────────────────
