@@ -93,6 +93,11 @@ class StatusTokenEncoder(nn.Module):
     each status token + learned positional embedding (same init as TFv6's
     status_pos_embedding). The base action is split into a route token and
     a speed token so the decoder can attend to them independently.
+
+    When speed_history_len > 0, each timestep of recent ego speed is encoded
+    as its own token (Linear(1, d_model) + temporal positional embedding),
+    appended after the base action tokens. Output length:
+      N_status + 2 + speed_history_len
     """
 
     def __init__(
@@ -101,6 +106,7 @@ class StatusTokenEncoder(nn.Module):
         d_model: int,
         n_status: int,
         route_dim: int,
+        speed_history_len: int = 0,
     ):
         super().__init__()
         self.proj = nn.Linear(status_dim, d_model)
@@ -108,21 +114,35 @@ class StatusTokenEncoder(nn.Module):
         nn.init.uniform_(self.status_pos_embedding)
         self.route_encoder = nn.Linear(route_dim, d_model)
         self.speed_encoder = nn.Linear(1, d_model)
+        self.speed_history_len = speed_history_len
+        if speed_history_len > 0:
+            self.speed_history_encoder = nn.Linear(1, d_model)
+            self.speed_history_pos_embedding = nn.Parameter(
+                torch.zeros(1, speed_history_len, d_model)
+            )
+            nn.init.uniform_(self.speed_history_pos_embedding)
 
     def forward(
         self,
         status_tokens: torch.Tensor,  # [B, N_status, status_dim]
         base_route: torch.Tensor,  # [B, route_dim]
         base_speed: torch.Tensor,  # [B, 1]
-    ) -> torch.Tensor:  # [B, N_status + 2, d_model]
+        speed_history: torch.Tensor | None = None,  # [B, speed_history_len]
+    ) -> torch.Tensor:  # [B, N_status + 2 (+ speed_history_len), d_model]
         status = (
             self.proj(status_tokens) + self.status_pos_embedding
         )  # [B, N_status, D]
         base_route_tok = self.route_encoder(base_route).unsqueeze(1)  # [B, 1, D]
         base_speed_tok = self.speed_encoder(base_speed).unsqueeze(1)  # [B, 1, D]
-        return torch.cat(
-            [status, base_route_tok, base_speed_tok], dim=1
-        )  # [B, N_status+2, D]
+        parts = [status, base_route_tok, base_speed_tok]
+        if self.speed_history_len > 0 and speed_history is not None:
+            # [B, L] → [B, L, 1] → [B, L, D] + positional embedding
+            sh_toks = (
+                self.speed_history_encoder(speed_history.float().unsqueeze(-1))
+                + self.speed_history_pos_embedding
+            )  # [B, L, D]
+            parts.append(sh_toks)
+        return torch.cat(parts, dim=1)
 
 
 # ── Backbone ──────────────────────────────────────────────────────────────────
@@ -266,6 +286,7 @@ class TFv6TransformerBackbone(nn.Module):
             d_model=d_model,
             n_status=n_status,
             route_dim=self.action_codec.route_dim,
+            speed_history_len=self.speed_history_len,
         )
 
         # ── Internal state ────────────────────────────────────────────────────
@@ -339,11 +360,15 @@ class TFv6TransformerBackbone(nn.Module):
         self._last_base_action_mean = base_action_mean
         return route_norm, speed_expected, base_action_mean
 
-    def get_residual_features(self, base_action_mean: torch.Tensor) -> torch.Tensor:
-        """Build KV token sequence from BEV + status + base action.
+    def get_residual_features(
+        self,
+        base_action_mean: torch.Tensor,
+        speed_history: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Build KV token sequence from BEV + status + base action (+ speed history).
 
         Returns:
-            [B, N_spatial + N_status + 2, d_model]
+            [B, N_spatial + N_status + 2 (+ speed_history_len), d_model]
         """
         bev = getattr(self.tfv6, "bev_features", None)
         if bev is None:
@@ -368,8 +393,8 @@ class TFv6TransformerBackbone(nn.Module):
         base_route = base_action_mean[:, :route_dim].float()
         base_speed = base_action_mean[:, route_dim:].float()
         context_tokens = self.status_token_encoder(
-            kv_status, base_route, base_speed
-        )  # [B, N_status+2, D]
+            kv_status, base_route, base_speed, speed_history
+        )  # [B, N_status+2 (+ speed_history_len), D]
 
         return torch.cat([bev_tokens, context_tokens], dim=1)  # [B, N_total, D]
 

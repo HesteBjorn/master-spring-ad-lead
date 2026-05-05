@@ -156,16 +156,38 @@ class CriticActionTokenEncoder(nn.Module):
         return tokens + self.pos_embedding
 
 
+# ── Critic privileged token encoder ──────────────────────────────────────────
+
+
+class CriticPrivilegedTokenEncoder(nn.Module):
+    """Encode privileged measurements as a single KV token (critic-only).
+
+    Mirrors CriticActionTokenEncoder: Linear projection + learned positional
+    embedding, uniform-initialized. Privileged info (stop sign distance,
+    traffic light state, etc.) is critic-only — not available at inference.
+    """
+
+    def __init__(self, priv_dim: int, d_model: int):
+        super().__init__()
+        self.encoder = nn.Linear(priv_dim, d_model)
+        self.pos_embedding = nn.Parameter(torch.zeros(1, 1, d_model))
+        nn.init.uniform_(self.pos_embedding)
+
+    def forward(self, privileged: torch.Tensor) -> torch.Tensor:
+        return self.encoder(privileged.float()).unsqueeze(1) + self.pos_embedding
+
+
 # ── Critic decoder ────────────────────────────────────────────────────────────
 
 
 class CriticDecoder(_ResidualTransformerDecoder):
-    """Critic head: action token appended to KV → query 0 → MLP → [B, 1].
+    """Critic head: action (+ optional privileged) tokens appended to KV → scalar.
 
-    The action_coeffs are encoded as a dedicated KV token via ActionTokenEncoder
-    so the decoder can attend to the action in the context of BEV and status
-    tokens. The decoded primary query then goes directly to the Q head.
-    Optional privileged / speed-history extras are concatenated after decoding.
+    action_coeffs are encoded via CriticActionTokenEncoder (1 or 2 tokens).
+    privileged measurements are encoded via CriticPrivilegedTokenEncoder (1 token).
+    Both are appended to the KV sequence before decoding so the decoder can
+    attend to them in context. The decoded primary query goes directly to the
+    Q head — no concatenation after decoding.
     """
 
     def __init__(
@@ -176,14 +198,16 @@ class CriticDecoder(_ResidualTransformerDecoder):
         n_queries: int,
         ffn_dim: int,
         eff_rank: int,
-        extra_dim: int = 0,
+        priv_dim: int = 0,
     ):
         super().__init__(d_model, n_heads, n_layers, n_queries, ffn_dim)
         self.action_encoder = CriticActionTokenEncoder(eff_rank, d_model)
-        q_in_dim = d_model + extra_dim
+        self.priv_encoder = (
+            CriticPrivilegedTokenEncoder(priv_dim, d_model) if priv_dim > 0 else None
+        )
         self.q_head = nn.Sequential(
-            nn.LayerNorm(q_in_dim),
-            nn.Linear(q_in_dim, d_model),
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
             nn.LayerNorm(d_model),
             nn.GELU(),
             nn.Linear(d_model, 1),
@@ -193,15 +217,15 @@ class CriticDecoder(_ResidualTransformerDecoder):
         self,
         kv_tokens: torch.Tensor,
         action_coeffs: torch.Tensor,
-        extra: torch.Tensor | None = None,
+        privileged: torch.Tensor | None = None,
     ) -> torch.Tensor:
         action_tok = self.action_encoder(action_coeffs.float())  # [B, 1 or 2, D]
-        kv = torch.cat([kv_tokens, action_tok], dim=1)  # [B, N+1 or N+2, D]
+        kv = torch.cat([kv_tokens, action_tok], dim=1)
+        if self.priv_encoder is not None and privileged is not None:
+            priv_tok = self.priv_encoder(privileged)  # [B, 1, D]
+            kv = torch.cat([kv, priv_tok], dim=1)
         decoded = self._decode(kv)  # [B, N_queries, D]
-        x = decoded[:, 0]
-        if extra is not None:
-            x = torch.cat([x, extra], dim=-1)
-        return self.q_head(x)  # [B, 1]
+        return self.q_head(decoded[:, 0])  # [B, 1]
 
 
 # ── Actor ─────────────────────────────────────────────────────────────────────
@@ -262,19 +286,11 @@ class TFv6TransformerActorTD3(nn.Module):
                 ResFiT / DrQ-v2 pattern as the CNN variant).
         """
         _, _, base_action_mean = self.backbone.get_base_action(obs_dict)
-        kv_tokens = self.backbone.get_residual_features(base_action_mean)
+        kv_tokens = self.backbone.get_residual_features(
+            base_action_mean, obs_dict.get("speed_history")
+        )
         if detach_features:
             kv_tokens = kv_tokens.detach()
-        return self._forward_from_kv(kv_tokens, obs_dict.get("speed_history"))
-
-    def _forward_from_kv(
-        self,
-        kv_tokens: torch.Tensor,
-        speed_history: torch.Tensor | None,
-    ) -> torch.Tensor:
-        # speed_history is not used in the transformer actor — the transformer
-        # can already attend to the base_speed token in the KV sequence.
-        # It is accepted here only for interface compatibility.
         return self.residual_out(kv_tokens)
 
     def forward_coeffs_from_features(
@@ -289,11 +305,12 @@ class TFv6TransformerActorTD3(nn.Module):
             feature_obs["base_action_mean"],
         )
         kv_tokens = self.backbone.get_residual_features(
-            self.backbone._last_base_action_mean
+            self.backbone._last_base_action_mean,
+            feature_obs.get("speed_history"),
         )
         if detach_features:
             kv_tokens = kv_tokens.detach()
-        return self._forward_from_kv(kv_tokens, feature_obs.get("speed_history"))
+        return self.residual_out(kv_tokens)
 
     def coeffs_to_action(self, coeff_means: torch.Tensor) -> torch.Tensor:
         """Convert coefficients [B, eff_rank+1] → full action [B, route_dim+1]."""
@@ -363,11 +380,9 @@ class TFv6TransformerQNetworkTD3(nn.Module):
 
                 self.num_privileged_measurements = privileged_measurement_dim(rl_config)
 
-        self.speed_history_len: int = backbone.speed_history_len
-
-        extra_dim = (
+        priv_dim = (
             self.num_privileged_measurements if self.use_privileged_measurements else 0
-        ) + self.speed_history_len
+        )
         self.q_head = CriticDecoder(
             d_model=D_MODEL,
             n_heads=N_HEADS,
@@ -375,7 +390,7 @@ class TFv6TransformerQNetworkTD3(nn.Module):
             n_queries=N_QUERIES,
             ffn_dim=FFN_DIM,
             eff_rank=eff_rank,
-            extra_dim=extra_dim,
+            priv_dim=priv_dim,
         )
 
     def forward(
@@ -390,8 +405,8 @@ class TFv6TransformerQNetworkTD3(nn.Module):
             raise RuntimeError(
                 "Call actor.forward_coeffs() before Q-network forward()."
             )
-        kv_tokens = self.backbone.get_residual_features(base_action)
-        return self._q_forward(kv_tokens, action_coeffs, privileged, speed_history)
+        kv_tokens = self.backbone.get_residual_features(base_action, speed_history)
+        return self.q_head(kv_tokens, action_coeffs, privileged)
 
     def forward_with_cached_backbone(
         self,
@@ -405,22 +420,7 @@ class TFv6TransformerQNetworkTD3(nn.Module):
             raise RuntimeError(
                 "Call actor.forward_coeffs() before forward_with_cached_backbone()."
             )
-        kv_tokens = self.backbone.get_residual_features(base_action)
+        kv_tokens = self.backbone.get_residual_features(base_action, speed_history)
         if detach_features:
             kv_tokens = kv_tokens.detach()
-        return self._q_forward(kv_tokens, action_coeffs, privileged, speed_history)
-
-    def _q_forward(
-        self,
-        kv_tokens: torch.Tensor,
-        action_coeffs: torch.Tensor,
-        privileged: torch.Tensor | None,
-        speed_history: torch.Tensor | None,
-    ) -> torch.Tensor:
-        extra_parts = []
-        if self.use_privileged_measurements and privileged is not None:
-            extra_parts.append(privileged.float())
-        if self.speed_history_len > 0 and speed_history is not None:
-            extra_parts.append(speed_history.float())
-        extra = torch.cat(extra_parts, dim=-1) if extra_parts else None
-        return self.q_head(kv_tokens, action_coeffs, extra)
+        return self.q_head(kv_tokens, action_coeffs, privileged)
