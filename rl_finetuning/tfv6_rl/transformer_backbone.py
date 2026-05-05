@@ -87,17 +87,19 @@ class BEVTokenEncoder(nn.Module):
 
 
 class StatusTokenEncoder(nn.Module):
-    """Project TFv6 status tokens and encode base action as two separate tokens.
+    """Project TFv6 status tokens and encode base action as route/speed tokens.
 
     Mirrors TFv6's PlanningContextEncoder status path: linear projection of
     each status token + learned positional embedding (same init as TFv6's
-    status_pos_embedding). The base action is split into a route token and
-    a speed token so the decoder can attend to them independently.
+    status_pos_embedding). The base route is encoded as one token per
+    ego-relative (x, y) checkpoint with learned route-index embeddings, so the
+    decoder can attend directly over route geometry. Speed remains a separate
+    token.
 
     When speed_history_len > 0, each timestep of recent ego speed is encoded
     as its own token (Linear(1, d_model) + temporal positional embedding),
     appended after the base action tokens. Output length:
-      N_status + 2 + speed_history_len
+      N_status + num_route_points + 1 + speed_history_len
     """
 
     def __init__(
@@ -105,14 +107,19 @@ class StatusTokenEncoder(nn.Module):
         status_dim: int,
         d_model: int,
         n_status: int,
-        route_dim: int,
+        num_route_points: int,
         speed_history_len: int = 0,
     ):
         super().__init__()
         self.proj = nn.Linear(status_dim, d_model)
         self.status_pos_embedding = nn.Parameter(torch.zeros(1, n_status, d_model))
         nn.init.uniform_(self.status_pos_embedding)
-        self.route_encoder = nn.Linear(route_dim, d_model)
+        self.num_route_points = num_route_points
+        self.route_point_encoder = nn.Linear(2, d_model)
+        self.route_pos_embedding = nn.Parameter(
+            torch.zeros(1, num_route_points, d_model)
+        )
+        nn.init.uniform_(self.route_pos_embedding)
         self.speed_encoder = nn.Linear(1, d_model)
         self.speed_history_len = speed_history_len
         if speed_history_len > 0:
@@ -128,13 +135,18 @@ class StatusTokenEncoder(nn.Module):
         base_route: torch.Tensor,  # [B, route_dim]
         base_speed: torch.Tensor,  # [B, 1]
         speed_history: torch.Tensor | None = None,  # [B, speed_history_len]
-    ) -> torch.Tensor:  # [B, N_status + 2 (+ speed_history_len), d_model]
+    ) -> torch.Tensor:  # [B, N_status + N_route + 1 (+ speed_history_len), D]
         status = (
             self.proj(status_tokens) + self.status_pos_embedding
         )  # [B, N_status, D]
-        base_route_tok = self.route_encoder(base_route).unsqueeze(1)  # [B, 1, D]
+        base_route_points = base_route.view(
+            base_route.shape[0], self.num_route_points, 2
+        )  # [B, N_route, 2]
+        base_route_toks = (
+            self.route_point_encoder(base_route_points) + self.route_pos_embedding
+        )  # [B, N_route, D]
         base_speed_tok = self.speed_encoder(base_speed).unsqueeze(1)  # [B, 1, D]
-        parts = [status, base_route_tok, base_speed_tok]
+        parts = [status, base_route_toks, base_speed_tok]
         if self.speed_history_len > 0 and speed_history is not None:
             # [B, L] → [B, L, 1] → [B, L, D] + positional embedding
             sh_toks = (
@@ -285,7 +297,7 @@ class TFv6TransformerBackbone(nn.Module):
             status_dim=self.value_token_dim,
             d_model=d_model,
             n_status=n_status,
-            route_dim=self.action_codec.route_dim,
+            num_route_points=self.action_codec.num_route_points,
             speed_history_len=self.speed_history_len,
         )
         self.output_norm = nn.LayerNorm(d_model)
@@ -374,7 +386,7 @@ class TFv6TransformerBackbone(nn.Module):
         """Build KV token sequence from BEV + status + base action (+ speed history).
 
         Returns:
-            [B, N_spatial + N_status + 2 (+ speed_history_len), d_model]
+            [B, N_spatial + N_status + N_route + 1 (+ speed_history_len), d_model]
         """
         bev = getattr(self.tfv6, "bev_features", None)
         if bev is None:
