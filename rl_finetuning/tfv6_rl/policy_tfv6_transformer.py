@@ -205,6 +205,7 @@ class CriticDecoder(_ResidualTransformerDecoder):
         self.priv_encoder = (
             CriticPrivilegedTokenEncoder(priv_dim, d_model) if priv_dim > 0 else None
         )
+        self.kv_norm = nn.LayerNorm(d_model)
         self.q_head = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, d_model),
@@ -224,7 +225,7 @@ class CriticDecoder(_ResidualTransformerDecoder):
         if self.priv_encoder is not None and privileged is not None:
             priv_tok = self.priv_encoder(privileged)  # [B, 1, D]
             kv = torch.cat([kv, priv_tok], dim=1)
-        decoded = self._decode(kv)  # [B, N_queries, D]
+        decoded = self._decode(self.kv_norm(kv))  # [B, N_queries, D]
         return self.q_head(decoded[:, 0])  # [B, 1]
 
 

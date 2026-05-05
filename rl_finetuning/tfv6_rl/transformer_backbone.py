@@ -288,6 +288,7 @@ class TFv6TransformerBackbone(nn.Module):
             route_dim=self.action_codec.route_dim,
             speed_history_len=self.speed_history_len,
         )
+        self.output_norm = nn.LayerNorm(d_model)
 
         # ── Internal state ────────────────────────────────────────────────────
         self._last_base_action_mean: torch.Tensor | None = None
@@ -299,23 +300,28 @@ class TFv6TransformerBackbone(nn.Module):
 
     def encoder_parameters(self) -> list:
         """Trainable backbone parameters for the critic optimizer."""
-        return list(self.bev_token_encoder.parameters()) + list(
-            self.status_token_encoder.parameters()
+        return (
+            list(self.bev_token_encoder.parameters())
+            + list(self.status_token_encoder.parameters())
+            + list(self.output_norm.parameters())
         )
 
     def encoder_modules(self) -> list[nn.Module]:
         """Ordered list of trainable encoder modules for Polyak updates."""
-        return [self.bev_token_encoder, self.status_token_encoder]
+        return [self.bev_token_encoder, self.status_token_encoder, self.output_norm]
 
     def encoder_state_dict(self) -> dict:
         return {
             "bev_token_encoder": self.bev_token_encoder.state_dict(),
             "status_token_encoder": self.status_token_encoder.state_dict(),
+            "output_norm": self.output_norm.state_dict(),
         }
 
     def load_encoder_state_dict(self, state_dict: dict) -> None:
         self.bev_token_encoder.load_state_dict(state_dict["bev_token_encoder"])
         self.status_token_encoder.load_state_dict(state_dict["status_token_encoder"])
+        if "output_norm" in state_dict:
+            self.output_norm.load_state_dict(state_dict["output_norm"])
 
     def _extract_tfv6_obs(self, obs_dict: dict) -> dict:
         _skip = {"privileged_measurements", "speed_history"}
@@ -396,7 +402,8 @@ class TFv6TransformerBackbone(nn.Module):
             kv_status, base_route, base_speed, speed_history
         )  # [B, N_status+2 (+ speed_history_len), D]
 
-        return torch.cat([bev_tokens, context_tokens], dim=1)  # [B, N_total, D]
+        tokens = torch.cat([bev_tokens, context_tokens], dim=1)  # [B, N_total, D]
+        return self.output_norm(tokens)
 
     def set_feature_cache(
         self,
