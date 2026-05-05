@@ -1124,6 +1124,8 @@ def main():
     actor_target.load_state_dict(actor.state_dict())
     qf1_target.q_head.load_state_dict(qf1.q_head.state_dict())
     qf2_target.q_head.load_state_dict(qf2.q_head.state_dict())
+    qf1_target.eval()
+    qf2_target.eval()
     for p in qf1_target.q_head.parameters():
         p.requires_grad_(False)
     for p in qf2_target.q_head.parameters():
@@ -1140,7 +1142,7 @@ def main():
         eps=args.adam_eps,
         betas=(args.beta_1, args.beta_2),
     )
-    # Critic: Q-heads + shared CNN encoder. The encoder trains from critic
+    # Critic: Q-heads + shared residual encoder. The encoder trains from critic
     # gradients starting at learning_starts, giving meaningful features before
     # actor updates begin after critic_warmup_steps critic-only updates.
     critic_optimizer = optim.Adam(
@@ -1152,18 +1154,30 @@ def main():
         betas=(args.beta_1, args.beta_2),
     )
 
-    actor_trainable = sum(p.numel() for p in actor.parameters() if p.requires_grad)
-    qf_trainable = sum(
+    actor_head_params = sum(
+        p.numel() for p in actor.residual_out.parameters() if p.requires_grad
+    )
+    encoder_params = sum(
+        p.numel() for p in backbone.encoder_parameters() if p.requires_grad
+    )
+    critic_head_params = sum(
         p.numel()
         for p in list(qf1.q_head.parameters()) + list(qf2.q_head.parameters())
         if p.requires_grad
     )
     print(
-        f"[td3] actor trainable params={actor_trainable} "
-        f"(backbone CNN+proj + residual_out)",
+        f"[td3] actor head trainable params={actor_head_params} (residual_out)",
         flush=True,
     )
-    print(f"[td3] critic trainable params={qf_trainable} (2×q_head)", flush=True)
+    print(
+        f"[td3] shared encoder trainable params={encoder_params} "
+        f"(backbone.encoder_parameters())",
+        flush=True,
+    )
+    print(
+        f"[td3] critic head trainable params={critic_head_params} (2x q_head)",
+        flush=True,
+    )
 
     # ── Replay buffer ─────────────────────────────────────────────────────────
     # Store pre-encoded frozen TFv6 features instead of raw sensor obs.
@@ -1534,9 +1548,8 @@ def main():
                     last_actor_reg_loss_val = float(actor_reg_loss.item())
                     last_actor_grad_norm = float(actor_grad_norm)
 
-                    # Actor target owns a backbone structurally, but the actor
-                    # optimizer only updates residual_out. Keep backbone/Q targets
-                    # on the critic-step update schedule above.
+                    # Actor optimizer only updates residual_out. Keep backbone/Q
+                    # targets on the critic-step update schedule above.
                     _polyak_update(
                         actor.residual_out, actor_target.residual_out, args.tau
                     )

@@ -15,10 +15,10 @@ matching TFv6's TransformerDecoderLayer configuration. The 3 reasoning
 queries enrich the self-attention signal before the primary query is read.
 
 External interface is identical to policy_tfv6_td3.py:
-  actor.residual_out       → actor_optimizer
+  actor.residual_out            → actor_optimizer
   backbone.bev_token_encoder    → critic_optimizer
   backbone.status_token_encoder → critic_optimizer
-  qf.q_head                → critic_optimizer
+  qf.q_head                     → critic_optimizer
 """
 
 from __future__ import annotations
@@ -349,8 +349,12 @@ class TFv6TransformerActorTD3(nn.Module):
 class TFv6TransformerQNetworkTD3(nn.Module):
     """Transformer Q-network for TD3.
 
-    self.backbone = TFv6TransformerBackbone (registered child, owned by critic, TFv6 is frozen).
+    self.backbone = TFv6TransformerBackbone (plain reference, NOT a child module).
     self.q_head   = CriticDecoder (used by critic_optimizer).
+
+    The trainer owns the shared backbone and passes backbone.encoder_parameters()
+    to the critic optimizer. This keeps qf1/qf2 state_dicts and parameter lists
+    limited to their independent Q heads.
 
     Interface is identical to TFv6ResidualQNetworkTD3.
     """
@@ -361,7 +365,7 @@ class TFv6TransformerQNetworkTD3(nn.Module):
         rl_config=None,
     ) -> None:
         super().__init__()
-        self.backbone = backbone
+        object.__setattr__(self, "_backbone_ref", backbone)
 
         eff_rank = (
             0 if backbone.disable_residual_route else backbone.residual_route_rank
@@ -392,6 +396,10 @@ class TFv6TransformerQNetworkTD3(nn.Module):
             eff_rank=eff_rank,
             priv_dim=priv_dim,
         )
+
+    @property
+    def backbone(self) -> TFv6TransformerBackbone:
+        return object.__getattribute__(self, "_backbone_ref")
 
     def forward(
         self,

@@ -3,12 +3,12 @@
 Both actor and Q-networks receive a shared ``TFv6ResidualBackbone`` instance so
 TFv6 runs only once per forward pass. The design is:
 
-  - Q-networks *own* the backbone (it is a registered ``nn.Module`` child), so
-    ``qf.parameters()`` includes ``backbone.residual_cnn`` and
-    ``backbone.residual_status_proj``.
-  - Actor holds a *reference* to the backbone (not a child module) so
-    ``actor.parameters()`` contains only ``actor.residual_out``. This avoids
-    duplicate parameter registration when actor and Q-networks share one backbone.
+  - The trainer owns the backbone explicitly and passes its encoder parameters
+    to the critic optimizer.
+  - Actor and Q-networks hold a *reference* to the backbone (not a child module)
+    so ``actor.parameters()`` contains only ``actor.residual_out`` and
+    ``qf.parameters()`` contains only ``qf.q_head``. This avoids duplicate
+    parameter registration when actor and two Q-networks share one backbone.
 
 Usage pattern (training loop):
     # Online networks share one backbone.
@@ -31,7 +31,7 @@ Usage pattern (training loop):
         next_coeff = actor_target.forward_coeffs(next_obs)  # sets target_backbone state
         q1_next = qf1_target(next_obs, next_coeff)           # reuses target_backbone state
         q2_next = qf2_target(next_obs, next_coeff)           # reuses target_backbone state
-    q1 = qf1(obs, batch_coeff)                  # sets backbone state (via actor's backbone)
+    q1 = qf1(obs, batch_coeff)                  # reuses backbone state from actor
     q2 = qf2(obs, batch_coeff)
 
     # Actor update:
@@ -62,9 +62,9 @@ class TFv6ResidualActorTD3(nn.Module):
 
     def __init__(self, backbone: TFv6ResidualBackbone, rl_config=None) -> None:
         super().__init__()
-        # Backbone is NOT a registered child: its trainable parameters belong to
-        # the critic optimizer. Stored as a plain reference to keep
-        # actor.parameters() limited to residual_out only.
+        # Backbone is NOT a registered child: the trainer owns it explicitly.
+        # Stored as a plain reference to keep actor.parameters() limited to
+        # residual_out only.
         object.__setattr__(self, "_backbone_ref", backbone)
         token_dim = backbone.value_token_dim
         rank = backbone.residual_route_rank
@@ -222,9 +222,9 @@ class TFv6ResidualQNetworkTD3(nn.Module):
         rl_config=None,
     ) -> None:
         super().__init__()
-        # Registered child module: backbone.residual_cnn and
-        # residual_status_proj belong to the critic optimizer.
-        self.backbone = backbone
+        # Backbone is NOT a registered child: the trainer owns it explicitly and
+        # passes backbone.encoder_parameters() to the critic optimizer.
+        object.__setattr__(self, "_backbone_ref", backbone)
 
         token_dim = backbone.value_token_dim
         rank = backbone.residual_route_rank
@@ -262,6 +262,10 @@ class TFv6ResidualQNetworkTD3(nn.Module):
             nn.GELU(),
             nn.Linear(q_hidden_dim, 1),
         )
+
+    @property
+    def backbone(self) -> TFv6ResidualBackbone:
+        return object.__getattribute__(self, "_backbone_ref")
 
     def forward(
         self,
