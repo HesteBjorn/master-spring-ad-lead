@@ -3,12 +3,12 @@
 Both actor and Q-networks receive a shared ``TFv6ResidualBackbone`` instance so
 TFv6 runs only once per forward pass. The design is:
 
-  - Actor *owns* the backbone (it is a registered ``nn.Module`` child), so
-    ``actor.parameters()`` includes ``backbone.residual_cnn`` and
+  - Q-networks *own* the backbone (it is a registered ``nn.Module`` child), so
+    ``qf.parameters()`` includes ``backbone.residual_cnn`` and
     ``backbone.residual_status_proj``.
-  - Q-networks hold a *reference* to the backbone (not a child module) so
-    ``qf.parameters()`` only contains ``qf.q_head``. This avoids duplicate
-    parameter registration when actor and Q-networks share one backbone.
+  - Actor holds a *reference* to the backbone (not a child module) so
+    ``actor.parameters()`` contains only ``actor.residual_out``. This avoids
+    duplicate parameter registration when actor and Q-networks share one backbone.
 
 Usage pattern (training loop):
     # Online networks share one backbone.
@@ -62,9 +62,10 @@ class TFv6ResidualActorTD3(nn.Module):
 
     def __init__(self, backbone: TFv6ResidualBackbone, rl_config=None) -> None:
         super().__init__()
-        # Backbone is a registered child: actor owns backbone.residual_cnn +
-        # backbone.residual_status_proj. TFv6 inside backbone is frozen.
-        self.backbone = backbone
+        # Backbone is NOT a registered child: its trainable parameters belong to
+        # the critic optimizer. Stored as a plain reference to keep
+        # actor.parameters() limited to residual_out only.
+        object.__setattr__(self, "_backbone_ref", backbone)
         token_dim = backbone.value_token_dim
         rank = backbone.residual_route_rank
         hidden_dim = 512
@@ -85,6 +86,10 @@ class TFv6ResidualActorTD3(nn.Module):
         )
         nn.init.zeros_(self.residual_out[-2].weight)
         nn.init.zeros_(self.residual_out[-2].bias)
+
+    @property
+    def backbone(self) -> TFv6ResidualBackbone:
+        return object.__getattribute__(self, "_backbone_ref")
 
     @property
     def rank(self) -> int:
@@ -217,9 +222,9 @@ class TFv6ResidualQNetworkTD3(nn.Module):
         rl_config=None,
     ) -> None:
         super().__init__()
-        # Plain attribute — NOT registered as child module.
-        # backbone.parameters() are owned by the actor, not this Q-network.
-        object.__setattr__(self, "_backbone_ref", backbone)
+        # Registered child module: backbone.residual_cnn and
+        # residual_status_proj belong to the critic optimizer.
+        self.backbone = backbone
 
         token_dim = backbone.value_token_dim
         rank = backbone.residual_route_rank
@@ -257,10 +262,6 @@ class TFv6ResidualQNetworkTD3(nn.Module):
             nn.GELU(),
             nn.Linear(q_hidden_dim, 1),
         )
-
-    @property
-    def backbone(self) -> TFv6ResidualBackbone:
-        return object.__getattribute__(self, "_backbone_ref")
 
     def forward(
         self,

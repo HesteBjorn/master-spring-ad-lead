@@ -163,7 +163,7 @@ class CriticDecoder(_ResidualTransformerDecoder):
 class TFv6TransformerActorTD3(nn.Module):
     """Transformer residual actor for TD3.
 
-    self.backbone     = TFv6TransformerBackbone (registered child, TFv6 frozen).
+    self.backbone     = TFv6TransformerBackbone (plain reference, NOT a child module).
     self.residual_out = ActorDecoder            (used by actor_optimizer).
 
     Interface is identical to TFv6ResidualActorTD3: same method names and
@@ -172,7 +172,7 @@ class TFv6TransformerActorTD3(nn.Module):
 
     def __init__(self, backbone: TFv6TransformerBackbone, rl_config=None) -> None:
         super().__init__()
-        self.backbone = backbone
+        object.__setattr__(self, "_backbone_ref", backbone)
         eff_rank = (
             0 if backbone.disable_residual_route else backbone.residual_route_rank
         )
@@ -184,6 +184,10 @@ class TFv6TransformerActorTD3(nn.Module):
             ffn_dim=FFN_DIM,
             coeff_dim=eff_rank + 1,
         )
+
+    @property
+    def backbone(self) -> TFv6TransformerBackbone:
+        return object.__getattribute__(self, "_backbone_ref")
 
     @property
     def rank(self) -> int:
@@ -281,8 +285,8 @@ class TFv6TransformerActorTD3(nn.Module):
 class TFv6TransformerQNetworkTD3(nn.Module):
     """Transformer Q-network for TD3.
 
-    self.q_head = CriticDecoder (used by critic_optimizer).
-    backbone is held as a non-registered plain attribute (owned by the actor).
+    self.backbone = TFv6TransformerBackbone (registered child, owned by critic, TFv6 is frozen).
+    self.q_head   = CriticDecoder (used by critic_optimizer).
 
     Interface is identical to TFv6ResidualQNetworkTD3.
     """
@@ -293,7 +297,7 @@ class TFv6TransformerQNetworkTD3(nn.Module):
         rl_config=None,
     ) -> None:
         super().__init__()
-        object.__setattr__(self, "_backbone_ref", backbone)
+        self.backbone = backbone
 
         eff_rank = (
             0 if backbone.disable_residual_route else backbone.residual_route_rank
@@ -326,10 +330,6 @@ class TFv6TransformerQNetworkTD3(nn.Module):
             ffn_dim=FFN_DIM,
             action_dim=action_dim + extra_dim,
         )
-
-    @property
-    def backbone(self) -> TFv6TransformerBackbone:
-        return object.__getattribute__(self, "_backbone_ref")
 
     def forward(
         self,
