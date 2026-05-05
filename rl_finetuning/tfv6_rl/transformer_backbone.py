@@ -6,9 +6,11 @@ via a small convolutional stem into spatial tokens, and all TFv6 status
 tokens are preserved individually — giving the decoder full spatial and
 semantic resolution to attend over.
 
-Attribute names (residual_cnn, residual_status_proj) are kept identical
-to TFv6ResidualBackbone so the training script optimizer lines, checkpoint
-helpers, and parameter-count logging all work without modification.
+Trainable encoder attributes are named bev_token_encoder and
+status_token_encoder. The training script accesses them exclusively via
+the encoder_parameters() / encoder_modules() / encoder_state_dict() /
+load_encoder_state_dict() interface, so names don't need to match
+TFv6ResidualBackbone.
 
 Key interface difference from TFv6ResidualBackbone:
   get_residual_features() returns [B, N_tokens, D] instead of [B, 2*D].
@@ -128,11 +130,8 @@ class TFv6TransformerBackbone(nn.Module):
     """Frozen TFv6 base policy + transformer token encoder.
 
     The trainable modules are:
-      residual_cnn         = BEVTokenEncoder  (BEV grid → spatial tokens)
-      residual_status_proj = StatusTokenEncoder (status + base action → tokens)
-
-    These names are kept identical to TFv6ResidualBackbone so the
-    training script optimizer and checkpoint helpers work unchanged.
+      bev_token_encoder    = BEVTokenEncoder    (BEV grid → spatial tokens)
+      status_token_encoder = StatusTokenEncoder (status + base action → tokens)
     """
 
     def __init__(
@@ -254,13 +253,13 @@ class TFv6TransformerBackbone(nn.Module):
         self._n_status_tokens: int = n_status
 
         # ── Trainable encoder modules ─────────────────────────────────────────
-        self.residual_cnn = BEVTokenEncoder(
+        self.bev_token_encoder = BEVTokenEncoder(
             in_channels=bev_channels,
             d_model=d_model,
             n_h=self._bev_h,
             n_w=self._bev_w,
         )
-        self.residual_status_proj = StatusTokenEncoder(
+        self.status_token_encoder = StatusTokenEncoder(
             status_dim=self.value_token_dim,
             d_model=d_model,
             n_status=n_status,
@@ -272,6 +271,28 @@ class TFv6TransformerBackbone(nn.Module):
         self._last_target_speed_logits: torch.Tensor | None = None
         self._cached_kv_status_tokens: torch.Tensor | None = None
         self.rl_config = rl_config
+
+    # ── Encoder interface ─────────────────────────────────────────────────────
+
+    def encoder_parameters(self) -> list:
+        """Trainable backbone parameters for the critic optimizer."""
+        return list(self.bev_token_encoder.parameters()) + list(
+            self.status_token_encoder.parameters()
+        )
+
+    def encoder_modules(self) -> list[nn.Module]:
+        """Ordered list of trainable encoder modules for Polyak updates."""
+        return [self.bev_token_encoder, self.status_token_encoder]
+
+    def encoder_state_dict(self) -> dict:
+        return {
+            "bev_token_encoder": self.bev_token_encoder.state_dict(),
+            "status_token_encoder": self.status_token_encoder.state_dict(),
+        }
+
+    def load_encoder_state_dict(self, state_dict: dict) -> None:
+        self.bev_token_encoder.load_state_dict(state_dict["bev_token_encoder"])
+        self.status_token_encoder.load_state_dict(state_dict["status_token_encoder"])
 
     def _extract_tfv6_obs(self, obs_dict: dict) -> dict:
         _skip = {"privileged_measurements", "speed_history"}
@@ -327,7 +348,7 @@ class TFv6TransformerBackbone(nn.Module):
             raise RuntimeError(
                 "bev_features not found — call get_base_action() or set_feature_cache() first."
             )
-        bev_tokens = self.residual_cnn(bev.detach().float())  # [B, N_spatial, D]
+        bev_tokens = self.bev_token_encoder(bev.detach().float())  # [B, N_spatial, D]
 
         if self._cached_kv_status_tokens is not None:
             kv_status = self._cached_kv_status_tokens.float()
@@ -344,7 +365,7 @@ class TFv6TransformerBackbone(nn.Module):
         route_dim = self.action_codec.route_dim
         base_route = base_action_mean[:, :route_dim].float()
         base_speed = base_action_mean[:, route_dim:].float()
-        context_tokens = self.residual_status_proj(
+        context_tokens = self.status_token_encoder(
             kv_status, base_route, base_speed
         )  # [B, N_status+2, D]
 

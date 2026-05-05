@@ -202,6 +202,28 @@ class TFv6ResidualBackbone(nn.Module):
         self.n_spatial_tokens: int = self._bev_h * self._bev_w
         self.rl_config = rl_config
 
+    # ── Encoder interface ─────────────────────────────────────────────────────
+
+    def encoder_parameters(self) -> list:
+        """Trainable backbone parameters for the critic optimizer."""
+        return list(self.residual_cnn.parameters()) + list(
+            self.residual_status_proj.parameters()
+        )
+
+    def encoder_modules(self) -> list[nn.Module]:
+        """Ordered list of trainable encoder modules for Polyak updates."""
+        return [self.residual_cnn, self.residual_status_proj]
+
+    def encoder_state_dict(self) -> dict:
+        return {
+            "residual_cnn": self.residual_cnn.state_dict(),
+            "residual_status_proj": self.residual_status_proj.state_dict(),
+        }
+
+    def load_encoder_state_dict(self, state_dict: dict) -> None:
+        self.residual_cnn.load_state_dict(state_dict["residual_cnn"])
+        self.residual_status_proj.load_state_dict(state_dict["residual_status_proj"])
+
     def _extract_tfv6_obs(self, obs_dict: dict) -> dict:
         """Strip RL-only keys that are not TFv6 sensor inputs."""
         _skip = {"privileged_measurements", "speed_history"}

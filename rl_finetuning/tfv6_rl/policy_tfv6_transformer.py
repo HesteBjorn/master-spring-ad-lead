@@ -16,8 +16,8 @@ queries enrich the self-attention signal before the primary query is read.
 
 External interface is identical to policy_tfv6_td3.py:
   actor.residual_out       → actor_optimizer
-  backbone.residual_cnn    → critic_optimizer
-  backbone.residual_status_proj → critic_optimizer
+  backbone.bev_token_encoder    → critic_optimizer
+  backbone.status_token_encoder → critic_optimizer
   qf.q_head                → critic_optimizer
 """
 

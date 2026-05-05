@@ -865,14 +865,8 @@ def _save_td3_checkpoint(
     optimizer_path = os.path.join(folder, f"optimizer_{stem}.pth")
 
     # Backbone learnable state (skip TFv6 — large, always reloaded from checkpoint dir).
-    backbone_learnable = {
-        "residual_cnn": backbone.residual_cnn.state_dict(),
-        "residual_status_proj": backbone.residual_status_proj.state_dict(),
-    }
-    target_backbone_learnable = {
-        "residual_cnn": target_backbone.residual_cnn.state_dict(),
-        "residual_status_proj": target_backbone.residual_status_proj.state_dict(),
-    }
+    backbone_learnable = backbone.encoder_state_dict()
+    target_backbone_learnable = target_backbone.encoder_state_dict()
 
     torch.save(
         {
@@ -959,16 +953,12 @@ def _load_td3_checkpoint(
     """Load TD3 checkpoint. Returns global_step to resume from."""
     ckpt = torch.load(load_file, map_location=device)
 
-    bb = ckpt["backbone"]
-    backbone.residual_cnn.load_state_dict(bb["residual_cnn"])
-    backbone.residual_status_proj.load_state_dict(bb["residual_status_proj"])
+    backbone.load_encoder_state_dict(ckpt["backbone"])
     actor.residual_out.load_state_dict(ckpt["actor_residual_out"])
     qf1.q_head.load_state_dict(ckpt["qf1_q_head"])
     qf2.q_head.load_state_dict(ckpt["qf2_q_head"])
 
-    tbb = ckpt["target_backbone"]
-    target_backbone.residual_cnn.load_state_dict(tbb["residual_cnn"])
-    target_backbone.residual_status_proj.load_state_dict(tbb["residual_status_proj"])
+    target_backbone.load_encoder_state_dict(ckpt["target_backbone"])
     actor_target.residual_out.load_state_dict(ckpt["actor_target_residual_out"])
     qf1_target.q_head.load_state_dict(ckpt["qf1_target_q_head"])
     qf2_target.q_head.load_state_dict(ckpt["qf2_target_q_head"])
@@ -1156,8 +1146,7 @@ def main():
     critic_optimizer = optim.Adam(
         list(qf1.q_head.parameters())
         + list(qf2.q_head.parameters())
-        + list(backbone.residual_cnn.parameters())
-        + list(backbone.residual_status_proj.parameters()),
+        + backbone.encoder_parameters(),
         lr=args.critic_lr,
         eps=args.adam_eps,
         betas=(args.beta_1, args.beta_2),
@@ -1490,24 +1479,19 @@ def main():
                 critic_grad_norm = nn.utils.clip_grad_norm_(
                     list(qf1.q_head.parameters())
                     + list(qf2.q_head.parameters())
-                    + list(backbone.residual_cnn.parameters())
-                    + list(backbone.residual_status_proj.parameters()),
+                    + backbone.encoder_parameters(),
                     args.max_grad_norm,
                 )
                 critic_optimizer.step()
 
                 # Keep critic targets synchronized during critic-only warmup so
                 # Bellman bootstrapping does not rely on stale/random target heads.
-                _polyak_update(
-                    backbone.residual_cnn,
-                    target_backbone.residual_cnn,
-                    args.tau,
-                )
-                _polyak_update(
-                    backbone.residual_status_proj,
-                    target_backbone.residual_status_proj,
-                    args.tau,
-                )
+                for _online, _target in zip(
+                    backbone.encoder_modules(),
+                    target_backbone.encoder_modules(),
+                    strict=True,
+                ):
+                    _polyak_update(_online, _target, args.tau)
                 _polyak_update(qf1.q_head, qf1_target.q_head, args.tau)
                 _polyak_update(qf2.q_head, qf2_target.q_head, args.tau)
 
