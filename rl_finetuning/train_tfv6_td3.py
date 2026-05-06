@@ -725,6 +725,9 @@ def parse_args(config):
                         default=config.use_single_reward, nargs='?', const=True)
     parser.add_argument('--use_new_stop_sign_detector', type=lambda x: bool(strtobool(x)),
                         default=config.use_new_stop_sign_detector, nargs='?', const=True)
+    parser.add_argument('--use_stop_sign_value_measurements', type=lambda x: bool(strtobool(x)),
+                        default=getattr(config, 'use_stop_sign_value_measurements', False),
+                        nargs='?', const=True)
     parser.add_argument('--terminal_hint', type=float, default=config.terminal_hint)
     parser.add_argument('--terminal_penalty_warmup_n', type=int, default=0)
     parser.add_argument('--lane_distance_violation_threshold', type=float,

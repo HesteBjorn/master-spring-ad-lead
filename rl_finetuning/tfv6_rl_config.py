@@ -16,6 +16,7 @@ class GlobalConfig(CaRLGlobalConfig):
         # Keep TFv6 default behavior independent from upstream CaRL defaults.
         self.lr_schedule = "linear"
         self.use_value_measurements = True
+        self.use_stop_sign_value_measurements = False
         # TFv6 PPO policy defaults.
         self.use_correlated_noise = False
         self.correlated_noise_rho = 0.8

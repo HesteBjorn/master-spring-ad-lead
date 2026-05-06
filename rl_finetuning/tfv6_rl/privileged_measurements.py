@@ -5,6 +5,8 @@ from typing import Any
 
 def privileged_measurement_names(rl_config: Any) -> list[str]:
     names = ["remaining_time", "time_till_blocked", "perc_route_left"]
+    if bool(getattr(rl_config, "use_stop_sign_value_measurements", False)):
+        names.extend(["stop_required", "stop_distance"])
     if bool(getattr(rl_config, "use_ttc", False)):
         names.append("remaining_ttc_penalty_ticks")
     if bool(getattr(rl_config, "use_comfort_infraction", False)):
@@ -34,6 +36,8 @@ def validate_privileged_measurement_dim(rl_config: Any) -> None:
         raise ValueError(
             "num_value_measurements does not match enabled privileged measurements: "
             f"config={cfg_dim}, expected={expected} "
-            f"(use_ttc={getattr(rl_config, 'use_ttc', False)}, "
+            "enabled=("
+            f"use_stop_sign_value_measurements={getattr(rl_config, 'use_stop_sign_value_measurements', False)}, "
+            f"use_ttc={getattr(rl_config, 'use_ttc', False)}, "
             f"use_comfort_infraction={getattr(rl_config, 'use_comfort_infraction', False)})"
         )

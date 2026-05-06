@@ -36,6 +36,7 @@ from lead.common.sensor_setup import av_sensor_setup
 from lead.data_loader import carla_dataset_utils, training_cache
 from lead.data_loader.carla_dataset_utils import rasterize_lidar
 from lead.expert.config_expert import ExpertConfig
+from lead.expert.hdmap.run_stop_sign import RunStopSign
 from lead.inference.config_closed_loop import ClosedLoopConfig
 from rl_finetuning.tfv6_rl.action_codec import ActionCodec, infer_action_head_usage
 from rl_finetuning.tfv6_rl.obs_codec import ObsCodec
@@ -192,6 +193,7 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         self.standstill_speed_hold_reward_accumulator = 0.0
         self.pending_speed_hold_frames = 0
         self.pending_speed_hold_target_speed = None
+        self.stop_sign_criteria: RunStopSign | None = None
 
     def set_global_plan(self, global_plan_world_coord):
         self.dense_global_plan_world_coord = global_plan_world_coord
@@ -225,6 +227,7 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         self.pending_speed_hold_frames = 0
         self.pending_speed_hold_target_speed = None
         self._speed_history: deque | None = None
+        self.stop_sign_criteria: RunStopSign | None = None
         # Route-local state must be reset each route. The leaderboard reuses the
         # same agent instance across route repetitions.
         self.initialized_route = False
@@ -370,6 +373,10 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
 
         self.route_planner = CarlaRoutePlanner()
         self.route_planner.set_route(self.dense_global_plan_world_coord)
+        if bool(getattr(self.rl_config, "use_stop_sign_value_measurements", False)):
+            self.stop_sign_criteria = RunStopSign(self.world)
+        else:
+            self.stop_sign_criteria = None
 
         self.pending_speed_hold_frames = 0
         self.pending_speed_hold_target_speed = None
@@ -570,6 +577,27 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         perc_route_left = float(len(waypoint_route)) / 100.0
 
         values: list[float] = [remaining_time, time_till_blocked, perc_route_left]
+
+        if bool(getattr(self.rl_config, "use_stop_sign_value_measurements", False)):
+            stop_required = 0.0
+            stop_distance = 1.0
+            if self.stop_sign_criteria is not None:
+                self.stop_sign_criteria.tick(self.vehicle)
+                target_stop = self.stop_sign_criteria.target_stop_sign
+                stop_completed = bool(self.stop_sign_criteria.stop_completed)
+                affected_by_stop = bool(self.stop_sign_criteria.affected_by_stop)
+                if target_stop is not None and (
+                    not stop_completed or not affected_by_stop
+                ):
+                    stop_required = 1.0
+                    ego_loc = self.vehicle.get_location()
+                    stop_transform = target_stop.get_transform()
+                    stop_loc = stop_transform.transform(
+                        target_stop.trigger_volume.location
+                    )
+                    raw_distance = float(ego_loc.distance(stop_loc))
+                    stop_distance = float(np.clip(raw_distance / 30.0, 0.0, 1.0))
+            values.extend([stop_required, stop_distance])
 
         if bool(getattr(self.rl_config, "use_ttc", False)):
             ttc_ticks = float(max(getattr(self.rl_config, "ttc_penalty_ticks", 1), 1))
