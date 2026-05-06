@@ -199,6 +199,7 @@ class CriticDecoder(_ResidualTransformerDecoder):
         ffn_dim: int,
         eff_rank: int,
         priv_dim: int = 0,
+        concat_action_after_decoder: bool = False,
     ):
         super().__init__(d_model, n_heads, n_layers, n_queries, ffn_dim)
         self.action_encoder = CriticActionTokenEncoder(eff_rank, d_model)
@@ -206,9 +207,11 @@ class CriticDecoder(_ResidualTransformerDecoder):
             CriticPrivilegedTokenEncoder(priv_dim, d_model) if priv_dim > 0 else None
         )
         self.kv_norm = nn.LayerNorm(d_model)
+        self.concat_action_after_decoder = concat_action_after_decoder
+        q_head_in = d_model + (eff_rank + 1) if concat_action_after_decoder else d_model
         self.q_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, d_model),
+            nn.LayerNorm(q_head_in),
+            nn.Linear(q_head_in, d_model),
             nn.LayerNorm(d_model),
             nn.GELU(),
             nn.Linear(d_model, 1),
@@ -226,7 +229,12 @@ class CriticDecoder(_ResidualTransformerDecoder):
             priv_tok = self.priv_encoder(privileged)  # [B, 1, D]
             kv = torch.cat([kv, priv_tok], dim=1)
         decoded = self._decode(self.kv_norm(kv))  # [B, N_queries, D]
-        return self.q_head(decoded[:, 0])  # [B, 1]
+        q_input = (
+            torch.cat([decoded[:, 0], action_coeffs.float()], dim=-1)
+            if self.concat_action_after_decoder
+            else decoded[:, 0]
+        )
+        return self.q_head(q_input)  # [B, 1]
 
 
 # ── Actor ─────────────────────────────────────────────────────────────────────
@@ -396,6 +404,13 @@ class TFv6TransformerQNetworkTD3(nn.Module):
             ffn_dim=FFN_DIM,
             eff_rank=eff_rank,
             priv_dim=priv_dim,
+            concat_action_after_decoder=bool(
+                getattr(
+                    rl_config,
+                    "transformer_concat_coef_action_to_head_after_decoder",
+                    False,
+                )
+            ),
         )
 
     @property

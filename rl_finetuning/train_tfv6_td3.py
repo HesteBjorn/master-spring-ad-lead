@@ -692,6 +692,9 @@ def parse_args(config):
     parser.add_argument('--architecture', type=str, default='cnn',
                         choices=['cnn', 'transformer'],
                         help='Residual encoder architecture: cnn (default) or transformer.')
+    parser.add_argument('--transformer_concat_coef_action_to_head_after_decoder',
+                        type=strtobool, default=False, nargs='?', const=True,
+                        help='Transformer critic: concat action_coeffs to decoded query before Q-head.')
 
     # ── Reward ───────────────────────────────────────────────────────────────
     parser.add_argument('--reward_type', type=str, default=config.reward_type)
