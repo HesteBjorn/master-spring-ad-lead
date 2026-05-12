@@ -689,6 +689,18 @@ def parse_args(config):
     parser.add_argument('--speed_history_len', type=int,
                         default=getattr(config, 'speed_history_len', 0),
                         help='Number of recent speed values appended to actor+critic inputs (0=disabled).')
+    parser.add_argument('--cnn_conv_width', type=int,
+                        default=getattr(config, 'cnn_conv_width', 64),
+                        help='Residual CNN hidden channel width. Default 64 reproduces the original architecture.')
+    parser.add_argument('--cnn_pooling', type=str,
+                        default=getattr(config, 'cnn_pooling', 'gap'),
+                        choices=['gap', 'adaptiveavgpool2d23', 'stridedcnn'],
+                        help='Residual CNN spatial reduction: gap=AdaptiveAvgPool2d(1), '
+                             'adaptiveavgpool2d23=coarse 2x3 average pooling, '
+                             'stridedcnn=learned stride-2 conv downsampling to a coarse map.')
+    parser.add_argument('--cnn_td3_head_hidden_dim', type=int,
+                        default=getattr(config, 'cnn_td3_head_hidden_dim', 512),
+                        help='Hidden width for TD3 actor residual head and critic Q-heads. Default 512.')
     parser.add_argument('--architecture', type=str, default='cnn',
                         choices=['cnn', 'transformer'],
                         help='Residual encoder architecture: cnn (default) or transformer.')
@@ -1063,6 +1075,10 @@ def main():
         raise ValueError("--utd_actor must be > 0")
     if args.utd_actor > args.utd_ratio:
         raise ValueError("--utd_actor must be <= --utd_ratio")
+    if args.cnn_conv_width <= 0:
+        raise ValueError("--cnn_conv_width must be > 0")
+    if args.cnn_td3_head_hidden_dim <= 0:
+        raise ValueError("--cnn_td3_head_hidden_dim must be > 0")
 
     config.initialize(**vars(args))
 

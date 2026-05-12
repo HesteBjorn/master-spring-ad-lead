@@ -66,20 +66,25 @@ class TFv6ResidualActorTD3(nn.Module):
         # Stored as a plain reference to keep actor.parameters() limited to
         # residual_out only.
         object.__setattr__(self, "_backbone_ref", backbone)
-        token_dim = backbone.value_token_dim
         rank = backbone.residual_route_rank
-        hidden_dim = 512
+        hidden_dim = (
+            int(getattr(rl_config, "cnn_td3_head_hidden_dim", 512))
+            if rl_config is not None
+            else 512
+        )
         # When route correction is disabled, output only the speed scalar.
         # This drops the route coefficient entirely so it cannot introduce noisy
         # gradients into the shared hidden layer during actor/critic updates.
         eff_rank = 0 if backbone.disable_residual_route else rank
-        # Output head: [B, 2*token_dim] → [B, eff_rank+1] coefficient means in (-1, 1).
+        # Output head: residual features -> [B, eff_rank+1] coefficient means in (-1, 1).
         # Tanh bounds coefficients so alpha*coeff is always within [-alpha, +alpha],
         # matches the [-1,1] clamp assumed by target policy smoothing, and keeps
         # gradients alive (no dead zone from action.clamp saturation).
         # Final linear zero-initialized so actor starts at TFv6 base policy (tanh(0)=0).
         self.residual_out = nn.Sequential(
-            nn.Linear(token_dim * 2 + backbone.speed_history_len, hidden_dim),
+            nn.Linear(
+                backbone.residual_feature_dim + backbone.speed_history_len, hidden_dim
+            ),
             nn.GELU(),
             nn.Linear(hidden_dim, eff_rank + 1),
             nn.Tanh(),
@@ -226,7 +231,6 @@ class TFv6ResidualQNetworkTD3(nn.Module):
         # passes backbone.encoder_parameters() to the critic optimizer.
         object.__setattr__(self, "_backbone_ref", backbone)
 
-        token_dim = backbone.value_token_dim
         rank = backbone.residual_route_rank
         eff_rank = 0 if backbone.disable_residual_route else rank
         action_dim = eff_rank + 1
@@ -248,9 +252,18 @@ class TFv6ResidualQNetworkTD3(nn.Module):
             self.num_privileged_measurements if self.use_privileged_measurements else 0
         )
         self.speed_history_len: int = backbone.speed_history_len
-        q_in_dim = token_dim * 2 + action_dim + priv_dim + self.speed_history_len
+        q_in_dim = (
+            backbone.residual_feature_dim
+            + action_dim
+            + priv_dim
+            + self.speed_history_len
+        )
 
-        q_hidden_dim = 512
+        q_hidden_dim = (
+            int(getattr(rl_config, "cnn_td3_head_hidden_dim", 512))
+            if rl_config is not None
+            else 512
+        )
         # Q-head mirrors PPO value_head, but uses a wider TD3 critic head.
         self.q_head = nn.Sequential(
             nn.LayerNorm(q_in_dim),

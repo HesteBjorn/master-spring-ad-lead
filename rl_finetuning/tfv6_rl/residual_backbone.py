@@ -124,6 +124,8 @@ class TFv6ResidualBackbone(nn.Module):
         self.residual_alpha: float = 0.15
         self.residual_alpha_speed: float = 0.15
         self.disable_residual_route: bool = False
+        self.cnn_conv_width: int = 64
+        self.cnn_pooling: str = "gap"
         if rl_config is not None:
             self.skip_perception_heads = bool(
                 getattr(rl_config, "skip_perception_heads", self.skip_perception_heads)
@@ -145,6 +147,10 @@ class TFv6ResidualBackbone(nn.Module):
                     rl_config, "disable_residual_route", self.disable_residual_route
                 )
             )
+            self.cnn_conv_width = int(
+                getattr(rl_config, "cnn_conv_width", self.cnn_conv_width)
+            )
+            self.cnn_pooling = str(getattr(rl_config, "cnn_pooling", self.cnn_pooling))
         self.speed_history_len: int = (
             int(getattr(rl_config, "speed_history_len", 0))
             if rl_config is not None
@@ -169,23 +175,64 @@ class TFv6ResidualBackbone(nn.Module):
         # ── Residual CNN architecture ──────────────────────────────────────
         token_dim = self.value_token_dim
         bev_channels = self.tfv6.planning_decoder.planning_context_encoder.dimension_adapter.in_channels
-        _bev_hidden = 64
-        # Spatial branch: 1×1 channel reduction → two 3×3 spatial convs → GAP.
-        self.residual_cnn = nn.Sequential(
-            nn.Conv2d(bev_channels, _bev_hidden, kernel_size=1),
-            nn.GELU(),
-            nn.Conv2d(_bev_hidden, _bev_hidden, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv2d(_bev_hidden, token_dim, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-        )
+        _bev_hidden = self.cnn_conv_width
+        if _bev_hidden <= 0:
+            raise ValueError(f"cnn_conv_width must be > 0, got {_bev_hidden}")
+        if self.cnn_pooling == "gap":
+            # Original spatial branch: 1x1 channel reduction -> two 3x3 convs -> GAP.
+            self.residual_cnn = nn.Sequential(
+                nn.Conv2d(bev_channels, _bev_hidden, kernel_size=1),
+                nn.GELU(),
+                nn.Conv2d(_bev_hidden, _bev_hidden, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(_bev_hidden, token_dim, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+            )
+            self.spatial_feature_dim = token_dim
+        elif self.cnn_pooling == "adaptiveavgpool2d23":
+            self.residual_cnn = nn.Sequential(
+                nn.Conv2d(bev_channels, _bev_hidden, kernel_size=1),
+                nn.GELU(),
+                nn.Conv2d(_bev_hidden, _bev_hidden, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(_bev_hidden, token_dim, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.AdaptiveAvgPool2d((2, 3)),
+                nn.Flatten(),
+            )
+            self.spatial_feature_dim = token_dim * 2 * 3
+        elif self.cnn_pooling == "stridedcnn":
+            # Learned spatial reduction from 10x12 to roughly 3x3 before flatten.
+            self.residual_cnn = nn.Sequential(
+                nn.Conv2d(bev_channels, _bev_hidden, kernel_size=1),
+                nn.GELU(),
+                nn.Conv2d(_bev_hidden, _bev_hidden, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(_bev_hidden, token_dim, kernel_size=3, stride=2, padding=1),
+                nn.GELU(),
+                nn.Conv2d(token_dim, token_dim, kernel_size=3, stride=2, padding=1),
+                nn.GELU(),
+                nn.Flatten(),
+            )
+            out_h = (getattr(self.training_config, "lidar_vert_anchors", 10) + 1) // 2
+            out_w = (getattr(self.training_config, "lidar_horz_anchors", 12) + 1) // 2
+            out_h = (out_h + 1) // 2
+            out_w = (out_w + 1) // 2
+            self.spatial_feature_dim = token_dim * out_h * out_w
+        else:
+            raise ValueError(
+                "cnn_pooling must be one of: gap, adaptiveavgpool2d23, stridedcnn; "
+                f"got {self.cnn_pooling!r}"
+            )
         # Status branch: mean-pooled status KV tokens + TFv6 base action → linear.
         residual_action_dim = self.action_codec.route_dim + 1
         self.residual_status_proj = nn.Linear(
             token_dim + residual_action_dim, token_dim
         )
+        self.status_feature_dim = token_dim
+        self.residual_feature_dim = self.spatial_feature_dim + self.status_feature_dim
 
         # Cache set by get_base_action(), read by get_residual_features().
         # Not a Parameter — not saved in state_dict.
@@ -292,7 +339,7 @@ class TFv6ResidualBackbone(nn.Module):
             base_action_mean: [B, route_dim+1]  TFv6 base action (route_norm + speed).
 
         Returns:
-            Tensor [B, 2*token_dim]
+            Tensor [B, residual_feature_dim]
         """
         bev = getattr(self.tfv6, "bev_features", None)
         if bev is None:

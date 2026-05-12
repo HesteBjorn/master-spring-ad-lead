@@ -73,6 +73,11 @@ class GlobalConfig(CaRLGlobalConfig):
         # to break the Markov violation at stop signs. 0 = disabled.
         # Set to e.g. 10 for 1 s of history at 10 Hz.
         self.speed_history_len = 0
+        # Residual TD3 CNN architecture ablations. Defaults reproduce the original
+        # 512->64->64->token_dim CNN with global average pooling.
+        self.cnn_conv_width = 64
+        self.cnn_pooling = "gap"
+        self.cnn_td3_head_hidden_dim = 512
 
         # ── TD3 algorithm hyperparameters ─────────────────────────────────
         # Replay buffer capacity (transitions).
