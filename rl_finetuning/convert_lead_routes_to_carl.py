@@ -3,13 +3,24 @@ from __future__ import annotations
 import argparse
 import gzip
 import math
+import os
 import pathlib
 import subprocess
+import sys
 import time
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-import carla
+carla_root = os.environ.get("CARLA_ROOT")
+if carla_root:
+    carla_python_api = pathlib.Path(carla_root) / "PythonAPI"
+    carla_agents_path = carla_python_api / "carla"
+    for path in (carla_agents_path, carla_python_api):
+        if path.exists() and str(path) not in sys.path:
+            sys.path.insert(0, str(path))
+
+import carla  # noqa: E402
+from agents.navigation.global_route_planner import GlobalRoutePlanner  # noqa: E402
 
 SCENARIO_TYPE_MAP = {
     "NonSignalizedJunctionLeftTurnEnterFlow": "NonSignalizedJunctionLeftTurn",
@@ -17,7 +28,6 @@ SCENARIO_TYPE_MAP = {
 }
 
 UNSUPPORTED_SCENARIOS = {
-    "CrossJunctionDefectTrafficLight",
     "RedLightWithoutLeadVehicle",
 }
 
@@ -181,6 +191,31 @@ def walk_to_target(
     return route
 
 
+def trace_to_target(
+    route_planner: GlobalRoutePlanner,
+    start_wp: carla.Waypoint,
+    target_wp: carla.Waypoint,
+    tolerance_meters: float,
+) -> list[tuple[carla.Transform, object]]:
+    route = route_planner.trace_route(
+        start_wp.transform.location,
+        target_wp.transform.location,
+    )
+    if not route:
+        raise ValueError("GlobalRoutePlanner returned an empty route segment")
+
+    remaining_distance = route[-1][0].transform.location.distance(
+        target_wp.transform.location
+    )
+    if remaining_distance > tolerance_meters:
+        raise ValueError(
+            "GlobalRoutePlanner failed to trace route close enough to target "
+            f"waypoint. Remaining distance: {remaining_distance:.2f}m"
+        )
+
+    return [(waypoint.transform, connection) for waypoint, connection in route]
+
+
 def build_dense_route(
     world_map: carla.Map,
     source_positions: list[ET.Element],
@@ -213,18 +248,25 @@ def build_dense_route(
         )
 
     start_wp = backtrack_spawn_waypoint(projected_wps[0], forward_hint, preroll_meters)
+    route_planner = GlobalRoutePlanner(world_map, hop_resolution)
 
     dense_route: list[tuple[carla.Transform, object]] = [(start_wp.transform, 4)]
     current_wp = start_wp
     for target_wp in projected_wps:
-        segment = walk_to_target(
+        segment = trace_to_target(
+            route_planner,
             current_wp,
             target_wp,
-            hop_resolution,
             tolerance_meters,
-            max_segment_steps,
         )
-        dense_route.extend(segment[1:])
+        for transform, connection in segment:
+            if transform.location.distance(dense_route[-1][0].location) <= 0.1:
+                continue
+            dense_route.append((transform, connection))
+
+        if target_wp.transform.location.distance(dense_route[-1][0].location) > 0.1:
+            dense_route.append((target_wp.transform, segment[-1][1]))
+
         current_wp = target_wp
 
     if len(dense_route) < 2:
@@ -331,10 +373,29 @@ def maybe_launch_carla(
     )
 
 
+def normalize_town_name(town: str) -> str:
+    town = town.strip()
+    if not town:
+        raise ValueError("Empty town name")
+    if town.lower().startswith("town"):
+        suffix = town[4:]
+        if suffix.lower() == "10hd":
+            return "Town10HD"
+        number = int(suffix)
+        if number == 10:
+            return "Town10HD"
+        return f"Town{number:02d}"
+    number = int(town)
+    if number == 10:
+        return "Town10HD"
+    return f"Town{number:02d}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source_dir", required=True, type=pathlib.Path)
     parser.add_argument("--dest_dir", required=True, type=pathlib.Path)
+    parser.add_argument("--towns", nargs="*", default=[])
     parser.add_argument("--skip_towns", nargs="*", default=[])
     parser.add_argument("--carla_host", default="127.0.0.1")
     parser.add_argument("--carla_port", default=2000, type=int)
@@ -351,6 +412,8 @@ def main() -> None:
         "--max_segment_steps", default=DEFAULT_MAX_SEGMENT_STEPS, type=int
     )
     args = parser.parse_args()
+    requested_towns = {normalize_town_name(town) for town in args.towns}
+    skipped_towns = {normalize_town_name(town) for town in args.skip_towns}
 
     source_dir = args.source_dir.resolve()
     dest_dir = args.dest_dir.resolve()
@@ -369,7 +432,9 @@ def main() -> None:
         if route is None:
             raise ValueError(f"{source_file} does not contain a route element")
         town = route.attrib["town"]
-        if town in args.skip_towns:
+        if requested_towns and town not in requested_towns:
+            continue
+        if town in skipped_towns:
             continue
         waypoints_elem = route.find("waypoints")
         scenarios_elem = route.find("scenarios")
@@ -382,7 +447,10 @@ def main() -> None:
         routes_by_town[town].append((source_file, route))
 
     if not routes_by_town:
-        raise ValueError("No routes left after applying town filters")
+        print("No routes left after applying town filters")
+        for skipped_file, reason in skipped_files:
+            print(f"Skipped {skipped_file}: {reason}")
+        return
 
     carla_process = maybe_launch_carla(
         args.carla_root.resolve() if args.carla_root else None, args.carla_port
@@ -415,7 +483,9 @@ def main() -> None:
                     routes_root.append(converted)
                     route_id += 1
                 except Exception as exc:  # noqa: BLE001
-                    skipped_files.append((source_file, f"conversion failed: {exc}"))
+                    reason = f"conversion failed: {exc}"
+                    skipped_files.append((source_file, reason))
+                    print(f"Skipped {source_file}: {reason}")
 
             if route_id == 0:
                 raise ValueError(f"No valid routes were generated for {town}")

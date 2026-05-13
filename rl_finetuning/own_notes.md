@@ -54,17 +54,17 @@ bash scripts/eval_bench2drive.sh
 # Training
 ## Generate scenarios:
 ```bash
-#Use the CaRL generator:
-cd 3rd_party/CaRL/CARLA/tools && \
-  python -u generate_long_routes_with_scenarios.py \
-    --save_folder /home/erikhbj/Documents/master/master-spring-ad-lead/3rd_party/CaRL/CARLA/custom_leaderboard/leaderboard/data/rl_finetuning_1000_meters_alltypes_dense80 \
-    --carla_root /home/erikhbj/Documents/master/master-spring-ad-lead/3rd_party/CARLA_0915 \
-    --scenario_runner_root /home/erikhbj/Documents/master/master-spring-ad-lead/3rd_party/CaRL/CARLA/custom_leaderboard/scenario_runner \
-    --start_repetition 0 \
-    --scenario_dilation 80 \
-    --generate_scenarios 1 \
-    --only_leaderboard_1 0 \
-    --route_length 1000
+# Convert all intersection LEAD routes to RL compatible:
+# conda activate lead
+# export CARLA_ROOT=/home/erikhbj/Documents/master/master-spring-ad-lead/3rd_party/CARLA_0915
+conda activate lead_carla_fork
+export CARLA_ROOT=/home/erikhbj/Documents/master/master-spring-ad-lead/3rd_party/fork_export_t1213_fixed/LinuxNoEditor
+unset PYTHONPATH
+bash scripts/start_carla.sh &
+sleep 15
+bash rl_finetuning/generate_all_intersection_routes.sh --train-towns "12 13" --source-dataset 50x --interleaved-2env
+# bash rl_finetuning/generate_all_intersection_routes.sh --train-towns "3 4 5 12 13" --source-dataset 50x --interleaved-2env  # For two envs on same town
+bash scripts/clean_carla.sh
 ```
 
 ## Visualize losses and rewards
