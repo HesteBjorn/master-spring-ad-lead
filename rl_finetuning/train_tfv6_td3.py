@@ -816,6 +816,9 @@ def parse_args(config):
                         default=config.condition_outside_junction, nargs='?', const=True)
     parser.add_argument('--eval_time', type=float, default=config.eval_time)
     parser.add_argument('--terminal_reward', type=float, default=config.terminal_reward)
+    parser.add_argument('--success_reward', type=float, default=config.success_reward)
+    parser.add_argument('--timeout_and_blocked_terminalhint', type=lambda x: bool(strtobool(x)),
+                        default=config.timeout_and_blocked_terminalhint, nargs='?', const=True)
     parser.add_argument('--min_thresh_lat_dist', type=float, default=config.min_thresh_lat_dist)
     parser.add_argument('--weight_decay', type=float, default=config.weight_decay)
     parser.add_argument('--adam_eps', type=float, default=config.adam_eps)

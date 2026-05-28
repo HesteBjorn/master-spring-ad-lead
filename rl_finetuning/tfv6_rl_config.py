@@ -108,3 +108,7 @@ class GlobalConfig(CaRLGlobalConfig):
         self.n_step_returns = 1
         # Keep sparse historical TD3 checkpoints while pruning transient save_every checkpoints.
         self.keep_every = 100_000
+        # Reward added when the agent successfully completes a route (truncation).
+        self.success_reward = 0.0
+        # Whether to apply terminal_hint penalty on timeout and ego_blocked terminations.
+        self.timeout_and_blocked_terminalhint = False
