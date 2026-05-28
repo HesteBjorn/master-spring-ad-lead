@@ -1,15 +1,15 @@
 #!/bin/bash
 
-# Checkpoints
-# export CHECKPOINT_DIR=outputs/checkpoints/tfv6_resnet34/  # outputs/checkpoints/tfv6_resnet34_rlfinetuned_modelbest
-# export AGENT=lead/inference/sensor_agent.py
-export CHECKPOINT_DIR=outputs/checkpoints/tfv6_residual_onlyspeed_latest
-export AGENT=rl_finetuning/inference/residual_sensor_agent.py  # NEED TO BE ACTIVE TO USE RESIDUAL
+# Defaults — override by exporting before calling, or edit here for standalone use
+: "${CHECKPOINT_DIR:=outputs/checkpoints/tfv6_resnet34/}"  # outputs/checkpoints/tfv6_resnet34_rlfinetuned_modelbest
+: "${AGENT:=lead/inference/sensor_agent.py}"
+# AGENT=rl_finetuning/inference/residual_sensor_agent.py  # NEED TO BE ACTIVE TO USE RESIDUAL
 
-# export ROUTES=data/benchmark_routes/bench2drive10routesexampleonlyfails.xml
-export ROUTES=data/benchmark_routes/bench2drive10NSLTEF.xml  # for left-turn eval
-# export ROUTES=data/benchmark_routes/bench2drive5NSRT.xml  # For right-turn eval
-# export ROUTES=data/benchmark_routes/bench2drive220routes/23687.xml  # For single route eval
+: "${ROUTES:=data/benchmark_routes/bench2drive20LT.xml}"  # All left-turn for eval
+# ROUTES=data/benchmark_routes/bench2drive10routesexampleonlyfails.xml
+# ROUTES=data/benchmark_routes/bench2drive10NSLTEF.xml  # for left-turn eval
+# ROUTES=data/benchmark_routes/bench2drive5NSRT.xml  # For right-turn eval
+# ROUTES=data/benchmark_routes/bench2drive220routes/23687.xml  # For single route eval
 
 # Set environment variables
 export BENCHMARK_ROUTE_ID=$(basename $ROUTES .xml) # Last part of the route file name, e.g., 0 for 0.xml

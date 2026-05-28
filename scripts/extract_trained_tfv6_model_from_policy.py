@@ -7,8 +7,7 @@ import os
 import shutil
 from pathlib import Path
 
-# Keys from GlobalConfig that TFv6PPOPolicy reads via getattr(rl_config, key, default).
-# Only primitive-valued keys are safe to round-trip through plain json.load().
+# Keys read by TFv6PPOPolicy (PPO residual agent) via getattr(rl_config, key, default).
 _RL_CONFIG_KEYS_FOR_EVAL = (
     "use_residual_policy",
     "residual_route_rank",
@@ -37,6 +36,20 @@ _RL_CONFIG_KEYS_FOR_EVAL = (
     "use_privileged_measurements",
     "num_privileged_measurements",
     "use_lstm",
+)
+
+# Keys read by TFv6ResidualBackbone + TFv6ResidualActorTD3 (TD3 residual agent).
+_RL_CONFIG_KEYS_FOR_EVAL_TD3 = (
+    "residual_route_rank",
+    "residual_alpha",
+    "residual_alpha_speed",
+    "disable_residual_route",
+    "speed_temperature",
+    "skip_perception_heads",
+    "cnn_conv_width",
+    "cnn_pooling",
+    "speed_history_len",
+    "cnn_td3_head_hidden_dim",
 )
 
 os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
@@ -189,6 +202,47 @@ def _validate_extracted_checkpoint(output_dir: Path) -> None:
     model.load_state_dict(state_dict, strict=True)
 
 
+def _is_td3_checkpoint(raw: dict) -> bool:
+    """Return True if the checkpoint looks like a TD3 trainer save."""
+    return "backbone" in raw and "actor_residual_out" in raw
+
+
+def _save_td3_eval_files(
+    policy_ckpt: Path,
+    output_dir: Path,
+) -> None:
+    """Save the files needed by TD3SensorAgent.
+
+    Adds to the already-prepared output_dir:
+      - td3_policy.pth  : full TD3 checkpoint (backbone encoder + actor head)
+      - rl_config.json  : primitive-valued subset of GlobalConfig for backbone/actor
+    """
+    td3_policy_path = output_dir / "td3_policy.pth"
+    shutil.copy2(policy_ckpt, td3_policy_path)
+    print(f"[extract-tfv6] td3_policy.pth -> {td3_policy_path}", flush=True)
+
+    # Parse rl config from the JSON string embedded in the checkpoint.
+    raw = torch.load(policy_ckpt, map_location="cpu", weights_only=False)
+    config_raw = raw.get("config", "{}")
+    if isinstance(config_raw, str):
+        config_dict = json.loads(config_raw)
+    elif isinstance(config_raw, dict):
+        config_dict = config_raw
+    else:
+        config_dict = {}
+
+    rl_config_out = {
+        k: config_dict[k]
+        for k in _RL_CONFIG_KEYS_FOR_EVAL_TD3
+        if k in config_dict and isinstance(config_dict[k], (bool, int, float, str, type(None)))
+    }
+    rl_config_path = output_dir / "rl_config.json"
+    with rl_config_path.open("w", encoding="utf-8") as f:
+        json.dump(rl_config_out, f, indent=2, sort_keys=True)
+    print(f"[extract-tfv6] rl_config.json -> {rl_config_path}", flush=True)
+    print(f"[extract-tfv6] td3 rl keys saved: {sorted(rl_config_out.keys())}", flush=True)
+
+
 def main() -> None:
     args = parse_args()
     policy_ckpt = args.policy_checkpoint.expanduser().resolve()
@@ -212,60 +266,73 @@ def main() -> None:
     print(f"[extract-tfv6] base_checkpoint_dir={base_ckpt_dir}", flush=True)
     print(f"[extract-tfv6] output_dir={output_dir}", flush=True)
 
-    raw = torch.load(policy_ckpt, map_location="cpu", weights_only=True)
+    raw = torch.load(policy_ckpt, map_location="cpu", weights_only=False)
     if not isinstance(raw, dict):
         raise TypeError(f"Unexpected checkpoint payload type: {type(raw)}")
-    extracted = _normalize_state_dict_for_tfv6(raw)
-    if not extracted:
-        raise ValueError("No TFv6 parameters found in checkpoint (expected keys prefixed with 'tfv6.').")
-
-    ppo_only_keys = [k for k in raw.keys() if not k.startswith("tfv6.")]
-    print(
-        f"[extract-tfv6] raw_keys={len(raw)} tfv6_keys={len(extracted)} "
-        f"non_tfv6_keys={len(ppo_only_keys)}",
-        flush=True,
-    )
 
     _prepare_output_dir(output_dir, force=args.force)
-
     shutil.copy2(base_ckpt_dir / "config.json", output_dir / "config.json")
-    output_model_path = output_dir / args.output_model_name
-    torch.save(extracted, output_model_path)
 
-    meta = {
-        "source_policy_checkpoint": str(policy_ckpt),
-        "source_rl_run_dir": str(policy_ckpt.parent),
-        "base_tfv6_checkpoint_dir": str(base_ckpt_dir),
-        "copied_config": str(base_ckpt_dir / "config.json"),
-        "output_model_file": str(output_model_path),
-        "num_raw_state_keys": len(raw),
-        "num_extracted_tfv6_keys": len(extracted),
-        "num_non_tfv6_keys_dropped": len(ppo_only_keys),
-        "dropped_key_prefixes": sorted({k.split(".", 1)[0] for k in ppo_only_keys}),
-    }
-    with (output_dir / "extraction_metadata.json").open("w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2, sort_keys=True)
-
-    _validate_extracted_checkpoint(output_dir)
-
-    print("[extract-tfv6] Validation OK: TFv6 loads with strict=True.", flush=True)
-
-    # --- Residual policy: save extra eval files when use_residual_policy is set ---
-    run_rl_config = _read_json(policy_ckpt.parent / "config.json")
-    if run_rl_config.get("use_residual_policy", False):
-        print("[extract-tfv6] Residual policy detected — saving residual eval files.", flush=True)
-        _save_residual_eval_files(policy_ckpt, run_rl_config, output_dir)
+    if _is_td3_checkpoint(raw):
+        print("[extract-tfv6] TD3 checkpoint detected.", flush=True)
+        # Copy base TFv6 weights so the backbone can load them at inference time.
+        for model_file in sorted(base_ckpt_dir.glob("model*.pth")):
+            shutil.copy2(model_file, output_dir / model_file.name)
+            print(f"[extract-tfv6] copied {model_file.name}", flush=True)
+        _save_td3_eval_files(policy_ckpt, output_dir)
         print(
-            "[extract-tfv6] Residual checkpoint ready for ResidualSensorAgent "
-            "(contains config.json + model*.pth + residual_policy.pth + rl_config.json).",
+            "[extract-tfv6] TD3 checkpoint ready for TD3SensorAgent "
+            "(contains config.json + model*.pth + td3_policy.pth + rl_config.json).",
             flush=True,
         )
     else:
+        # PPO path (original behaviour).
+        extracted = _normalize_state_dict_for_tfv6(raw)
+        if not extracted:
+            raise ValueError("No TFv6 parameters found in checkpoint (expected keys prefixed with 'tfv6.').")
+
+        ppo_only_keys = [k for k in raw.keys() if not k.startswith("tfv6.")]
         print(
-            "[extract-tfv6] Compatible folder ready for lead eval scripts "
-            "(contains config.json + model*.pth).",
+            f"[extract-tfv6] raw_keys={len(raw)} tfv6_keys={len(extracted)} "
+            f"non_tfv6_keys={len(ppo_only_keys)}",
             flush=True,
         )
+
+        output_model_path = output_dir / args.output_model_name
+        torch.save(extracted, output_model_path)
+
+        meta = {
+            "source_policy_checkpoint": str(policy_ckpt),
+            "source_rl_run_dir": str(policy_ckpt.parent),
+            "base_tfv6_checkpoint_dir": str(base_ckpt_dir),
+            "copied_config": str(base_ckpt_dir / "config.json"),
+            "output_model_file": str(output_model_path),
+            "num_raw_state_keys": len(raw),
+            "num_extracted_tfv6_keys": len(extracted),
+            "num_non_tfv6_keys_dropped": len(ppo_only_keys),
+            "dropped_key_prefixes": sorted({k.split(".", 1)[0] for k in ppo_only_keys}),
+        }
+        with (output_dir / "extraction_metadata.json").open("w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, sort_keys=True)
+
+        _validate_extracted_checkpoint(output_dir)
+        print("[extract-tfv6] Validation OK: TFv6 loads with strict=True.", flush=True)
+
+        run_rl_config = _read_json(policy_ckpt.parent / "config.json")
+        if run_rl_config.get("use_residual_policy", False):
+            print("[extract-tfv6] Residual policy detected — saving residual eval files.", flush=True)
+            _save_residual_eval_files(policy_ckpt, run_rl_config, output_dir)
+            print(
+                "[extract-tfv6] Residual checkpoint ready for ResidualSensorAgent "
+                "(contains config.json + model*.pth + residual_policy.pth + rl_config.json).",
+                flush=True,
+            )
+        else:
+            print(
+                "[extract-tfv6] Compatible folder ready for lead eval scripts "
+                "(contains config.json + model*.pth).",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":
