@@ -112,3 +112,9 @@ class GlobalConfig(CaRLGlobalConfig):
         self.success_reward = 0.0
         # Whether to apply terminal_hint penalty on timeout and ego_blocked terminations.
         self.timeout_and_blocked_terminalhint = False
+        # Randomize per-route weather from a bench2drive-like distribution. Training
+        # route files ship with empty <weathers/> (fixed clear noon), so the residual
+        # never sees rain/fog/night unless this is enabled. Re-sampled every route
+        # (including repetitions) so a route is not locked to one weather. Disabled by
+        # default; evaluation keeps the weather specified in the route XML.
+        self.randomize_weather = False

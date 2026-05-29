@@ -45,6 +45,7 @@ from rl_finetuning.tfv6_rl.privileged_measurements import (
     privileged_measurement_dim,
     validate_privileged_measurement_dim,
 )
+from rl_finetuning.tfv6_rl.weather_randomization import sample_weather
 from rl_finetuning.tfv6_rl_config import GlobalConfig
 
 jsonpickle_numpy.register_handlers()
@@ -194,6 +195,10 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         self.pending_speed_hold_frames = 0
         self.pending_speed_hold_target_speed = None
         self.stop_sign_criteria: RunStopSign | None = None
+        # Weather-randomization RNG. Seeded deterministically in agent_global_init,
+        # once the experiment seed and worker list have been synced, so the weather
+        # sequence is reproducible across runs; see agent_route_init / randomize_weather.
+        self._weather_rng: np.random.Generator | None = None
 
     def set_global_plan(self, global_plan_world_coord):
         self.dense_global_plan_world_coord = global_plan_world_coord
@@ -328,6 +333,18 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
         json_config = conf_socket.recv_string()
         loaded_config = jsonpickle.decode(json_config)
         self.rl_config.__dict__.update(loaded_config.__dict__)
+        # Seed the weather RNG from the experiment seed mixed with this worker's index
+        # in the ports list (stable across runs even though the ports themselves are
+        # assigned dynamically). Drawn sequentially and never reseeded per route, so the
+        # weather sequence is reproducible across runs given the same seed, while still
+        # differing across route repetitions and across the parallel envs.
+        try:
+            worker_index = list(self.rl_config.ports).index(self.port)
+        except (ValueError, AttributeError, TypeError):
+            worker_index = 0
+        self._weather_rng = np.random.default_rng(
+            [int(getattr(self.rl_config, "seed", 0)), worker_index]
+        )
         self.obs_codec = ObsCodec(self.training_config, rl_config=self.rl_config)
         if bool(getattr(self.rl_config, "use_value_measurements", False)):
             validate_privileged_measurement_dim(self.rl_config)
@@ -343,6 +360,24 @@ class EnvAgentTFv6(BaseAgent, autonomous_agent.AutonomousAgent):
     def agent_route_init(self):
         self.vehicle = CarlaDataProvider.get_hero_actor()
         self.world = self.vehicle.get_world()
+        # Optionally override the (fixed, clear-noon) training weather with a
+        # bench2drive-like draw. Re-sampled here every route, including repetitions,
+        # so a route is not locked to one weather. Off by default; eval keeps the
+        # weather set from the route XML by RouteScenario._initialize_environment.
+        if bool(getattr(self.rl_config, "randomize_weather", False)):
+            if self._weather_rng is None:
+                self._weather_rng = np.random.default_rng(
+                    int(getattr(self.rl_config, "seed", 0))
+                )
+            weather = sample_weather(self._weather_rng)
+            self.world.set_weather(weather)
+            if self.debug:
+                print(
+                    f"[TFv6RL] randomized weather: cloud={weather.cloudiness:.0f} "
+                    f"precip={weather.precipitation:.0f} fog={weather.fog_density:.0f} "
+                    f"wet={weather.wetness:.0f} sun_alt={weather.sun_altitude_angle:.0f}",
+                    flush=True,
+                )
         settings = self.world.get_settings()
         assert math.isclose(
             settings.fixed_delta_seconds, 1.0 / self.rl_config.frame_rate

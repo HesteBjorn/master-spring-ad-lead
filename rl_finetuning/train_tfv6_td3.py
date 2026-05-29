@@ -712,6 +712,11 @@ def parse_args(config):
     parser.add_argument('--reward_type', type=str, default=config.reward_type)
     parser.add_argument('--consider_tl', type=lambda x: bool(strtobool(x)),
                         default=config.consider_tl, nargs='?', const=True)
+    parser.add_argument('--randomize_weather', type=lambda x: bool(strtobool(x)),
+                        default=getattr(config, 'randomize_weather', False),
+                        nargs='?', const=True,
+                        help='Randomize per-route weather from a bench2drive-like '
+                             'distribution (re-sampled each route). Off keeps route-XML weather.')
     parser.add_argument('--speeding_infraction', type=lambda x: bool(strtobool(x)),
                         default=config.speeding_infraction, nargs='?', const=True)
     parser.add_argument('--use_termination_hint', type=lambda x: bool(strtobool(x)),
