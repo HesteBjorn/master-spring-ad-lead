@@ -119,6 +119,22 @@ def build_route_files(args) -> list[str]:
     route_start_id = args.num_envs_per_gpu * args.node_id
     route_end_id = args.route_end_id
 
+    if args.route_assignment_mode == "mixed":
+        route_files = [
+            os.path.join(route_root_folder, f"route_mixed_{i:02d}.xml.gz")
+            for i in range(route_start_id, route_end_id)
+            if os.path.exists(
+                os.path.join(route_root_folder, f"route_mixed_{i:02d}.xml.gz")
+            )
+        ]
+        if len(route_files) < args.num_envs_per_node:
+            raise FileNotFoundError(
+                f"Need at least {args.num_envs_per_node} mixed route files in "
+                f"{route_root_folder}, got {len(route_files)}. Expected names like "
+                "route_mixed_00.xml.gz."
+            )
+        return route_files[: args.num_envs_per_node]
+
     id_to_townfile_mapping = {}
     for town_id in set(args.train_towns):
         town_prefix = town_to_route_prefix(town_id)
@@ -177,6 +193,12 @@ if __name__ == "__main__":
         parser.add_argument("--train_towns", nargs="+", default=(3,), type=int)
         parser.add_argument(
             "--routes_folder", default="debug_routes_with_scenarios", type=str
+        )
+        parser.add_argument(
+            "--route_assignment_mode",
+            choices=("town", "mixed"),
+            default="town",
+            help="Use town-specific route_TownXX_NN files or mixed route_mixed_NN files.",
         )
         parser.add_argument("--route_end_id", default=32, type=int)
         parser.add_argument("--route_files", nargs="+", default=None)

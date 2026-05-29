@@ -28,6 +28,7 @@ SCENARIO_TYPE_MAP = {
 }
 
 UNSUPPORTED_SCENARIOS = {
+    "CrossJunctionDefectTrafficLight",
     "RedLightWithoutLeadVehicle",
 }
 
@@ -39,11 +40,13 @@ DEFAULT_TARGET_TOLERANCE_METERS = 2.0
 DEFAULT_MAX_SEGMENT_STEPS = 300
 
 
-def remap_scenario_type(old_type: str) -> str:
+def remap_scenario_type(old_type: str, preserve_scenario_types: bool) -> str:
     if old_type in UNSUPPORTED_SCENARIOS:
         raise ValueError(
             f"Unsupported LEAD scenario type '{old_type}'. No safe CaRL equivalent is defined."
         )
+    if preserve_scenario_types:
+        return old_type
     return SCENARIO_TYPE_MAP.get(old_type, old_type)
 
 
@@ -285,6 +288,8 @@ def convert_route(
     hop_resolution: float,
     tolerance_meters: float,
     max_segment_steps: int,
+    preserve_scenario_types: bool,
+    include_scenario_types: set[str],
 ) -> ET.Element:
     town = route_elem.attrib["town"]
     old_positions = list(route_elem.find("waypoints").iter("position"))
@@ -292,6 +297,12 @@ def convert_route(
         raise ValueError(f"Route in town {town} has no waypoints")
 
     old_scenarios = list(route_elem.find("scenarios").iter("scenario"))
+    if include_scenario_types:
+        old_scenarios = [
+            scenario
+            for scenario in old_scenarios
+            if scenario.attrib.get("type") in include_scenario_types
+        ]
     if not old_scenarios:
         raise ValueError(f"Route in town {town} has no scenarios")
 
@@ -328,7 +339,7 @@ def convert_route(
     new_scenarios = ET.SubElement(new_route, "scenarios")
     for scenario_index, old_scenario in enumerate(old_scenarios, start=1):
         old_type = old_scenario.attrib["type"]
-        new_type = remap_scenario_type(old_type)
+        new_type = remap_scenario_type(old_type, preserve_scenario_types)
         new_scenario = ET.SubElement(new_scenarios, "scenario")
         new_scenario.set("type", new_type)
         new_scenario.set("name", f"{new_type}_{scenario_index}")
@@ -391,12 +402,40 @@ def normalize_town_name(town: str) -> str:
     return f"Town{number:02d}"
 
 
+def open_xml(path: pathlib.Path):
+    if path.suffix == ".gz":
+        return gzip.open(path, "rt", encoding="utf-8")
+    return path.open("rt", encoding="utf-8")
+
+
+def iter_source_files(
+    source_dir: pathlib.Path | None, source_file: pathlib.Path | None
+):
+    if source_file is not None:
+        return [source_file]
+    if source_dir is None:
+        return []
+    return sorted(source_dir.glob("*.xml")) + sorted(source_dir.glob("*.xml.gz"))
+
+
+def iter_routes_from_file(source_file: pathlib.Path):
+    with open_xml(source_file) as file_obj:
+        root = ET.parse(file_obj).getroot()
+    if root.tag == "route":
+        return [root]
+    return list(root.findall("route"))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source_dir", required=True, type=pathlib.Path)
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument("--source_dir", type=pathlib.Path)
+    source_group.add_argument("--source_file", type=pathlib.Path)
     parser.add_argument("--dest_dir", required=True, type=pathlib.Path)
     parser.add_argument("--towns", nargs="*", default=[])
     parser.add_argument("--skip_towns", nargs="*", default=[])
+    parser.add_argument("--include_scenario_types", nargs="*", default=[])
+    parser.add_argument("--preserve_scenario_types", action="store_true")
     parser.add_argument("--carla_host", default="127.0.0.1")
     parser.add_argument("--carla_port", default=2000, type=int)
     parser.add_argument("--carla_root", type=pathlib.Path, default=None)
@@ -415,36 +454,45 @@ def main() -> None:
     requested_towns = {normalize_town_name(town) for town in args.towns}
     skipped_towns = {normalize_town_name(town) for town in args.skip_towns}
 
-    source_dir = args.source_dir.resolve()
+    source_dir = args.source_dir.resolve() if args.source_dir else None
+    source_file = args.source_file.resolve() if args.source_file else None
     dest_dir = args.dest_dir.resolve()
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    source_files = sorted(source_dir.glob("*.xml"))
+    source_files = iter_source_files(source_dir, source_file)
     if not source_files:
-        raise FileNotFoundError(f"No XML files found in {source_dir}")
+        raise FileNotFoundError(f"No XML files found in {source_dir or source_file}")
 
+    include_scenario_types = set(args.include_scenario_types)
     routes_by_town: dict[str, list[tuple[pathlib.Path, ET.Element]]] = defaultdict(list)
     skipped_files: list[tuple[pathlib.Path, str]] = []
     for source_file in source_files:
-        tree = ET.parse(source_file)
-        root = tree.getroot()
-        route = root.find("route")
-        if route is None:
-            raise ValueError(f"{source_file} does not contain a route element")
-        town = route.attrib["town"]
-        if requested_towns and town not in requested_towns:
-            continue
-        if town in skipped_towns:
-            continue
-        waypoints_elem = route.find("waypoints")
-        scenarios_elem = route.find("scenarios")
-        if waypoints_elem is None or not list(waypoints_elem.iter("position")):
-            skipped_files.append((source_file, "missing waypoints"))
-            continue
-        if scenarios_elem is None or not list(scenarios_elem.iter("scenario")):
-            skipped_files.append((source_file, "missing scenarios"))
-            continue
-        routes_by_town[town].append((source_file, route))
+        routes = iter_routes_from_file(source_file)
+        if not routes:
+            raise ValueError(f"{source_file} does not contain any route elements")
+        for route in routes:
+            town = route.attrib["town"]
+            if requested_towns and town not in requested_towns:
+                continue
+            if town in skipped_towns:
+                continue
+            waypoints_elem = route.find("waypoints")
+            scenarios_elem = route.find("scenarios")
+            if waypoints_elem is None or not list(waypoints_elem.iter("position")):
+                skipped_files.append((source_file, "missing waypoints"))
+                continue
+            if scenarios_elem is None or not list(scenarios_elem.iter("scenario")):
+                skipped_files.append((source_file, "missing scenarios"))
+                continue
+            if include_scenario_types:
+                matching_scenarios = [
+                    scenario
+                    for scenario in scenarios_elem.iter("scenario")
+                    if scenario.attrib.get("type") in include_scenario_types
+                ]
+                if not matching_scenarios:
+                    continue
+            routes_by_town[town].append((source_file, route))
 
     if not routes_by_town:
         print("No routes left after applying town filters")
@@ -479,6 +527,8 @@ def main() -> None:
                         args.hop_resolution,
                         args.target_tolerance_meters,
                         args.max_segment_steps,
+                        args.preserve_scenario_types,
+                        include_scenario_types,
                     )
                     routes_root.append(converted)
                     route_id += 1

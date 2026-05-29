@@ -80,6 +80,7 @@ START_PORT="${START_PORT:-1024}"
 SEED="${SEED:-0}"
 TRAIN_TOWNS="${TRAIN_TOWNS:-3}"
 ROUTES_FOLDER="${ROUTES_FOLDER:-3rd_party/CaRL/CARLA/custom_leaderboard/leaderboard/data/debug_routes_with_scenarios}"
+ROUTE_ASSIGNMENT_MODE="${ROUTE_ASSIGNMENT_MODE:-town}"
 ROUTE_REPETITIONS="${ROUTE_REPETITIONS:-500}"
 TRACK="${TRACK:-MAP_QUALIFIER}"
 FRAME_RATE="${FRAME_RATE:-10.0}"
@@ -120,6 +121,7 @@ echo "[train-tfv6-td3-parallel] logdir=${LOGDIR}"
 echo "[train-tfv6-td3-parallel] exp_name=${EXP_NAME}"
 echo "[train-tfv6-td3-parallel] carla_root=${CARLA_ROOT}"
 echo "[train-tfv6-td3-parallel] num_envs_per_node=${NUM_ENVS_PER_NODE} num_envs_per_gpu=${NUM_ENVS_PER_GPU}"
+echo "[train-tfv6-td3-parallel] route_assignment_mode=${ROUTE_ASSIGNMENT_MODE} routes_folder=${ROUTES_FOLDER}"
 echo "[train-tfv6-td3-parallel] buffer_size=${BUFFER_SIZE} batch_size=${BATCH_SIZE} learning_starts=${LEARNING_STARTS} total_timesteps=${TOTAL_TIMESTEPS}"
 echo "[train-tfv6-td3-parallel] tau=${TAU} utd_ratio=${UTD_RATIO} utd_actor=${UTD_ACTOR} critic_warmup_steps=${CRITIC_WARMUP_STEPS}"
 echo "[train-tfv6-td3-parallel] save_every=${SAVE_EVERY} keep_every=${KEEP_EVERY}"
@@ -139,6 +141,7 @@ python -u "${REPO_ROOT}/rl_finetuning/train_parallel_tfv6_td3.py" \
   --seed "${SEED}" \
   --train_towns ${TRAIN_TOWNS} \
   --routes_folder "${ROUTES_FOLDER}" \
+  --route_assignment_mode "${ROUTE_ASSIGNMENT_MODE}" \
   --route_repetitions "${ROUTE_REPETITIONS}" \
   --track "${TRACK}" \
   --frame_rate "${FRAME_RATE}" \
