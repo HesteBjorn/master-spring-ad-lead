@@ -167,14 +167,20 @@ def build_route_basis(
     spanning physically meaningful trajectory deformation modes.
 
     Mode order:
-      0  (u + 1/9)  on y — lateral offset that originates from ego centre.
-                           At u=0 (route[0], ~2.25m ahead) the value is 1/9;
-                           at u=1 (route[-1]) the value is 10/9.  The mode is
-                           zero at u = -1/9, which corresponds approximately to
-                           the ego vehicle centre one step behind route[0].
-                           The controller aim-point (2.25 m at junctions) sits
-                           at route[0], so this mode directly changes steering.
-      1  (u + 1/9)  on x — longitudinal stretch with the same ego-centred origin
+      0  (u + c)  on y — lateral offset that pivots about the ego centre, i.e. a
+                         rotation of the whole route about (0, 0).  route[0] sits
+                         target_first_distance (2.5 m) ahead of the ego and the
+                         checkpoints are spacing (1 m) apart, so point i is at
+                         longitudinal distance x_i = 2.5 + i.  With u_i = i/9 we
+                         have x = 2.5 + 9u, so choosing c = 2.5/9 makes the mode
+                         (u + c) proportional to x_i and zero exactly at the ego
+                         centre (x = 0).  Every point — including route[0], which
+                         the low-speed controller aims at — is then deflected in
+                         proportion to its distance, so the turn mode actually
+                         steers.  (The old c = 1/9 put the pivot 1.5 m ahead of
+                         the ego, leaving route[0] with only ~1/9 of the
+                         amplitude, so the residual barely turned.)
+      1  (u + c)  on x — longitudinal stretch with the same ego-centred origin
       2+ higher-freq sinusoids alternating y/x
     """
     u = torch.linspace(0.0, 1.0, steps=max(num_route_points, 2))[:num_route_points]
@@ -188,8 +194,13 @@ def build_route_basis(
         col = col / (torch.linalg.norm(col) + 1e-8)
         cols.append(col)
 
-    # Primary ego-centred linear mode (zero at ego centre, nonzero at route[0])
-    c = 1.0 / (num_route_points - 1)  # = 1/9 for 10 points
+    # Primary linear mode that pivots about the ego centre (zero at x = 0).
+    # route[0] is target_first_distance ahead and checkpoints are spacing apart;
+    # see lead/data_loader/carla_dataset.py (target_first_distance=2.5) and
+    # iterative_line_interpolation (1.0 m spacing).
+    target_first_distance = 2.5  # m, route[0] distance ahead of the ego centre
+    spacing = 1.0  # m, distance between consecutive route checkpoints
+    c = target_first_distance / (spacing * (num_route_points - 1))  # = 2.5/9
     linear_mode = u + c
 
     _add_axis_mode(linear_mode, axis=1)  # y — lateral correction (mode 0)

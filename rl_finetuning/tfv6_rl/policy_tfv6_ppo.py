@@ -443,6 +443,12 @@ class TFv6PPOPolicy(nn.Module):
                     dtype=torch.float32,
                 )
             )
+            # When the learned noise head is disabled the forward path uses the
+            # fixed constants below and never reads residual_log_std, so it would
+            # receive no gradient and trip DDP(find_unused_parameters=False).
+            # Freeze it (kept in state_dict for round-tripping).
+            if self.disable_learned_noise_head:
+                self.residual_log_std.requires_grad_(False)
 
             # Fixed log_std values used when disable_learned_noise_head=True.
             self._residual_fixed_route_log_std = float(route_log_std_init)

@@ -1961,8 +1961,8 @@ class PPORolloutVisualizer:
         if (
             not should_start_scheduled_burst
             and global_step > 0
-            and (global_step % self.every_n) == 0
-            and scheduled_burst_state.last_start_global_step != global_step
+            and global_step // self.every_n
+            > scheduled_burst_state.last_start_global_step // self.every_n
         ):
             should_start_scheduled_burst = True
         if should_start_scheduled_burst:
