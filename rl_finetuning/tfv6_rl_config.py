@@ -78,6 +78,8 @@ class GlobalConfig(CaRLGlobalConfig):
         self.cnn_conv_width = 64
         self.cnn_pooling = "gap"
         self.cnn_td3_head_hidden_dim = 512
+        self.actor_hidden_layers = 1
+        self.actor_layer_norm = False
 
         # ── TD3 algorithm hyperparameters ─────────────────────────────────
         # Replay buffer capacity (transitions).

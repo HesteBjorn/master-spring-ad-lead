@@ -701,6 +701,13 @@ def parse_args(config):
     parser.add_argument('--cnn_td3_head_hidden_dim', type=int,
                         default=getattr(config, 'cnn_td3_head_hidden_dim', 512),
                         help='Hidden width for TD3 actor residual head and critic Q-heads. Default 512.')
+    parser.add_argument('--actor_hidden_layers', type=int,
+                        default=getattr(config, 'actor_hidden_layers', 1),
+                        help='Number of hidden Linear+GELU layers in the CNN TD3 actor head. Default 1 keeps the current architecture.')
+    parser.add_argument('--actor_layer_norm', type=lambda x: bool(strtobool(x)),
+                        default=getattr(config, 'actor_layer_norm', False),
+                        nargs='?', const=True,
+                        help='Apply LayerNorm after each hidden Linear in the CNN TD3 actor head. Default false.')
     parser.add_argument('--architecture', type=str, default='cnn',
                         choices=['cnn', 'transformer'],
                         help='Residual encoder architecture: cnn (default) or transformer.')
@@ -1087,6 +1094,8 @@ def main():
         raise ValueError("--cnn_conv_width must be > 0")
     if args.cnn_td3_head_hidden_dim <= 0:
         raise ValueError("--cnn_td3_head_hidden_dim must be > 0")
+    if args.actor_hidden_layers < 1:
+        raise ValueError("--actor_hidden_layers must be >= 1")
 
     config.initialize(**vars(args))
 

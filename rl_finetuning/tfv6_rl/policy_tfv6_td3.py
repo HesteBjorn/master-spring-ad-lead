@@ -72,6 +72,20 @@ class TFv6ResidualActorTD3(nn.Module):
             if rl_config is not None
             else 512
         )
+        actor_hidden_layers = (
+            int(getattr(rl_config, "actor_hidden_layers", 1))
+            if rl_config is not None
+            else 1
+        )
+        actor_layer_norm = (
+            bool(getattr(rl_config, "actor_layer_norm", False))
+            if rl_config is not None
+            else False
+        )
+        if actor_hidden_layers < 1:
+            raise ValueError(
+                f"actor_hidden_layers must be >= 1, got {actor_hidden_layers}"
+            )
         # When route correction is disabled, output only the speed scalar.
         # This drops the route coefficient entirely so it cannot introduce noisy
         # gradients into the shared hidden layer during actor/critic updates.
@@ -81,14 +95,23 @@ class TFv6ResidualActorTD3(nn.Module):
         # matches the [-1,1] clamp assumed by target policy smoothing, and keeps
         # gradients alive (no dead zone from action.clamp saturation).
         # Final linear zero-initialized so actor starts at TFv6 base policy (tanh(0)=0).
-        self.residual_out = nn.Sequential(
-            nn.Linear(
-                backbone.residual_feature_dim + backbone.speed_history_len, hidden_dim
-            ),
-            nn.GELU(),
-            nn.Linear(hidden_dim, eff_rank + 1),
-            nn.Tanh(),
+        in_dim = backbone.residual_feature_dim + backbone.speed_history_len
+        residual_out_layers: list[nn.Module] = [nn.Linear(in_dim, hidden_dim)]
+        if actor_layer_norm:
+            residual_out_layers.append(nn.LayerNorm(hidden_dim))
+        residual_out_layers.append(nn.GELU())
+        for _ in range(actor_hidden_layers - 1):
+            residual_out_layers.append(nn.Linear(hidden_dim, hidden_dim))
+            if actor_layer_norm:
+                residual_out_layers.append(nn.LayerNorm(hidden_dim))
+            residual_out_layers.append(nn.GELU())
+        residual_out_layers.extend(
+            [
+                nn.Linear(hidden_dim, eff_rank + 1),
+                nn.Tanh(),
+            ]
         )
+        self.residual_out = nn.Sequential(*residual_out_layers)
         nn.init.zeros_(self.residual_out[-2].weight)
         nn.init.zeros_(self.residual_out[-2].bias)
 
