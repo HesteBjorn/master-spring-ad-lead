@@ -13,9 +13,16 @@
 
 # Set environment variables
 export BENCHMARK_ROUTE_ID=$(basename $ROUTES .xml) # Last part of the route file name, e.g., 0 for 0.xml
-export EVALUATION_OUTPUT_DIR=outputs/local_evaluation/$BENCHMARK_ROUTE_ID/$(basename $CHECKPOINT_DIR)
+# Default-assign so callers (e.g. the ensemble path) can pre-set a clean name;
+# a comma-separated CHECKPOINT_DIR would otherwise produce a misleading basename.
+: "${EVALUATION_OUTPUT_DIR:=outputs/local_evaluation/$BENCHMARK_ROUTE_ID/$(basename $CHECKPOINT_DIR)}"
+export EVALUATION_OUTPUT_DIR
 export PYTHONPATH=3rd_party/Bench2Drive/leaderboard:$PYTHONPATH
 export PYTHONPATH=3rd_party/Bench2Drive/scenario_runner:$PYTHONPATH
+# CARLA PythonAPI provides the `agents.navigation.*` package. Harmless if the
+# parent already added it. Override CARLA_ROOT to use a different CARLA tree.
+: "${CARLA_ROOT:=3rd_party/CARLA_0915}"
+export PYTHONPATH=$CARLA_ROOT/PythonAPI/carla:$CARLA_ROOT/PythonAPI:$PYTHONPATH
 export SCENARIO_RUNNER_ROOT=3rd_party/Bench2Drive/scenario_runner
 export LEADERBOARD_ROOT=3rd_party/Bench2Drive/leaderboard
 export IS_BENCH2DRIVE=1

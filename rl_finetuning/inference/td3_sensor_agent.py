@@ -126,6 +126,14 @@ class ResidualTD3ClosedLoopInference:
         action = self.actor.coeffs_to_action(coeff)
         # action: (1, route_dim+1) — normalized encoded action (route_norm ++ speed_norm)
 
+        return self.action_to_prediction(action, data)
+
+    def action_to_prediction(self, action, data: dict) -> ClosedLoopPrediction:
+        """Decode an encoded action + run the PID controller → ClosedLoopPrediction.
+
+        Split out from forward() so the ensemble agent can reuse the identical
+        decode + controller path after averaging coefficients across members.
+        """
         # Decode to physical route (1, N, 2) and target speed (1, 1)
         route, _, target_speed = self.backbone.action_codec.decode_to_control_tensors(
             action, self.device
