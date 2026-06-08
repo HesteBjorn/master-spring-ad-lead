@@ -8,12 +8,16 @@
 #   CARLA server running (default localhost:2000)
 #
 # Run from repo root:
-#   bash rl_finetuning/generate_all_intersection_routes.sh [--source-dataset lead|50x|allscenarios_b2d] [--train-towns "5 12 13 15"] [--interleaved-2env|--mixed-2env]
+#   bash rl_finetuning/generate_all_intersection_routes.sh [--source-dataset lead|50x|all4lt|allscenarios_b2d] [--train-towns "5 12 13 15"] [--interleaved-2env|--mixed-2env]
 #
 # --source-dataset  Route source to convert. "lead" uses data/data_routes/lead.
 #                   "50x" uses data/data_routes/50x38_Town12 and
 #                   data/data_routes/50x36_Town13 with the official CARLA
 #                   intersection scenarios.
+#                   "all4lt" outputs only the four bench2drive left-turn scenario
+#                   types into data/rl_finetuning_training_data/all_4_leftturn_Scenarios:
+#                   base Signalized/NonSignalized LeftTurn from the 50x Town12/Town13
+#                   sets, plus the EnterFlow variants from lead/ (labels preserved).
 #                   "allscenarios_b2d" uses all 50x route folders, adds
 #                   Bench2Drive training YieldToEmergencyVehicle routes, and
 #                   adds ported enter-flow/T-junction sources where available.
@@ -76,7 +80,9 @@ if [[ "${SOURCE_DATASET}" == "allscenarios_b2d" && "${INTERLEAVED_2ENV}" -eq 0 ]
     MIXED_2ENV=1
 fi
 
-if [[ "${MIXED_2ENV}" -eq 1 ]]; then
+if [[ "${SOURCE_DATASET}" == "all4lt" ]]; then
+    DEST="${REPO_ROOT}/data/rl_finetuning_training_data/all_4_leftturn_Scenarios"
+elif [[ "${MIXED_2ENV}" -eq 1 ]]; then
     DEST="${REPO_ROOT}/data/rl_finetuning_training_data/all_scenarios_b2d_train"
 elif [[ "${INTERLEAVED_2ENV}" -eq 1 ]]; then
     if [[ "${SOURCE_DATASET}" == "allscenarios_b2d" ]]; then
@@ -179,8 +185,29 @@ case "${SOURCE_DATASET}" in
         )
         DEFAULT_TRAIN_TOWNS_HINT="12 13"
         ;;
+    all4lt)
+        # The four bench2drive left-turn scenario types only. Base (non-EnterFlow)
+        # types come from the 50x Town12/Town13 sets, which carry the Town12/Town13
+        # SignalizedJunctionLeftTurn routes that lead/ lacks. The EnterFlow variants
+        # come from lead/ with their type labels preserved. The two source families
+        # never share a (scenario, town) pair, so no per-town output files collide.
+        SOURCE_ROOTS=(
+            "${REPO_ROOT}/data/data_routes/50x38_Town12"
+            "${REPO_ROOT}/data/data_routes/50x36_Town13"
+        )
+        B2D_SOURCE_FILE=""
+        LEAD_EXTRA_ROOT="${REPO_ROOT}/data/data_routes/lead"
+        LEADERBOARD_EXTRA_ROOT=""
+        SCENARIOS=(
+            NonSignalizedJunctionLeftTurn
+            SignalizedJunctionLeftTurn
+            NonSignalizedJunctionLeftTurnEnterFlow
+            SignalizedJunctionLeftTurnEnterFlow
+        )
+        DEFAULT_TRAIN_TOWNS_HINT="12 13"
+        ;;
     *)
-        echo "Unknown --source-dataset: ${SOURCE_DATASET}. Expected lead, 50x, or allscenarios_b2d."
+        echo "Unknown --source-dataset: ${SOURCE_DATASET}. Expected lead, 50x, all4lt, or allscenarios_b2d."
         exit 1
         ;;
 esac
