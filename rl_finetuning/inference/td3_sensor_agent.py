@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import types
+from collections import deque
 
 import torch
 
@@ -108,7 +109,33 @@ class ResidualTD3ClosedLoopInference:
         self.actor.residual_out.load_state_dict(td3_ckpt["actor_residual_out"])
         self.actor.eval()
 
+        # Rolling ego-speed history fed to the residual head. Trained models with
+        # speed_history_len > 0 expect obs["speed_history"]; the env builds it as a
+        # zero-padded deque of the previous N raw speeds (see env_agent_tfv6.py).
+        # Without it, forward_coeffs silently drops the concat and residual_out's
+        # first Linear gets the wrong input width.
+        self.speed_history_len = int(self.backbone.speed_history_len)
+        self._speed_history = (
+            deque([0.0] * self.speed_history_len, maxlen=self.speed_history_len)
+            if self.speed_history_len > 0
+            else None
+        )
+
         self.step = 0
+
+    def inject_speed_history(self, data: dict) -> None:
+        """Add the current speed_history window to ``data`` and roll in this speed.
+
+        Mirrors env_agent_tfv6: the observation carries the previous N speeds, then
+        the current speed is appended for the next step. No-op when the model was
+        trained without speed history.
+        """
+        if self._speed_history is None:
+            return
+        data["speed_history"] = torch.tensor(
+            self._speed_history, dtype=torch.float32, device=self.device
+        ).view(1, self.speed_history_len)
+        self._speed_history.append(float(data["speed"].reshape(-1)[0]))
 
     @torch.inference_mode()
     def forward(self, data: dict) -> ClosedLoopPrediction:
@@ -117,6 +144,7 @@ class ResidualTD3ClosedLoopInference:
         # --- Deterministic TD3 forward pass ---
         # forward_coeffs runs frozen TFv6 + residual CNN → coefficient vector.
         # coeffs_to_action combines base TFv6 action with residual correction.
+        self.inject_speed_history(data)
         with torch.amp.autocast(
             device_type=self.device.type,
             dtype=self.backbone.autocast_dtype,

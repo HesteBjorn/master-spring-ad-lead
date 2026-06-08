@@ -73,11 +73,13 @@ class EnsembleResidualTD3ClosedLoopInference:
         # residual basis dimensionality. Guard against mismatched checkpoints.
         ranks = {m.actor.rank for m in self.members}
         action_dims = {m.actor.action_dim for m in self.members}
-        if len(ranks) != 1 or len(action_dims) != 1:
+        speed_hist = {m.speed_history_len for m in self.members}
+        if len(ranks) != 1 or len(action_dims) != 1 or len(speed_hist) != 1:
             raise ValueError(
                 "Ensemble members have incompatible residual shapes: "
-                f"ranks={ranks}, action_dims={action_dims}. "
-                "All checkpoints must share the same residual_route_rank and action codec."
+                f"ranks={ranks}, action_dims={action_dims}, speed_history_len={speed_hist}. "
+                "All checkpoints must share the same residual_route_rank, action codec "
+                "and speed_history_len."
             )
         LOG.info(
             f"[EnsembleResidualTD3ClosedLoopInference] {len(self.members)} members ready "
@@ -88,6 +90,11 @@ class EnsembleResidualTD3ClosedLoopInference:
     @torch.inference_mode()
     def forward(self, data: dict) -> ClosedLoopPrediction:
         self.step += 1
+
+        # Roll the shared ego-speed history once (single trajectory) and inject it
+        # into the shared data dict so every member's forward_coeffs sees the same
+        # speed_history. Doing it per-member would advance the deque N times/step.
+        self.primary.inject_speed_history(data)
 
         # Each member runs its own frozen TFv6 + residual encoder → coefficients.
         # forward_coeffs also caches that member's base action; the primary's
