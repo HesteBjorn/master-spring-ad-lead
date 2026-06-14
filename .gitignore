@@ -78,6 +78,9 @@ target/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+rl_finetuning/notebooks/figures
+rl_finetuning/notebooks/cache
+
 # IPython
 profile_default/
 ipython_config.py

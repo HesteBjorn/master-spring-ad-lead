@@ -27,15 +27,29 @@ export SCENARIO_RUNNER_ROOT=3rd_party/Bench2Drive/scenario_runner
 export LEADERBOARD_ROOT=3rd_party/Bench2Drive/leaderboard
 export IS_BENCH2DRIVE=1
 export PLANNER_TYPE=only_traj
-export SAVE_PATH=$EVALUATION_OUTPUT_DIR/
+# NO_SAVE=1 disables all debug image/video output (used for fast outcome-only scans).
+# Leaving SAVE_PATH unset makes config_closed_loop.save_path return None.
+if [[ "${NO_SAVE:-0}" == "1" ]]; then
+    unset SAVE_PATH
+else
+    export SAVE_PATH=$EVALUATION_OUTPUT_DIR/
+fi
 export PYTHONUNBUFFERED=1
 
 set -x
 set +e
 
-# Recreate output folders
-rm -rf $EVALUATION_OUTPUT_DIR/
-mkdir -p $EVALUATION_OUTPUT_DIR
+# Recreate output folders. RESUME=1 (default) keeps the existing checkpoint so the
+# leaderboard skips already-completed routes instead of starting over. Pass
+# RESUME=0 to force a clean re-evaluation that wipes prior results first.
+if [[ "${RESUME:-1}" == "1" ]]; then
+    mkdir -p $EVALUATION_OUTPUT_DIR
+    RESUME_FLAG=1
+else
+    rm -rf $EVALUATION_OUTPUT_DIR/
+    mkdir -p $EVALUATION_OUTPUT_DIR
+    RESUME_FLAG=False
+fi
 
 CUDA_VISIBLE_DEVICES=0 python3 3rd_party/Bench2Drive/leaderboard/leaderboard/leaderboard_evaluator.py \
     --routes=$ROUTES \
@@ -45,10 +59,10 @@ CUDA_VISIBLE_DEVICES=0 python3 3rd_party/Bench2Drive/leaderboard/leaderboard/lea
     --agent-config=$CHECKPOINT_DIR \
     --debug=0 \
     --record=None \
-    --resume=False \
+    --resume=$RESUME_FLAG \
     --port=2000 \
     --traffic-manager-port=8000 \
     --timeout=60 \
     --debug-checkpoint=$EVALUATION_OUTPUT_DIR/debug_checkpoint/debug_checkpoint_endpoint.txt \
     --traffic-manager-seed=0 \
-    --repetitions=3
+    --repetitions=${REPETITIONS:-3}

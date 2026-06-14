@@ -87,6 +87,11 @@ class EnsembleResidualTD3ClosedLoopInference:
         )
         self.step = 0
 
+        # Optional clip renderer + residual-off, attached by the agent (mirrors
+        # ResidualTD3ClosedLoopInference so render_clip.sh works with the ensemble).
+        self.clip_visualizer = None
+        self.residual_off = False
+
     @torch.inference_mode()
     def forward(self, data: dict) -> ClosedLoopPrediction:
         self.step += 1
@@ -109,7 +114,21 @@ class EnsembleResidualTD3ClosedLoopInference:
                 coeffs.append(member.actor.forward_coeffs(data))
 
         coeff = torch.stack(coeffs, dim=0).mean(dim=0)
+        # residual_off zeroes the (averaged) residual so the agent drives as the
+        # pure frozen TFv6 base — the TFv6 side of a side-by-side clip.
+        if self.residual_off:
+            coeff = torch.zeros_like(coeff)
         action = self.primary.actor.coeffs_to_action(coeff)
+
+        # Optional thesis clip rendering: base-route ghost + base->corrected speed
+        # bar, using the primary member's cached base action/logits (it ran first).
+        if self.clip_visualizer is not None:
+            self.clip_visualizer.render(
+                data=data,
+                corrected_action=action,
+                base_action=self.primary.backbone._last_base_action_mean,
+                target_speed_logits=self.primary.backbone._last_target_speed_logits,
+            )
 
         return self.primary.action_to_prediction(action, data)
 
@@ -159,3 +178,7 @@ class TD3EnsembleSensorAgent(TD3SensorAgent):
         LOG.info(
             f"[TD3EnsembleSensorAgent] ready with {len(checkpoint_dirs)} members: {checkpoint_dirs}"
         )
+
+        # Wire the clip renderer (CLIP_VIZ) + CLIP_RESIDUAL_OFF, using the primary
+        # member's backbone for the shared training config / action codec.
+        self._attach_clip_visualizer(self.closed_loop_inference.primary.backbone)

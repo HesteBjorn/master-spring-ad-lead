@@ -50,6 +50,8 @@ _RL_CONFIG_KEYS_FOR_EVAL_TD3 = (
     "cnn_pooling",
     "speed_history_len",
     "cnn_td3_head_hidden_dim",
+    "actor_hidden_layers",
+    "actor_layer_norm",
 )
 
 os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")

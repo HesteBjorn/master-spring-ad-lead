@@ -698,8 +698,13 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
                 self.video_recorder.save_debug_video_frame(image)
                 self.video_recorder.save_debug_image(image)
 
-        # Save metric info if in Bench2Drive mode
-        if self.config_closed_loop.is_bench2drive and hasattr(self, "get_metric_info"):
+        # Save metric info if in Bench2Drive mode (skip when no save path is set,
+        # e.g. outcome-only scans, to avoid writing to a literal 'None/' path).
+        if (
+            self.config_closed_loop.is_bench2drive
+            and hasattr(self, "get_metric_info")
+            and self.config_closed_loop.save_path is not None
+        ):
             metric = self.get_metric_info()
             self.metric_info[self.step] = metric
             with open(

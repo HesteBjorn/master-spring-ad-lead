@@ -30,10 +30,31 @@ from lead.inference.closed_loop_inference import (
 )
 from lead.inference.open_loop_inference import OpenLoopPrediction
 from lead.inference.sensor_agent import SensorAgent
+
+# Apply the optional shortened route timeout (ROUTE_TIMEOUT_S) at import time. The
+# leaderboard imports this agent module once before building any route, so the cap
+# takes effect for every route. No-op unless ROUTE_TIMEOUT_S is set.
+from rl_finetuning.eval_viz.route_timeout_patch import apply as _apply_route_timeout
 from rl_finetuning.tfv6_rl.policy_tfv6_td3 import TFv6ResidualActorTD3
 from rl_finetuning.tfv6_rl.residual_backbone import TFv6ResidualBackbone
 
+_apply_route_timeout()
+
 LOG = logging.getLogger(__name__)
+
+# Per-process route counter. The leaderboard calls setup() once per route, so this
+# gives each route its own clip_viz/route_<NNNN> folder during a multi-route sweep
+# (enabled by CLIP_PER_ROUTE_DIR=1). The monitor maps these folders to checkpoint
+# records by order. Single-route render_clip.sh runs leave it off (frames go
+# straight into clip_viz/).
+_CLIP_ROUTE_INDEX = 0
+
+
+def _next_clip_route_index() -> int:
+    global _CLIP_ROUTE_INDEX
+    idx = _CLIP_ROUTE_INDEX
+    _CLIP_ROUTE_INDEX += 1
+    return idx
 
 
 def get_entry_point():  # dead: disable
@@ -123,6 +144,11 @@ class ResidualTD3ClosedLoopInference:
 
         self.step = 0
 
+        # Optional clip renderer, attached by TD3SensorAgent.setup when CLIP_VIZ=1.
+        self.clip_visualizer = None
+        # When True, the residual is zeroed so the agent drives as base TFv6.
+        self.residual_off = False
+
     def inject_speed_history(self, data: dict) -> None:
         """Add the current speed_history window to ``data`` and roll in this speed.
 
@@ -151,8 +177,23 @@ class ResidualTD3ClosedLoopInference:
             enabled=self.backbone.autocast_enabled,
         ):
             coeff = self.actor.forward_coeffs(data)
+        # residual_off zeroes the residual so the agent drives as the pure frozen
+        # TFv6 base policy (coeffs_to_action: action = base_action + 0*correction).
+        # Used to render the TFv6 side of the side-by-side intro clip.
+        if self.residual_off:
+            coeff = torch.zeros_like(coeff)
         action = self.actor.coeffs_to_action(coeff)
         # action: (1, route_dim+1) — normalized encoded action (route_norm ++ speed_norm)
+
+        # Optional thesis clip rendering: base-route ghost + base→corrected speed
+        # bar. No-op unless a visualizer was attached (eval_viz clip runs only).
+        if self.clip_visualizer is not None:
+            self.clip_visualizer.render(
+                data=data,
+                corrected_action=action,
+                base_action=self.backbone._last_base_action_mean,
+                target_speed_logits=self.backbone._last_target_speed_logits,
+            )
 
         return self.action_to_prediction(action, data)
 
@@ -245,6 +286,51 @@ class TD3SensorAgent(SensorAgent):
             rl_config=rl_config,
         )
         LOG.info("[TD3SensorAgent] ResidualTD3ClosedLoopInference ready.")
+
+        # Attach the clean clip renderer for thesis demonstration videos when
+        # CLIP_VIZ=1 and a save path is set (see _attach_clip_visualizer).
+        self._attach_clip_visualizer(self.closed_loop_inference.backbone)
+
+    def _attach_clip_visualizer(self, backbone):
+        """Wire CLIP_RESIDUAL_OFF + the clip renderer onto self.closed_loop_inference.
+
+        Shared by the single-model and ensemble agents. Frames land in
+        <save_path>/clip_viz. CLIP_RESIDUAL_OFF=1 drives as pure base TFv6 (for the
+        side-by-side intro clip's left/TFv6 panel); the speed panel then shows a
+        single TFv6 bar. ``backbone`` provides the training config + action codec
+        (the ensemble passes its primary member's backbone — shared across members).
+        """
+        residual_off = os.environ.get("CLIP_RESIDUAL_OFF") == "1"
+        self.closed_loop_inference.residual_off = residual_off
+
+        if os.environ.get("CLIP_VIZ") == "1" and self.config_closed_loop.save_path:
+            from rl_finetuning.eval_viz.clip_visualizer import InferenceClipVisualizer
+
+            clip_root = os.path.join(self.config_closed_loop.save_path, "clip_viz")
+            # Multi-route sweep: one folder per route so frames don't collide.
+            if os.environ.get("CLIP_PER_ROUTE_DIR") == "1":
+                out_dir = os.path.join(
+                    clip_root, f"route_{_next_clip_route_index():04d}"
+                )
+            else:
+                out_dir = clip_root
+
+            def _envf(name, default):
+                return float(os.environ.get(name, default))
+
+            self.closed_loop_inference.clip_visualizer = InferenceClipVisualizer(
+                training_config=backbone.training_config,
+                action_codec=backbone.action_codec,
+                output_dir=out_dir,
+                residual=not residual_off,
+                speed_temperature=float(getattr(backbone, "speed_temperature", 1.0)),
+                # Tune layout/crop without code edits via CLIP_* env vars.
+                bottom_fraction=_envf("CLIP_BOTTOM_FRACTION", 0.60),
+                zoom_forward_m=_envf("CLIP_ZOOM_FORWARD_M", 44.0),
+                zoom_back_m=_envf("CLIP_ZOOM_BACK_M", 14.0),
+                zoom_side_m=_envf("CLIP_ZOOM_SIDE_M", 26.0),
+            )
+            LOG.info("[clip] visualizer enabled -> %s", out_dir)
 
 
 # ---------------------------------------------------------------------------
