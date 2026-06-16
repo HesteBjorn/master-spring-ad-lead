@@ -1,0 +1,372 @@
+{
+  "action_noise_dist": "gaussian",
+  "action_repeat": 1,
+  "action_space_dim": 2,
+  "action_space_max": 1.0,
+  "action_space_min": -1.0,
+  "activate_cnn_heatmap": false,
+  "actor_lr": 1e-05,
+  "adam_eps": 1e-05,
+  "allow_tf32": false,
+  "architecture": "cnn",
+  "bc_regularization_coeff": 0.0,
+  "benchmark": false,
+  "best_iteration": 0,
+  "beta_1": 0.9,
+  "beta_2": 0.999,
+  "beta_min_a_b_value": 1.0,
+  "bev_classes_list": {
+    "py/tuple": [
+      {
+        "py/tuple": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "py/tuple": [
+          150,
+          150,
+          150
+        ]
+      },
+      {
+        "py/tuple": [
+          255,
+          255,
+          255
+        ]
+      },
+      {
+        "py/tuple": [
+          255,
+          255,
+          0
+        ]
+      },
+      {
+        "py/tuple": [
+          0,
+          0,
+          255
+        ]
+      },
+      {
+        "py/tuple": [
+          0,
+          255,
+          255
+        ]
+      },
+      {
+        "py/tuple": [
+          255,
+          255,
+          0
+        ]
+      },
+      {
+        "py/tuple": [
+          160,
+          160,
+          0
+        ]
+      },
+      {
+        "py/tuple": [
+          0,
+          255,
+          0
+        ]
+      }
+    ]
+  },
+  "bev_semantics_height": 192,
+  "bev_semantics_width": 192,
+  "buffer_size": 200000,
+  "capture_video": false,
+  "clip_coef": 0.1,
+  "clip_vloss": false,
+  "comfort_penalty_factor": 0.5,
+  "comfort_penalty_ticks": 500,
+  "compile_model": false,
+  "condition_outside_junction": true,
+  "consider_tl": true,
+  "correlated_noise_rho": 0.8,
+  "cpu_collect": false,
+  "critic_lr": 0.0001,
+  "critic_warmup_steps": 50000,
+  "cuda": true,
+  "current_eval_interval_idx": 0,
+  "current_learning_rate": 1e-05,
+  "dd_ppo_min_perc": 0.25,
+  "dd_ppo_preempt_threshold": 0.6,
+  "debug": false,
+  "debug_viz": false,
+  "debug_viz_burst_len": 1000,
+  "debug_viz_every_n": 1,
+  "debug_viz_image_scale": 3,
+  "debug_viz_max_images": 0,
+  "disable_learned_noise_head": true,
+  "disable_residual_route": true,
+  "distribution": "beta",
+  "ego_extent_x": 2.44619083404541,
+  "ego_extent_y": 0.9183566570281982,
+  "ego_extent_z": 0.7451388239860535,
+  "ego_forecast_min_speed": 2.5,
+  "ego_forecast_time": 1.0,
+  "ent_coef": 0.01,
+  "eval_intervals": {
+    "py/tuple": [
+      0.1,
+      0.2,
+      0.3,
+      0.4,
+      0.5,
+      0.6,
+      0.7,
+      0.8,
+      0.9
+    ]
+  },
+  "eval_time": 1200.0,
+  "exp_name": "TD3_idun_baseline",
+  "expl_coef": 0.05,
+  "exploration_noise": 0.15,
+  "features_dim": 256,
+  "frame_rate": 10.0,
+  "gae": true,
+  "gae_lambda": 0.95,
+  "gamma": 0.99,
+  "global_step": 0,
+  "gpu_ids": [
+    0
+  ],
+  "green_wave_prob": 0.05,
+  "gym_id": "CARLAEnvTFv6-v0",
+  "heading_amplitude1_std_init": 0.07,
+  "heading_amplitude2_std_init": 0.03,
+  "history_idx": [
+    -16,
+    -11,
+    -6,
+    -1
+  ],
+  "history_idx_2": [
+    -16,
+    -11,
+    -6
+  ],
+  "hl_gauss_bucket_size": 1.0,
+  "hl_gauss_num_classes": 41,
+  "hl_gauss_std": 0.75,
+  "hl_gauss_vmax": 30.0,
+  "hl_gauss_vmin": -10.0,
+  "image_encoder": "roach",
+  "keep_every": 100000,
+  "kl_early_stop": 0,
+  "kl_to_reference_coef": 0.0001,
+  "lane_dist_penalty_softener": 1.0,
+  "lane_distance_violation_threshold": 0.3,
+  "latest_iteration": 0,
+  "learning_rate": 1e-05,
+  "learning_starts": 10000,
+  "light_radius": 15.0,
+  "load_file": "/cluster/home/erikhbj/master/master-spring-ad-lead/outputs/rl_logs/TD3_idun_baseline/model_latest_000001440000.pth",
+  "log_std_head_lr_mult": 5.0,
+  "log_std_init": -4.0,
+  "log_std_init_route": null,
+  "log_std_init_speed": null,
+  "log_std_max": 1.0,
+  "log_std_min": -5.0,
+  "logdir": "/cluster/home/erikhbj/master/master-spring-ad-lead/outputs/rl_logs",
+  "logger_region_of_interest": 30.0,
+  "logging_freq": 10,
+  "lowrank_route_rank": 6,
+  "lowrank_route_std_init": 0.015,
+  "lr_schedule": "linear",
+  "lr_schedule_cosine_restarts": {
+    "py/tuple": [
+      0.0,
+      0.25,
+      0.5,
+      0.75,
+      1.0
+    ]
+  },
+  "lr_schedule_step": 8,
+  "lr_schedule_step_factor": 0.1,
+  "lr_schedule_step_perc": {
+    "py/tuple": [
+      0.5,
+      0.75
+    ]
+  },
+  "map_folder": "maps_low_res",
+  "matmul_precision": "highest",
+  "max_abs_lat_accel": 9.0,
+  "max_abs_lon_jerk": 30.0,
+  "max_abs_mag_jerk": 30.0,
+  "max_abs_yaw_accel": 3.0,
+  "max_abs_yaw_rate": 1.0,
+  "max_avg_steer_angle": 60.0,
+  "max_change": 0.25,
+  "max_grad_norm": 5.0,
+  "max_lon_accel": 10.0,
+  "max_overspeed_value_threshold": 2.23,
+  "max_pedestrian_detection_number": 10,
+  "max_speed_actor": 33.33,
+  "max_training_score": -Infinity,
+  "max_vehicle_detection_number": 10,
+  "min_ext_bounding_box": 0.8,
+  "min_lon_accel": -20.0,
+  "min_speed_actor": -2.67,
+  "min_temperature": 0.1,
+  "min_thresh_lat_dist": 3.5,
+  "n_step_exploration": 100,
+  "n_step_returns": 1,
+  "noise_ramp": false,
+  "norm_adv": false,
+  "normal_dist_action_dep_std": true,
+  "normal_dist_init": {
+    "py/tuple": [
+      {
+        "py/tuple": [
+          0,
+          -2
+        ]
+      },
+      {
+        "py/tuple": [
+          0,
+          -2
+        ]
+      }
+    ]
+  },
+  "normalize_rewards": false,
+  "num_envs": 1,
+  "num_envs_per_proc": 1,
+  "num_lstm_layers": 1,
+  "num_route_points_rendered": 80,
+  "num_value_measurements": 3,
+  "obs_num_channels": 15,
+  "obs_num_measurements": 8,
+  "off_road_term_perc": 0.95,
+  "original_frame_rate": 20.0,
+  "path_std_base_frac": 0.15,
+  "pedestrian_distance_threshold": 15,
+  "penalize_yellow_light": false,
+  "pixels_ev_to_bottom": 40,
+  "pixels_per_meter": 5.0,
+  "ports": [
+    1204,
+    1219,
+    1234,
+    1249
+  ],
+  "py/object": "rl_finetuning.tfv6_rl_config.GlobalConfig",
+  "red_light_thickness": 3,
+  "render_green_tl": true,
+  "render_shoulder": true,
+  "render_speed_lines": false,
+  "render_yellow_time": false,
+  "residual_alpha": 0.15,
+  "residual_alpha_speed": 0.35,
+  "residual_route_rank": 1,
+  "reward_type": "simple_reward",
+  "route_points": 10,
+  "route_sampling_technique": "legacy_noise_sampling",
+  "route_width": 16,
+  "rpo_alpha": 0.5,
+  "rr_maximum_speed": 6.0,
+  "rr_pedestrian_proximity_threshold": 9.5,
+  "rr_tl_dist_threshold": 18.0,
+  "rr_tl_offset": -1.9569526672363282,
+  "rr_vehicle_proximity_threshold": 9.5,
+  "run_dir": "",
+  "save_every": 10000,
+  "scale_bbox": true,
+  "scale_factor_vehicle": 1.0,
+  "scale_factor_walker": 2.0,
+  "scale_mask_col": 1.0,
+  "seed": 0,
+  "skip_perception_heads": true,
+  "speed_history_len": 0,
+  "speed_sampling_style": "native_categorical",
+  "speed_temperature": 1.0,
+  "speeding_infraction": true,
+  "standstill_speed_hold_ego_speed_threshold": 0.1,
+  "standstill_speed_hold_enabled": false,
+  "standstill_speed_hold_frames": 1,
+  "standstill_speed_hold_target_speed_threshold": 0.2777777777777778,
+  "start_delay_frames": 20,
+  "stream_obs_minibatches_from_cpu_to_save_gpu_memory": false,
+  "survival_reward_magnitude": 0.0001,
+  "target_kl": 0.015,
+  "target_noise_clip": 0.5,
+  "target_policy_noise": 0.2,
+  "tau": 0.005,
+  "td3_batch_size": 256,
+  "terminal_hint": 1.0,
+  "terminal_penalty_warmup_n": 20,
+  "terminal_reward": 0.0,
+  "tfv6_checkpoint": "/cluster/home/erikhbj/master/master-spring-ad-lead/outputs/checkpoints/tfv6_resnet34",
+  "tfv6_prefix": "model",
+  "time_interval": 0.1,
+  "torch_deterministic": true,
+  "total_batch_size": 512,
+  "total_minibatch_size": 256,
+  "total_timesteps": 2000000,
+  "track": false,
+  "train_planning_decoder_only": true,
+  "transformer_concat_coef_action_to_head_after_decoder": false,
+  "ttc_penalty_ticks": 500,
+  "ttc_resolution": 2,
+  "uniform_percentage_z": 0.03,
+  "update_epochs": 4,
+  "use_comfort_infraction": false,
+  "use_correlated_noise": false,
+  "use_dd_ppo_preempt": false,
+  "use_exploration_suggest": false,
+  "use_extra_control_inputs": false,
+  "use_green_wave": false,
+  "use_history": false,
+  "use_hl_gauss_value_loss": false,
+  "use_kl_to_reference": false,
+  "use_layer_norm": false,
+  "use_layer_norm_policy_head": true,
+  "use_leave_route_done": false,
+  "use_lstm": false,
+  "use_max_change_penalty": false,
+  "use_min_speed_infraction": false,
+  "use_new_bev_obs": false,
+  "use_new_stop_sign_detector": true,
+  "use_off_road_term": true,
+  "use_outside_route_lanes": true,
+  "use_perc_progress": false,
+  "use_positional_encoding": false,
+  "use_residual_policy": true,
+  "use_rl_termination_hint": true,
+  "use_rpo": false,
+  "use_shoulder_channel": false,
+  "use_single_reward": true,
+  "use_speed_limit_as_max_speed": false,
+  "use_survival_reward": false,
+  "use_target_point": false,
+  "use_temperature": false,
+  "use_termination_hint": true,
+  "use_ttc": false,
+  "use_value_measurements": true,
+  "use_vehicle_close_penalty": false,
+  "utd_actor": 0.5,
+  "utd_ratio": 1.0,
+  "value_head_lr_mult": 1.0,
+  "vehicle_distance_threshold": 15,
+  "vf_coef": 0.5,
+  "visualize": false,
+  "wandb_entity": null,
+  "wandb_project_name": "ppo-roach",
+  "weight_decay": 0.0
+}
